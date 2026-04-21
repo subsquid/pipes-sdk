@@ -59,7 +59,7 @@ class Runner<T extends SerializableObject = any> {
 
     await Promise.all(
       this.pipes.map(async (pipe) => {
-        const maxAttempts = this.config.retry || 5
+        const maxAttempts = this.config.retry ?? 5
         let attempts = 0
 
         const logger = this.#logger.child({ id: pipe.id })
