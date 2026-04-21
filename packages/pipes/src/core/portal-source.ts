@@ -503,10 +503,17 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
 
     // If there are multiple transformers with the same ID, we append a numeric suffix to make them unique
     // This is important for profiling and logging to avoid confusion between transformers
-    // when analyzing performance or debugging issues
-    const exists = this.#transformers.filter((t) => t.id() === id)
-    if (exists.length) {
-      transformer.setId(`${id} ${exists.length + 1}`)
+    // when analyzing performance or debugging issues.
+    // A suffix is checked against every current id, since an earlier transformer may already hold `foo 2`.
+    let candidate = id
+    let n = 2
+
+    while (this.#transformers.some((t) => t.id() === candidate)) {
+      candidate = `${id} ${n++}`
+    }
+
+    if (candidate !== id) {
+      transformer.setId(candidate)
     }
 
     return new PortalStream<Q, Out>({

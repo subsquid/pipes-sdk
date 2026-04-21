@@ -851,6 +851,27 @@ describe('pipe/pipeTo type guards', () => {
   })
 })
 
+describe('pipe() transformer ids', () => {
+  withPortal('gives each of 3+ same-id transformers its own id', async ({ portal: serve }) => {
+    const portal = await serve({ latest: 1 })
+
+    const stream = evmPortalStream({
+      id: 'test',
+      portal: portal.url,
+      outputs: blockDecoder({ from: 0, to: 1 }),
+    })
+
+    const duplicate = () => createTransformer<any, any>({ profiler: { name: 'dup' }, transform: (data) => data })
+    const transformers = [duplicate(), duplicate(), duplicate(), duplicate()]
+    const [t1, t2, t3, t4] = transformers
+
+    stream.pipe(t1).pipe(t2).pipe(t3).pipe(t4)
+
+    const ids = transformers.map((t) => t.id())
+    expect(ids).toEqual(['dup', 'dup 2', 'dup 3', 'dup 4'])
+  })
+})
+
 describe('finalized-only targets', () => {
   let portal: MockPortal
 
