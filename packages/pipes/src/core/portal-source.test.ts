@@ -3,7 +3,7 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { SpanHooks } from '~/core/profiling.js'
 import { Target, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
-import { evmPortalStream } from '~/evm/index.js'
+import { evmPortalStream, evmQuery } from '~/evm/index.js'
 import { MockPortal, blockDecoder, finalizedMockPortal, mockPortal, readAll } from '~/testing/index.js'
 
 /**
@@ -356,6 +356,58 @@ describe('Portal abstract stream', () => {
           `Please refer to the documentation on how to handle forks.`,
         ].join('\n'),
       )
+    })
+  })
+
+  describe('resume anchor (multi-range)', () => {
+    // ADR-20: the recovered cursor's hash is the parent-linkage anchor only for the range that
+    // continues directly from it (from === cursor.number + 1). Carrying it into a later disjoint
+    // range makes the portal check that hash against a block it doesn't border — a spurious
+    // 409/fork. The anchor must be scoped to the continuation range only.
+    it('anchors only the range continuing from the resume cursor, not disjoint later ranges', async () => {
+      const requests: any[] = []
+
+      portal = await mockPortal([
+        {
+          statusCode: 200,
+          data: [{ header: { number: 200, hash: '0xA200', timestamp: 200_000 } }],
+          head: { finalized: { number: 200, hash: '0xA200' }, latest: { number: 200 } },
+          validateRequest: (r) => requests.push(r),
+        },
+        {
+          statusCode: 200,
+          data: [{ header: { number: 5001, hash: '0xB5001', timestamp: 5_001_000 } }],
+          head: { finalized: { number: 5001, hash: '0xB5001' }, latest: { number: 5001 } },
+          validateRequest: (r) => requests.push(r),
+        },
+      ])
+
+      const outputs = evmQuery()
+        .addRange({ from: 100, to: 200 })
+        .addRange({ from: 5000, to: 5001 })
+        .addFields({ block: { number: true, hash: true, timestamp: true } })
+        .build()
+        .pipe((d) => d.flatMap((b) => b.header))
+
+      const stream = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs,
+      })
+
+      const target = createTarget({
+        write: async ({ read }) => {
+          for await (const _ of read({ latest: { number: 150, hash: '0xresume' }, finalized: null })) {
+          }
+        },
+      })
+
+      await stream.pipeTo(target as any)
+
+      expect(requests.map((r) => ({ fromBlock: r.fromBlock, parentBlockHash: r.parentBlockHash }))).toEqual([
+        { fromBlock: 151, parentBlockHash: '0xresume' },
+        { fromBlock: 5000, parentBlockHash: undefined },
+      ])
     })
   })
 

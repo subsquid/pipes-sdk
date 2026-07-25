@@ -175,7 +175,6 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-8 | Fork-signal handling crashes uncoded on an empty canonical chain (exception constructor) before the coded guard runs | WP-41, FM-14 | P2 | fork response with empty chain → assert coded error, not raw crash |
 | GAP-9 | Canonical-chain-below-cursor guard enforced by one binding only; others can strand orphan rows above the new chain | RP-43, FM-15 | P2 | fork with max(canonical) < cursor against each class; assert coded refusal |
 | GAP-10 | ClickHouse and BigQuery order cursor records by wall-clock timestamp (resume + fork-record + retention ordering; BigQuery's per-process monotonic counter resets on restart); clock regression can misorder — violates clock independence | CN-45, CN-15 | P2 | two commits under a regressed clock, per binding; resume must pick commit-order latest |
-| GAP-11 | Confirmed: the resume parent-hash anchor is sent for every configured range, including later disjoint ranges where it is not the range predecessor — a resumed multi-range run gets a spurious 409/fork on the later range | WP-1, IB-3 | P1 | two disjoint ranges + resume; simulator asserts anchor semantics per request |
 | GAP-12 | Class-W binding assumes single-writer (client-assigned monotonic timestamps) with no lock and no detection; dual instance corrupts undetected | INV-15 (declaration) | P3 | document in IB-24; optional fencing probe |
 | GAP-13 | No automated sync between thrown error codes and the registry; the "all codes cross-checked" claim is manual | REQ-13, IB-50 | P3 | enumerate codes from source; diff against IB-50 table |
 | GAP-14 | Crash-recovery kill-point coverage exists only for class K; classes T/W/A have no kill-point tests | INV-40…INV-42 | P1 | Phase-0 ledger mode first (an ordinal script cannot answer the post-restart re-request), then the kill-point harness at the T transaction boundary |
@@ -204,7 +203,7 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 - **Phase 0 — harness skeleton**: the reference implementation already serves the
   simulator's wire surface from an HTTP fixture (200 NDJSON · 204 · 409 with canonical
   chain · 5xx · head headers, IB-4/IB-5) with a per-request assertion hook — sufficient
-  as-is for request-shape work (GAP-11). The Phase-0 delta is **ledger mode**:
+  as-is for request-shape work (resume-anchor scoping, ADR-20). The Phase-0 delta is **ledger mode**:
   derive responses from the request anchor (IB-3) against a held chain instead of
   selecting them by request ordinal. An ordinal script has no answer for the re-request
   a restarted SUT issues from its recovered cursor, so this gates the entire CT-2
@@ -214,7 +213,7 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
   class (K — cheapest, file-based; the only crash imitation today is a pre-commit
   abort, one point of the CT-2 matrix). Exit: CT-1 green on the reference
   implementation for S1, ledger mode answering post-restart re-requests.
-- **Phase 1 — P1 gaps**: GAP-11 (range anchors), GAP-14 kill-point harness for class T
+- **Phase 1 — P1 gaps**: range anchors (landed under ADR-20), GAP-14 kill-point harness for class T
   (and the class-A no-hook recovery window, now an accepted deviation under ADR-15). Exit:
   register updated, fixes landed or accepted as documented deviations.
 - **Phase 2 — correctness core**: full CT-2 matrix all classes; CT-3 fork suite; CT-5

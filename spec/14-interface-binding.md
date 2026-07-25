@@ -20,8 +20,11 @@ arrays are per-entity filter lists (IB-8).
 
 **IB-3 — Anchor advance.** After each received block: `fromBlock ← number+1`,
 `parentBlockHash ← hash`. The anchor is the fork-detection mechanism; the first request
-of a resumed run carries the recovered cursor's hash. *(Anchor semantics on later
-disjoint ranges: GAP-11.)*
+of a resumed run carries the recovered cursor's hash — but only on the range that
+continues directly from it (`fromBlock = cursor.number+1`). A later disjoint range starts
+unanchored (no `parentBlockHash`) and re-establishes the anchor from its own first block;
+carrying the cursor's hash across the gap would fault a 409 against a block it never
+precedes (ADR-20).
 
 **IB-4 — Fork signal.** HTTP **409** on stream requests; body key `previousBlocks`: the
 canonical chain as `[{number, hash}, …]` (spec name: DEF-10). The wire key is frozen —
