@@ -117,7 +117,9 @@ type TransformationResult = {
   children: TransformationResult[]
 }
 
-function packPreview(value: any): any {
+export function packPreview(value: any, depth = 0): any {
+  if (depth > 8) return '[Truncated]'
+
   if (Array.isArray(value)) {
     if (
       value.length <= 10 &&
@@ -127,10 +129,10 @@ function packPreview(value: any): any {
     }
 
     if (value.length > 10) {
-      return [packPreview(value[0]), `... ${value.length - 1} more ...`]
+      return [packPreview(value[0], depth + 1), `... ${value.length - 1} more ...`]
     }
 
-    return value.map(packPreview)
+    return value.map((v) => packPreview(v, depth + 1))
   }
 
   if (value === null || value instanceof Date) return value
@@ -138,7 +140,7 @@ function packPreview(value: any): any {
   if (typeof value === 'object') {
     const res: any = {}
     for (const key in value) {
-      res[key] = packPreview(value[key])
+      res[key] = packPreview(value[key], depth + 1)
     }
     return res
   }
