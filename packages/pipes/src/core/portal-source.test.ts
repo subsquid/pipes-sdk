@@ -360,10 +360,8 @@ describe('Portal abstract stream', () => {
   })
 
   describe('resume anchor (multi-range)', () => {
-    // ADR-20: the recovered cursor's hash is the parent-linkage anchor only for the range that
-    // continues directly from it (from === cursor.number + 1). Carrying it into a later disjoint
-    // range makes the portal check that hash against a block it doesn't border — a spurious
-    // 409/fork. The anchor must be scoped to the continuation range only.
+    // ADR-20: the cursor's hash anchors only the range that continues from it; carried into a
+    // later disjoint range it faults a spurious 409/fork against a block it doesn't border.
     it('anchors only the range continuing from the resume cursor, not disjoint later ranges', async () => {
       const requests: any[] = []
 
