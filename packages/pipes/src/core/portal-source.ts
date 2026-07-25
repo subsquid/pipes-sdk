@@ -221,13 +221,20 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     }
 
     for (const { range, request } of bounded) {
+      // The recovered cursor's hash is the parent-linkage anchor only for the range that
+      // continues directly from it. Any later disjoint range starts across a gap the cursor does
+      // not border, so anchoring it there makes the portal compare that hash against a block it
+      // never precedes — a spurious 409/fork on resume. Such ranges start unanchored; the anchor
+      // re-establishes from their own first block (ADR-20).
+      const isResumeContinuation = cursor?.hash != null && range.from === cursor.number + 1
+
       const query = {
         ...request,
         type: this.#queryBuilder.getType(),
         fields: this.#queryBuilder.getFields(),
         fromBlock: range.from,
         toBlock: range.to,
-        parentBlockHash: cursor?.hash ? cursor.hash : undefined,
+        parentBlockHash: isResumeContinuation ? cursor.hash : undefined,
       }
 
       const source = this.#options.cache
