@@ -5,7 +5,7 @@ import path from 'node:path'
 import { ParquetReader, ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { type PortalRange, createTarget } from '~/core/index.js'
+import { type PortalRange, type SpanHooks, createTarget } from '~/core/index.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
 import { type MockPortal, type MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
 
@@ -118,6 +118,34 @@ async function readLogs(dir: string): Promise<LogRow[]> {
   }))
 
   return rows.sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex)
+}
+
+/**
+ * Records every span the source opens as a `>`-joined path ("batch > parquet > flush batch"), so a
+ * test can assert nesting and not just that some span with a given name existed.
+ */
+function spanTracker() {
+  const started: string[] = []
+  const ended: string[] = []
+
+  const track = (path: string): SpanHooks => ({
+    onStart: (name) => {
+      const child = path ? `${path} > ${name}` : name
+      started.push(child)
+
+      return track(child)
+    },
+    onEnd: () => {
+      ended.push(path)
+    },
+  })
+
+  return {
+    hooks: track(''),
+    /** Span paths under the target's own span, in the order they opened. */
+    targetSpans: () => started.filter((p) => p.startsWith('batch > parquet')),
+    unended: () => started.filter((p) => p.startsWith('batch > parquet') && !ended.includes(p)),
+  }
 }
 
 /** Writes a Parquet file directly (used to seed stale/over-cursor files for recovery tests). */
@@ -1051,6 +1079,65 @@ describe('parquetTarget', () => {
       )
 
       expect((await readBlocks(dir)).map((r) => r.blockNumber)).toEqual([1, 2, 3])
+    })
+  })
+
+  describe('profiling', () => {
+    it('opens a target span per batch, with a child span per phase', async () => {
+      portal = await mockPortal([blocksResponse([1, 2, 3], 3)])
+      const spans = spanTracker()
+
+      // The checkpoint has to fire inside the batch (that is where a span exists to nest under);
+      // `intervalBlocks` triggers off the cursor, so unlike `maxBytes` it doesn't depend on the
+      // write stream having reached disk by the time `size()` stats it.
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        profiler: spans.hooks,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        parquetTarget({
+          dir,
+          tables: [BLOCKS_TABLE],
+          settings: { rollover: { intervalBlocks: 1 } },
+          onData: insertBlocks,
+        }),
+      )
+
+      expect(spans.targetSpans()).toEqual([
+        'batch > parquet',
+        'batch > parquet > data handler',
+        'batch > parquet > flush batch',
+        'batch > parquet > checkpoint (interval-blocks)',
+        'batch > parquet > checkpoint (interval-blocks) > publish files',
+        'batch > parquet > checkpoint (interval-blocks) > save cursor',
+      ])
+      expect(spans.unended()).toEqual([])
+    })
+
+    it('closes the target span when the batch throws', async () => {
+      portal = await mockPortal([blocksResponse([1, 2, 3], 3)])
+      const spans = spanTracker()
+
+      await expect(
+        evmPortalStream({
+          id: 'test',
+          portal: portal.url,
+          profiler: spans.hooks,
+          outputs: blockDecoder({ from: 0, to: 3 }),
+        }).pipeTo(
+          parquetTarget({
+            dir,
+            tables: [BLOCKS_TABLE],
+            onData: () => {
+              throw new Error('onData failed')
+            },
+          }),
+        ),
+      ).rejects.toThrowError('onData failed')
+
+      expect(spans.targetSpans()).toEqual(['batch > parquet', 'batch > parquet > data handler'])
+      expect(spans.unended()).toEqual([])
     })
   })
 
