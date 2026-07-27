@@ -6,6 +6,7 @@ import {
   type HookContext,
   type Logger,
   type Metrics,
+  type Profiler,
   type Range,
   createTarget,
   formatBlock,
@@ -191,6 +192,11 @@ export function parquetTarget<T>(options: {
         // so the source can re-seed its watermark after an unclean restart. Seeded from resume state.
         let lastFinalized: BlockCursor | undefined = resumeState?.finalized ?? undefined
 
+        // The current batch's target span, which checkpoint() hangs its own spans off. Undefined
+        // outside a batch: the source ends the batch span as soon as the loop body returns, so the
+        // stream-end checkpoint has no live parent to attach to and simply runs unmeasured.
+        let batchSpan: Profiler | undefined
+
         const checkpoint = async (
           cursor: BlockCursor,
           reason: string,
@@ -198,131 +204,153 @@ export function parquetTarget<T>(options: {
           owingTables?: string[],
         ): Promise<void> => {
           const startedMs = Date.now()
-          // Files are named for the window they cover, which ends at the cursor being committed —
-          // so publish must see the same cursor that is about to be persisted.
-          const published = await store.publishAll(cursor.number, { closeTails, tables: owingTables })
+          const span = batchSpan?.start({ name: `checkpoint (${reason})`, labels: 'db' })
 
-          // A stalled boundary can re-trigger rotation on every batch while no writer has a window
-          // to name yet; rewriting an identical state file (two fsyncs) each time buys nothing.
-          if (published.length === 0 && cursor.number === lastCheckpointBlock) {
-            lastCheckpointMs = Date.now()
+          try {
+            // Files are named for the window they cover, which ends at the cursor being committed —
+            // so publish must see the same cursor that is about to be persisted.
+            const published = await measure(span, 'publish files', () =>
+              store.publishAll(cursor.number, { closeTails, tables: owingTables }),
+            )
 
-            return
-          }
+            // A stalled boundary can re-trigger rotation on every batch while no writer has a window
+            // to name yet; rewriting an identical state file (two fsyncs) each time buys nothing.
+            if (published.length === 0 && cursor.number === lastCheckpointBlock) {
+              lastCheckpointMs = Date.now()
 
-          await state.saveCursor(cursor, lastFinalized, store.coverage())
-
-          if (metrics) {
-            for (const file of published) {
-              metrics.bytesWritten.inc({ id: metricsId, table: file.table }, file.bytes)
-              metrics.filesPublished.inc({ id: metricsId, table: file.table }, 1)
+              return
             }
-            metrics.checkpointDuration.observe({ id: metricsId }, (Date.now() - startedMs) / 1000)
-          }
 
-          lastCheckpointMs = Date.now()
-          lastCheckpointBlock = cursor.number
+            await measure(span, 'save cursor', () => state.saveCursor(cursor, lastFinalized, store.coverage()))
 
-          if (published.length > 0) {
-            const rows = published.reduce((s, f) => s + f.rows, 0)
-            const bytes = published.reduce((s, f) => s + f.bytes, 0)
-            logger.info({
-              message: `checkpoint (${reason}): published ${published.length} file(s), ${formatNumber(rows)} rows / ${humanBytes(bytes)}, cursor → block ${formatBlock(cursor.number)}`,
-              files: published.map((f) => f.path),
-            })
-          } else {
-            logger.debug(`checkpoint (${reason}): no open files, cursor → block ${formatBlock(cursor.number)}`)
+            if (metrics) {
+              for (const file of published) {
+                metrics.bytesWritten.inc({ id: metricsId, table: file.table }, file.bytes)
+                metrics.filesPublished.inc({ id: metricsId, table: file.table }, 1)
+              }
+              metrics.checkpointDuration.observe({ id: metricsId }, (Date.now() - startedMs) / 1000)
+            }
+
+            lastCheckpointMs = Date.now()
+            lastCheckpointBlock = cursor.number
+
+            if (published.length > 0) {
+              const rows = published.reduce((s, f) => s + f.rows, 0)
+              const bytes = published.reduce((s, f) => s + f.bytes, 0)
+              logger.info({
+                message: `checkpoint (${reason}): published ${published.length} file(s), ${formatNumber(rows)} rows / ${humanBytes(bytes)}, cursor → block ${formatBlock(cursor.number)}`,
+                files: published.map((f) => f.path),
+              })
+            } else {
+              logger.debug(`checkpoint (${reason}): no open files, cursor → block ${formatBlock(cursor.number)}`)
+            }
+          } finally {
+            span?.end()
           }
         }
 
         for await (const { data, ctx } of read(resumeState)) {
-          if (!metrics) {
-            metrics = registerParquetMetrics(ctx.metrics)
-            metricsId = ctx.id
-            // Seeded on the first batch because `stream.state` only exists once the source has
-            // resolved its ranges. Fallback for a table the state doesn't cover yet:
-            //   - Resuming: cursor + 1. `initial` is the *configured* query start (pre-resume), so
-            //     using it here would let the first file claim blocks an earlier run already wrote.
-            //   - Cold start: `initial` — the stream's configured start. Hardcoding 0 instead would
-            //     make a backfill from block N claim to cover 0..N of blocks it never looked at.
-            const clamped = store.seedCoverage(
-              state.coverage,
-              startCursor ? startCursor.number + 1 : ctx.stream.state.initial,
-              ctx.stream.state.ranges,
-            )
-            for (const { table, persisted, seeded } of clamped) {
-              logger.warn(
-                `Persisted coverage for table '${table}' starts at block ${formatBlock(persisted)}, ahead of ` +
-                  `block ${formatBlock(seeded)} — the furthest a file could start for the committed cursor. ` +
-                  `Seeding ${formatBlock(seeded)} instead, so the blocks after the cursor stay claimed. This is ` +
-                  `expected if the configured query ranges changed since the state file was written.`,
+          // Everything this target does for the batch hangs off one span, so a trace shows the
+          // target's share of the batch next to the source's `fetch data` and the transformers.
+          const target = ctx.profiler.start({ name: 'parquet', labels: 'db' })
+          batchSpan = target
+
+          try {
+            if (!metrics) {
+              metrics = registerParquetMetrics(ctx.metrics)
+              metricsId = ctx.id
+              // Seeded on the first batch because `stream.state` only exists once the source has
+              // resolved its ranges. Fallback for a table the state doesn't cover yet:
+              //   - Resuming: cursor + 1. `initial` is the *configured* query start (pre-resume), so
+              //     using it here would let the first file claim blocks an earlier run already wrote.
+              //   - Cold start: `initial` — the stream's configured start. Hardcoding 0 instead would
+              //     make a backfill from block N claim to cover 0..N of blocks it never looked at.
+              const clamped = store.seedCoverage(
+                state.coverage,
+                startCursor ? startCursor.number + 1 : ctx.stream.state.initial,
+                ctx.stream.state.ranges,
               )
+              for (const { table, persisted, seeded } of clamped) {
+                logger.warn(
+                  `Persisted coverage for table '${table}' starts at block ${formatBlock(persisted)}, ahead of ` +
+                    `block ${formatBlock(seeded)} — the furthest a file could start for the committed cursor. ` +
+                    `Seeding ${formatBlock(seeded)} instead, so the blocks after the cursor stay claimed. This is ` +
+                    `expected if the configured query ranges changed since the state file was written.`,
+                )
+              }
             }
-          }
 
-          // Crossing from one configured range into a later one: the blocks between them are never
-          // fetched, so every table must close its coverage at the old range's end before anything
-          // names a window on the far side of the gap. The tail closes at `lastBoundary` itself and
-          // never at a re-labelled copy of it — a cursor pairing one block's number with another
-          // block's hash would be persisted, and the next resume would hand the portal that hash as
-          // its parent. `lastBoundary` is the previous batch's min(finalized, current) and
-          // `openRange` is the range that batch's `current` fell in, so it is inside the range;
-          // the guard covers `openRange` having gone stale over a batch outside every range.
-          const range = rangeOf(ctx.stream.state.ranges, ctx.stream.state.current.number)
-          const tail = lastBoundary
-          if (
-            openRange !== undefined &&
-            range !== undefined &&
-            range.from > openRange.from &&
-            tail !== undefined &&
-            tail.number <= (openRange.to ?? Number.POSITIVE_INFINITY)
-          ) {
-            const owing = store.tablesOwingCoverage(tail.number)
-            if (owing.length > 0) {
-              await checkpoint(tail, 'range-end', true, owing)
+            // Crossing from one configured range into a later one: the blocks between them are never
+            // fetched, so every table must close its coverage at the old range's end before anything
+            // names a window on the far side of the gap. The tail closes at `lastBoundary` itself and
+            // never at a re-labelled copy of it — a cursor pairing one block's number with another
+            // block's hash would be persisted, and the next resume would hand the portal that hash as
+            // its parent. `lastBoundary` is the previous batch's min(finalized, current) and
+            // `openRange` is the range that batch's `current` fell in, so it is inside the range;
+            // the guard covers `openRange` having gone stale over a batch outside every range.
+            const range = rangeOf(ctx.stream.state.ranges, ctx.stream.state.current.number)
+            const tail = lastBoundary
+            if (
+              openRange !== undefined &&
+              range !== undefined &&
+              range.from > openRange.from &&
+              tail !== undefined &&
+              tail.number <= (openRange.to ?? Number.POSITIVE_INFINITY)
+            ) {
+              const owing = store.tablesOwingCoverage(tail.number)
+              if (owing.length > 0) {
+                await checkpoint(tail, 'range-end', true, owing)
+              }
             }
+            openRange = range ?? openRange
+
+            // A configured range the stream skipped entirely (it yielded no batch, so the crossing
+            // above never fired for it) must not be folded into the next file's coverage. Advance any
+            // table still lagging below the current range's start up to it — this also runs on the
+            // first batch after a restart, where there is no `openRange` transition to detect.
+            if (range !== undefined) {
+              store.advanceCoverageInto(range.from)
+            }
+
+            // 1. user stages rows via store.insert(...)
+            await target.measure('data handler', async (profiler) => {
+              await onData({ store, data, ctx: { logger, profiler } })
+            })
+
+            // 2. finalization + the cursor this batch could checkpoint to. The boundary carries the
+            //    HASH needed for resume; boundary.number = min(finalized, current), correct for
+            //    backfill / tip / no-finality / straddling batches. `finalized` is already clamped by
+            //    the source, so it never regresses — persist it as the restart-seed floor.
+            const finalized = ctx.stream.head.finalized
+            if (finalized) {
+              lastFinalized = finalized
+            }
+            const current = ctx.stream.state.current
+            const finalization: Finalization = { finalized, rollbackChain: ctx.stream.state.rollbackChain }
+            const boundaryCursor = finalized && finalized.number <= current.number ? finalized : current
+            lastBoundary = boundaryCursor
+
+            // 3. release finalized rows into the (lazily-opened) writers.
+            const appended = await target.measure({ name: 'flush batch', labels: 'db' }, () =>
+              store.flushBatch(finalization),
+            )
+            for (const stat of appended) {
+              metrics.rowsWritten.inc({ id: ctx.id, table: stat.table }, stat.rows)
+            }
+
+            // 4. checkpoint on any rollover trigger.
+            const reasons: string[] = []
+            if (await store.shouldRotate({ maxBytes, maxRows })) reasons.push('size')
+            if (intervalMs !== undefined && Date.now() - lastCheckpointMs >= intervalMs) reasons.push('interval-ms')
+            if (intervalBlocks !== undefined && boundaryCursor.number - lastCheckpointBlock >= intervalBlocks) {
+              reasons.push('interval-blocks')
+            }
+
+            if (reasons.length > 0) await checkpoint(boundaryCursor, reasons.join('+'))
+          } finally {
+            batchSpan = undefined
+            target.end()
           }
-          openRange = range ?? openRange
-
-          // A configured range the stream skipped entirely (it yielded no batch, so the crossing
-          // above never fired for it) must not be folded into the next file's coverage. Advance any
-          // table still lagging below the current range's start up to it — this also runs on the
-          // first batch after a restart, where there is no `openRange` transition to detect.
-          if (range !== undefined) {
-            store.advanceCoverageInto(range.from)
-          }
-
-          // 1. user stages rows via store.insert(...)
-          await onData({ store, data, ctx: { logger, profiler: ctx.profiler } })
-
-          // 2. finalization + the cursor this batch could checkpoint to. The boundary carries the
-          //    HASH needed for resume; boundary.number = min(finalized, current), correct for
-          //    backfill / tip / no-finality / straddling batches. `finalized` is already clamped by
-          //    the source, so it never regresses — persist it as the restart-seed floor.
-          const finalized = ctx.stream.head.finalized
-          if (finalized) {
-            lastFinalized = finalized
-          }
-          const current = ctx.stream.state.current
-          const finalization: Finalization = { finalized, rollbackChain: ctx.stream.state.rollbackChain }
-          const boundaryCursor = finalized && finalized.number <= current.number ? finalized : current
-          lastBoundary = boundaryCursor
-
-          // 3. release finalized rows into the (lazily-opened) writers.
-          const appended = await store.flushBatch(finalization)
-          for (const stat of appended) {
-            metrics.rowsWritten.inc({ id: ctx.id, table: stat.table }, stat.rows)
-          }
-
-          // 4. checkpoint on any rollover trigger.
-          const reasons: string[] = []
-          if (await store.shouldRotate({ maxBytes, maxRows })) reasons.push('size')
-          if (intervalMs !== undefined && Date.now() - lastCheckpointMs >= intervalMs) reasons.push('interval-ms')
-          if (intervalBlocks !== undefined && boundaryCursor.number - lastCheckpointBlock >= intervalBlocks) {
-            reasons.push('interval-blocks')
-          }
-
-          if (reasons.length > 0) await checkpoint(boundaryCursor, reasons.join('+'))
         }
 
         // 5. stream end — flush open writers, close every table's trailing coverage and persist the
@@ -353,6 +381,15 @@ export function parquetTarget<T>(options: {
     // Published files and open writers hold only finalized rows, so they are never rolled back.
     resolveFork: (canonicalBlocks) => store.resolveFork(canonicalBlocks),
   })
+}
+
+/**
+ * `span.measure`, tolerant of there being no span. A checkpoint runs both inside a batch (where it
+ * nests under the batch's target span) and at stream end (where the source has already closed the
+ * batch span, so there is nothing to nest under and the work just runs untimed).
+ */
+function measure<T>(span: Profiler | undefined, name: string, fn: () => Promise<T>): Promise<T> {
+  return span ? span.measure({ name, labels: 'db' }, fn) : fn()
 }
 
 /** The configured range `block` falls in, or `undefined` when no ranges are recorded. */
