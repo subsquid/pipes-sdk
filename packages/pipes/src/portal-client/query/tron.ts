@@ -4,6 +4,7 @@ import {
   BOOLEAN,
   NAT,
   STRING,
+  ValidationFailure,
   Validator,
   array,
   object,
@@ -21,6 +22,24 @@ import {
   type Trues,
   project,
 } from './common.js'
+
+// The TRON portal emits negative decimal strings for `feeLimit` on some early blocks
+// (e.g. `"-18395898"` at block 51068797), so it needs a signed variant of `BIG_NAT`.
+const BIG_INT: Validator<bigint, string> = {
+  cast(value) {
+    return typeof value === 'string' && /^-?\d+$/.test(value)
+      ? BigInt(value)
+      : new ValidationFailure(value, '{value} is not a string representing an integer')
+  },
+  validate(value) {
+    return typeof value === 'string' && /^-?\d+$/.test(value)
+      ? undefined
+      : new ValidationFailure(value, '{value} is not a string representing an integer')
+  },
+  phantom() {
+    return '0'
+  },
+}
 
 // TRON portal hex strings come WITHOUT the `0x` prefix EVM uses — addresses are
 // 21-byte hex starting with `41` (e.g. `41a614f803b6...`), block/tx hashes and
@@ -245,9 +264,10 @@ const TransactionShape: ObjectValidatorShape<TransactionFields> = {
   permissionId: option(NAT),
   refBlockBytes: option(STRING),
   refBlockHash: option(STRING),
-  // TRON amounts arrive as decimal strings (e.g. "26400000"), not 0x-hex, so we
-  // use BIG_NAT (decimal string -> bigint) rather than EVM's hex-only QTY.
-  feeLimit: option(BIG_NAT),
+  // TRON amounts arrive as decimal strings (e.g. "26400000"), not 0x-hex, so we use BIG_NAT
+  // (decimal string -> bigint) rather than EVM's hex-only QTY. `feeLimit` additionally has to
+  // accept negatives, hence the signed BIG_INT.
+  feeLimit: option(BIG_INT),
   expiration: option(NAT),
   timestamp: option(NAT),
   rawDataHex: STRING,
