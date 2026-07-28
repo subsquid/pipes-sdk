@@ -1,5 +1,6 @@
 import {
   ANY,
+  BIG_NAT,
   BOOLEAN,
   NAT,
   STRING,
@@ -22,8 +23,8 @@ import {
   project,
 } from './common.js'
 
-// The TRON portal emits negative decimal strings for some transaction numeric fields on early
-// blocks (e.g. `feeLimit: "-18395898"`), so those fields use a signed variant of `BIG_NAT`.
+// The TRON portal emits negative decimal strings for `feeLimit` on some early blocks
+// (e.g. `"-18395898"` at block 51068797), so it needs a signed variant of `BIG_NAT`.
 const BIG_INT: Validator<bigint, string> = {
   cast(value) {
     return typeof value === 'string' && /^-?\d+$/.test(value)
@@ -263,29 +264,29 @@ const TransactionShape: ObjectValidatorShape<TransactionFields> = {
   permissionId: option(NAT),
   refBlockBytes: option(STRING),
   refBlockHash: option(STRING),
-  // TRON amounts arrive as decimal strings (e.g. "26400000"), not 0x-hex, so we
-  // use BIG_INT (signed decimal string -> bigint) rather than EVM's hex-only QTY; the portal
-  // emits negatives for some of these fields on early blocks.
+  // TRON amounts arrive as decimal strings (e.g. "26400000"), not 0x-hex, so we use BIG_NAT
+  // (decimal string -> bigint) rather than EVM's hex-only QTY. `feeLimit` additionally has to
+  // accept negatives, hence the signed BIG_INT.
   feeLimit: option(BIG_INT),
   expiration: option(NAT),
   timestamp: option(NAT),
   rawDataHex: STRING,
-  fee: option(BIG_INT),
+  fee: option(BIG_NAT),
   contractResult: option(STRING),
   contractAddress: option(STRING),
   resMessage: option(STRING),
-  withdrawAmount: option(BIG_INT),
-  unfreezeAmount: option(BIG_INT),
-  withdrawExpireAmount: option(BIG_INT),
+  withdrawAmount: option(BIG_NAT),
+  unfreezeAmount: option(BIG_NAT),
+  withdrawExpireAmount: option(BIG_NAT),
   cancelUnfreezeV2Amount: option(ANY),
   result: option(STRING),
-  energyFee: option(BIG_INT),
-  energyUsage: option(BIG_INT),
-  energyUsageTotal: option(BIG_INT),
-  netUsage: option(BIG_INT),
-  netFee: option(BIG_INT),
-  originEnergyUsage: option(BIG_INT),
-  energyPenaltyTotal: option(BIG_INT),
+  energyFee: option(BIG_NAT),
+  energyUsage: option(BIG_NAT),
+  energyUsageTotal: option(BIG_NAT),
+  netUsage: option(BIG_NAT),
+  netFee: option(BIG_NAT),
+  originEnergyUsage: option(BIG_NAT),
+  energyPenaltyTotal: option(BIG_NAT),
 }
 
 const LogShape: ObjectValidatorShape<LogFields> = {
