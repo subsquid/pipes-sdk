@@ -1,6 +1,5 @@
 import {
   ANY,
-  BIG_NAT,
   BOOLEAN,
   NAT,
   STRING,
@@ -23,8 +22,8 @@ import {
   project,
 } from './common.js'
 
-// The TRON portal emits negative decimal strings for `feeLimit` on some early blocks
-// (e.g. `"-18395898"` at block 51068797), so it needs a signed variant of `BIG_NAT`.
+// int64 amounts, sent as decimal strings that can be negative (e.g. `feeLimit: "-18395898"`).
+// Unsigned `BIG_NAT` would reject the negatives and halt the stream.
 const BIG_INT: Validator<bigint, string> = {
   cast(value) {
     return typeof value === 'string' && /^-?\d+$/.test(value)
@@ -38,6 +37,24 @@ const BIG_INT: Validator<bigint, string> = {
   },
   phantom() {
     return '0'
+  },
+}
+
+// int64 ms timestamps served as JSON numbers; the portal emits garbage above 2^53 that
+// `JSON.parse` has already rounded to a float, so tolerate any integer instead of `NAT`.
+const TIMESTAMP_MS: Validator<number, number> = {
+  cast(value) {
+    return typeof value === 'number' && Number.isInteger(value)
+      ? value
+      : new ValidationFailure(value, '{value} is not a millisecond timestamp')
+  },
+  validate(value) {
+    return typeof value === 'number' && Number.isInteger(value)
+      ? undefined
+      : new ValidationFailure(value, '{value} is not a millisecond timestamp')
+  },
+  phantom() {
+    return 0
   },
 }
 
@@ -249,7 +266,7 @@ const BlockHeaderShape: ObjectValidatorShape<BlockHeaderFields> = {
   parentHash: STRING,
   txTrieRoot: STRING,
   version: option(NAT),
-  timestamp: NAT,
+  timestamp: TIMESTAMP_MS,
   witnessAddress: STRING,
   witnessSignature: option(STRING),
 }
@@ -264,29 +281,27 @@ const TransactionShape: ObjectValidatorShape<TransactionFields> = {
   permissionId: option(NAT),
   refBlockBytes: option(STRING),
   refBlockHash: option(STRING),
-  // TRON amounts arrive as decimal strings (e.g. "26400000"), not 0x-hex, so we use BIG_NAT
-  // (decimal string -> bigint) rather than EVM's hex-only QTY. `feeLimit` additionally has to
-  // accept negatives, hence the signed BIG_INT.
+  // int64 amounts -> signed BIG_INT (decimal strings, not hex QTY); int64 ms -> TIMESTAMP_MS.
   feeLimit: option(BIG_INT),
-  expiration: option(NAT),
-  timestamp: option(NAT),
+  expiration: option(TIMESTAMP_MS),
+  timestamp: option(TIMESTAMP_MS),
   rawDataHex: STRING,
-  fee: option(BIG_NAT),
+  fee: option(BIG_INT),
   contractResult: option(STRING),
   contractAddress: option(STRING),
   resMessage: option(STRING),
-  withdrawAmount: option(BIG_NAT),
-  unfreezeAmount: option(BIG_NAT),
-  withdrawExpireAmount: option(BIG_NAT),
+  withdrawAmount: option(BIG_INT),
+  unfreezeAmount: option(BIG_INT),
+  withdrawExpireAmount: option(BIG_INT),
   cancelUnfreezeV2Amount: option(ANY),
   result: option(STRING),
-  energyFee: option(BIG_NAT),
-  energyUsage: option(BIG_NAT),
-  energyUsageTotal: option(BIG_NAT),
-  netUsage: option(BIG_NAT),
-  netFee: option(BIG_NAT),
-  originEnergyUsage: option(BIG_NAT),
-  energyPenaltyTotal: option(BIG_NAT),
+  energyFee: option(BIG_INT),
+  energyUsage: option(BIG_INT),
+  energyUsageTotal: option(BIG_INT),
+  netUsage: option(BIG_INT),
+  netFee: option(BIG_INT),
+  originEnergyUsage: option(BIG_INT),
+  energyPenaltyTotal: option(BIG_INT),
 }
 
 const LogShape: ObjectValidatorShape<LogFields> = {

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { MockPortal, mockPortal } from '../testing/index.js'
+import { MockPortal, mockPortal, readAll } from '../testing/index.js'
 import { tronPortalStream } from './tron-portal-source.js'
 import { TronQueryBuilder } from './tron-query-builder.js'
 
@@ -61,8 +61,8 @@ describe('Tron portal stream', () => {
   })
 
   // Regression guard: real TRON data validated end-to-end through the full schema.
-  // The portal serializes big amounts as DECIMAL strings (not 0x-hex), so they
-  // must go through BIG_NAT (-> bigint), while ms timestamps stay plain numbers
+  // The portal serializes big amounts as signed DECIMAL strings (not 0x-hex), so they
+  // go through BIG_INT (-> bigint), while ms timestamps stay plain numbers
   // and `parameter`/`ret`/`callValueInfo` pass through as raw JSON. Mocks with
   // fake `0x...` data would hide a wrong-validator regression; this pumps an
   // unmodified portal response (block #84000000) so any such regression fails here.
@@ -169,5 +169,110 @@ describe('Tron portal stream', () => {
       expect(internal.rejected).toBeUndefined()
       expect(internal.extra).toBeUndefined()
     }
+  })
+
+  // Regression: int64 ms timestamps above 2^53 (e.g. 639208360527210660) arrive as JSON numbers;
+  // `NAT` rejected the resulting imprecise floats and halted the stream.
+  it('tolerates int64 timestamps above the safe-integer range', async () => {
+    // string-built so the imprecision reads as intentional, not a typo
+    const hugeMs = Number('639208360527210660')
+    expect(Number.isSafeInteger(hugeMs)).toBe(false)
+
+    portal = await mockPortal([
+      {
+        statusCode: 200,
+        data: [
+          {
+            header: { number: 84856193, hash: '00000000abcd1', timestamp: hugeMs },
+            transactions: [
+              {
+                transactionIndex: 0,
+                hash: 'deadbeef',
+                type: 'TransferContract',
+                expiration: hugeMs,
+                timestamp: hugeMs,
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    const stream = tronPortalStream({
+      id: 'huge-timestamp',
+      portal: portal.url,
+      outputs: new TronQueryBuilder()
+        .addFields({
+          block: { number: true, hash: true, timestamp: true },
+          transaction: { transactionIndex: true, hash: true, type: true, expiration: true, timestamp: true },
+        })
+        .addRange({ from: 84856193, to: 84856193 }),
+    })
+
+    const data = await readAll(stream)
+    expect(data).toHaveLength(1)
+
+    // survive validation as imprecise floats instead of throwing
+    expect(data[0].header.timestamp).toBe(hugeMs)
+    const [tx] = data[0].transactions
+    expect(tx.expiration).toBe(hugeMs)
+    expect(tx.timestamp).toBe(hugeMs)
+  })
+
+  // Regression: int64 amounts can be negative (e.g. `feeLimit: "-18395898"`); `BIG_NAT` rejected
+  // them. Every amount field must use the signed decoder.
+  it('parses negative int64 amount fields instead of halting', async () => {
+    portal = await mockPortal([
+      {
+        statusCode: 200,
+        data: [
+          {
+            header: { number: 51068797, hash: '00000000abcd2', timestamp: 1782669669000 },
+            transactions: [
+              {
+                transactionIndex: 0,
+                hash: 'cafe',
+                type: 'TransferContract',
+                feeLimit: '-18395898',
+                fee: '-269000',
+                netFee: '-269000',
+                energyUsage: '-5',
+                withdrawAmount: '-1',
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    const stream = tronPortalStream({
+      id: 'negative-amounts',
+      portal: portal.url,
+      outputs: new TronQueryBuilder()
+        .addFields({
+          block: { number: true, hash: true },
+          transaction: {
+            transactionIndex: true,
+            hash: true,
+            type: true,
+            feeLimit: true,
+            fee: true,
+            netFee: true,
+            energyUsage: true,
+            withdrawAmount: true,
+          },
+        })
+        .addRange({ from: 51068797, to: 51068797 }),
+    })
+
+    const data = await readAll(stream)
+    expect(data).toHaveLength(1)
+
+    const [tx] = data[0].transactions
+    expect(tx.feeLimit).toBe(-18395898n)
+    expect(tx.fee).toBe(-269000n)
+    expect(tx.netFee).toBe(-269000n)
+    expect(tx.energyUsage).toBe(-5n)
+    expect(tx.withdrawAmount).toBe(-1n)
   })
 })
