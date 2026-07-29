@@ -1,9 +1,5 @@
 # @subsquid/pipes
 
-> ⚠️ **Warning**: This SDK is currently in the experimental stage.
-> APIs may change without notice.
-> Use with caution in production environments.
-
 Core package of the **SQD Pipes** ecosystem. Composable streams for building blockchain indexers:
 onchain data ingestion, decoding, and storage.
 
