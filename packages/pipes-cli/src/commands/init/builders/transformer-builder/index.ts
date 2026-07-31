@@ -77,13 +77,13 @@ export class TransformerBuilder<N extends NetworkType> {
     }))
 
     return Mustache.render(this.transformerBuilder.getTemplate(), {
-      /**
-       * At the moment we don't support multi-chain pipes, so network
-       * will be the same for all transfomers
-       */
       // prepareConfig() settles this for every CLI entry path; the fallback
       // covers callers constructing a Config directly (e.g. tests).
       pipeId: this.config.pipeId ?? generatePipeId(),
+      /**
+       * At the moment we don't support multi-chain pipes, so network
+       * will be the same for all transformers
+       */
       network: this.config.defaultNetwork,
       deduplicatedImports,
       envTemplate: envCode,
