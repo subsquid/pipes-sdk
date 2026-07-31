@@ -40,9 +40,16 @@ const baseSchemaRaw = z.object({
   pipeId: z
     .string()
     .min(1)
+    .max(64)
+    // Interpolated into generated TS as `id: '{{pipeId}}'`. Mustache HTML-escapes
+    // that tag, so a value containing & < > " ' would silently render as a
+    // *different* id (`a&b` -> `a&amp;b`) and orphan the cursor — the exact
+    // failure this option exists to prevent. Restrict to characters that survive
+    // escaping unchanged, while still allowing readable ids like 'usdc-transfers'.
+    .regex(/^[A-Za-z0-9._-]+$/, 'pipeId may only contain letters, digits, dots, underscores and hyphens')
     .optional()
     .describe(
-      'Stream id of the generated pipe, and the key its target cursor is stored under. Generated when omitted; keep the value written to pipes.config.json so regenerating reuses the same cursor.',
+      'Stream id of the generated pipe, and the key its target cursor is stored under. Letters, digits, dots, underscores and hyphens; up to 64 characters. Generated when omitted; keep the value written to pipes.config.json so regenerating reuses the same cursor.',
     ),
 })
 

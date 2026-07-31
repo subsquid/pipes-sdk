@@ -296,4 +296,25 @@ describe('--config params schema', () => {
 
     expect(() => configJsonSchemaRaw.parse(configJson)).toThrow()
   })
+
+  describe('pipeId', () => {
+    it('accepts a generated id and a readable one', () => {
+      for (const pipeId of ['cce73a95', 'usdc-transfers', 'pipe_1.v2']) {
+        expect(configJsonSchemaRaw.parse({ ...strictConfigSchema, pipeId }).pipeId).toBe(pipeId)
+      }
+    })
+
+    // `id: '{{pipeId}}'` is an escaped Mustache tag, so these would render as a
+    // different id than the user wrote and silently orphan the target cursor.
+    it('rejects characters that Mustache would HTML-escape', () => {
+      for (const pipeId of ['a&b', "a'b", 'a<b', 'a"b', 'a b']) {
+        expect(() => configJsonSchemaRaw.parse({ ...strictConfigSchema, pipeId })).toThrow()
+      }
+    })
+
+    it('rejects an empty or over-long id', () => {
+      expect(() => configJsonSchemaRaw.parse({ ...strictConfigSchema, pipeId: '' })).toThrow()
+      expect(() => configJsonSchemaRaw.parse({ ...strictConfigSchema, pipeId: 'a'.repeat(65) })).toThrow()
+    })
+  })
 })
