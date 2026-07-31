@@ -72,7 +72,7 @@ const envFileContent = `CLICKHOUSE_URL=http://localhost:${clickhouseDefaults.por
 CLICKHOUSE_DATABASE=${clickhouseDefaults.db}
 CLICKHOUSE_USER=${clickhouseDefaults.user}
 CLICKHOUSE_PASSWORD=${clickhouseDefaults.password}
-    `
+`
 
 function renderTargetCode(rendered: RenderedTemplate[]): string {
   return Mustache.render(targetTemplate, {

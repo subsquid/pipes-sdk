@@ -1,5 +1,6 @@
 import type { Config, NetworkType } from '~/types/init.js'
 import { getEventSignature } from '~/utils/event-signature.js'
+import { generatePipeId } from '~/utils/random-id.js'
 import { oldestRange } from '~/utils/range.js'
 import { resolveDuplicateContractNames as realResolver } from '~/utils/resolve-duplicate-contracts.js'
 
@@ -19,9 +20,16 @@ export type PrepareConfigOptions = {
 /**
  * Normalize a config before it is handed to InitHandler. Runs for every path
  * (interactive, --config, --config-id), so it is the single place that merges
- * duplicate deployments/contracts and resolves duplicate contract names.
+ * duplicate deployments/contracts, resolves duplicate contract names, and
+ * settles the pipe id.
  */
 export async function prepareConfig(config: Config<NetworkType>, options: PrepareConfigOptions = {}): Promise<void> {
+  // Mint the stream id once, here, so a regenerate driven by a saved
+  // pipes.config.json reuses the stored one. A fresh id would be written into
+  // src/index.ts and silently orphan the target's cursor, restarting the pipe
+  // from `range.from` and leaving a gap.
+  config.pipeId ??= generatePipeId()
+
   const resolve = options.resolveContracts ?? realResolver
   // EVM addresses are case-insensitive hex; SVM addresses are case-sensitive base58.
   const normalize =

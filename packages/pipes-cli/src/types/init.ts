@@ -32,4 +32,11 @@ export interface Config<N extends NetworkType> {
   templates: ConfiguredTemplate<N, any>[]
   target: Target
   packageManager: PackageManager
+  /**
+   * Identifier of the generated pipe's stream, and the key its target cursor is
+   * stored under. Persisted to pipes.config.json so regenerating a project
+   * reuses it instead of minting a new one and orphaning the cursor.
+   * `prepareConfig()` fills it in when absent.
+   */
+  pipeId?: string
 }
