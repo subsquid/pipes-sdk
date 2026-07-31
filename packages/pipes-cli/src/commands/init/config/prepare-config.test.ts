@@ -52,6 +52,36 @@ function contractsOf(config: Config<NetworkType>): TestContract[] {
   return (config.templates[0]!.params as { contracts: TestContract[] }).contracts
 }
 
+describe('prepareConfig — pipe id', () => {
+  it('mints a pipeId when the config carries none', async () => {
+    const config = configWithContracts([{ contractName: 'TokenA', deployments: [{ address: '0x1111' }] }])
+    expect(config.pipeId).toBeUndefined()
+
+    await prepareConfig(config, { resolveContracts: async () => {} })
+
+    expect(config.pipeId).toMatch(/^[0-9a-f]{8}$/)
+  })
+
+  it('keeps an existing pipeId, so regenerating reuses the target cursor', async () => {
+    const config = configWithContracts([{ contractName: 'TokenA', deployments: [{ address: '0x1111' }] }])
+    config.pipeId = 'cce73a95'
+
+    await prepareConfig(config, { resolveContracts: async () => {} })
+
+    expect(config.pipeId).toBe('cce73a95')
+  })
+
+  it('mints a distinct pipeId per project', async () => {
+    const first = configWithContracts([{ contractName: 'TokenA', deployments: [{ address: '0x1111' }] }])
+    const second = configWithContracts([{ contractName: 'TokenA', deployments: [{ address: '0x1111' }] }])
+
+    await prepareConfig(first, { resolveContracts: async () => {} })
+    await prepareConfig(second, { resolveContracts: async () => {} })
+
+    expect(first.pipeId).not.toBe(second.pipeId)
+  })
+})
+
 describe('prepareConfig', () => {
   it('invokes the resolver with reference-address views of the contracts', async () => {
     const config = configWithContracts([

@@ -50,4 +50,17 @@ describe('serializePipeConfig', () => {
   it('uses a stable config filename', () => {
     expect(PIPE_CONFIG_FILENAME).toBe('pipes.config.json')
   })
+
+  it('persists pipeId, and the saved value survives a parse back through the schema', () => {
+    const raw = JSON.parse(serializePipeConfig({ ...config, pipeId: 'cce73a95' }))
+    expect(raw.pipeId).toBe('cce73a95')
+
+    // Regenerating reads this file back: the id must come through unchanged, or
+    // the pipe gets a new stream id and orphans its target cursor.
+    expect(configJsonSchema.parse(raw).pipeId).toBe('cce73a95')
+  })
+
+  it('omits pipeId when the config carries none', () => {
+    expect(JSON.parse(serializePipeConfig(config))).not.toHaveProperty('pipeId')
+  })
 })

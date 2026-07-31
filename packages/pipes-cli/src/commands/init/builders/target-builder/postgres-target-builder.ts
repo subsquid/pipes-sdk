@@ -50,7 +50,7 @@ function renderTargetCode(rendered: RenderedTemplate[]): string {
 }
 
 function renderEnvFile(): string {
-  return `DB_CONNECTION_STR=postgresql://${postgresDefaults.user}:${postgresDefaults.password}@localhost:${postgresDefaults.port}/${postgresDefaults.db}`
+  return `DB_CONNECTION_STR=postgresql://${postgresDefaults.user}:${postgresDefaults.password}@localhost:${postgresDefaults.port}/${postgresDefaults.db}\n`
 }
 
 function renderSchemasFile(rendered: RenderedTemplate[]): string {

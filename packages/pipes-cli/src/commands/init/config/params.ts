@@ -37,6 +37,13 @@ const baseSchemaRaw = z.object({
   projectFolder: z.string().min(1),
   packageManager: z.enum(packageManagerTypes.map((p) => p.value)),
   target: z.enum(targetTypes.map((t) => t.value)).describe('Storage target for the pipeline data.'),
+  pipeId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Stream id of the generated pipe, and the key its target cursor is stored under. Generated when omitted; keep the value written to pipes.config.json so regenerating reuses the same cursor.',
+    ),
 })
 
 const evmConfig = baseSchemaRaw

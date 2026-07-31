@@ -81,7 +81,9 @@ export class TransformerBuilder<N extends NetworkType> {
        * At the moment we don't support multi-chain pipes, so network
        * will be the same for all transfomers
        */
-      pipeId: generatePipeId(),
+      // prepareConfig() settles this for every CLI entry path; the fallback
+      // covers callers constructing a Config directly (e.g. tests).
+      pipeId: this.config.pipeId ?? generatePipeId(),
       network: this.config.defaultNetwork,
       deduplicatedImports,
       envTemplate: envCode,

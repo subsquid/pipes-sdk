@@ -15,6 +15,9 @@ export function serializePipeConfig(config: Config<NetworkType>): string {
     defaultNetwork: config.defaultNetwork,
     packageManager: config.packageManager,
     target: config.target,
+    // Written back so a regenerate keeps the same stream id, and with it the
+    // target's cursor.
+    ...(config.pipeId !== undefined ? { pipeId: config.pipeId } : {}),
     templates: config.templates.map((configured) => ({
       templateId: configured.template.id,
       ...(configured.params !== undefined ? { params: configured.params } : {}),
