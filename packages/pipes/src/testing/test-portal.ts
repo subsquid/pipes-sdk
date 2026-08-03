@@ -32,11 +32,17 @@ export type MockResponse =
     }
   | {
       statusCode: 409
+      /** The body verbatim: since ADR-011 `error` sits beside `previousBlocks`, or stands alone. */
       data: {
-        previousBlocks: {
+        previousBlocks?: {
           number: number
           hash: string
         }[]
+        error?: {
+          type: string
+          code: string
+          message: string
+        }
       }
       validateRequest?: ValidateRequest
     }
