@@ -106,9 +106,13 @@ export interface PortalBlockStreamOptions {
  */
 export interface PortalBlockStream<B> extends AsyncIterable<StreamData<B>> {}
 
+/** The portal can answer 409 with the error envelope alone, leaving no chain to walk back to. */
 function isForkHttpError(err: unknown): err is HttpError {
   if (!(err instanceof HttpError)) return false
   if (err.response.status !== 409) return false
+
+  const previousBlocks = err.response.body?.previousBlocks
+  if (!Array.isArray(previousBlocks) || previousBlocks.length === 0) return false
 
   return true
 }

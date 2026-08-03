@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
+import { isForkException } from '~/portal-client/fork-exception.js'
 import { MockPortal, MockResponse, mockPortal } from '~/testing/index.js'
 
 let portal: MockPortal | undefined
@@ -115,6 +117,92 @@ describe('PortalClient batching', () => {
 
     expect(shapes.some((s) => s.includes(1) && s.length > 1)).toBe(false)
     expect(shapes).toEqual([[1], [2], [3]])
+  })
+})
+
+describe('PortalClient fork detection', () => {
+  /** Drains the stream and returns whatever it threw. */
+  async function streamError(client: PortalClient): Promise<unknown> {
+    try {
+      for await (const _ of client.getStream(query, { request: { retryAttempts: 0 } })) {
+        // a fork faults the stream before any batch
+      }
+
+      return undefined
+    } catch (err: unknown) {
+      return err
+    }
+  }
+
+  // The pre-ADR-011 shape, and still the only part of the body that is read.
+  it('reads a fork from a 409 that carries previous blocks alone', async () => {
+    portal = await mockPortal([
+      { statusCode: 409, data: { previousBlocks: [{ number: 1, hash: '0x1' }] } },
+    ] satisfies MockResponse[])
+
+    const client = new PortalClient({ url: portal.url })
+    const err = await streamError(client)
+
+    expect(isForkException(err)).toBe(true)
+    expect((err as any).canonicalBlocks).toEqual([{ number: 1, hash: '0x1' }])
+  })
+
+  // ADR-011 put `error` beside `previousBlocks`, not in place of it.
+  it('reads a fork from a 409 that also carries the error envelope', async () => {
+    portal = await mockPortal([
+      {
+        statusCode: 409,
+        data: {
+          previousBlocks: [{ number: 1, hash: '0x1' }],
+          error: {
+            type: 'invalid_request_error',
+            code: 'base_block_mismatch',
+            message: 'Base block mismatch',
+          },
+        },
+      },
+    ] satisfies MockResponse[])
+
+    const client = new PortalClient({ url: portal.url })
+    const err = await streamError(client)
+
+    expect(isForkException(err)).toBe(true)
+    expect((err as any).canonicalBlocks).toEqual([{ number: 1, hash: '0x1' }])
+  })
+
+  // Read as a fork, this walks an undefined list and throws a TypeError over the status.
+  it('surfaces a 409 that carries no previous blocks instead of misreading it as a fork', async () => {
+    portal = await mockPortal([
+      {
+        statusCode: 409,
+        data: {
+          error: {
+            type: 'invalid_request_error',
+            code: 'base_block_mismatch',
+            message: 'Base block mismatch',
+          },
+        },
+      },
+    ] satisfies MockResponse[])
+
+    const client = new PortalClient({ url: portal.url })
+    const err = await streamError(client)
+
+    expect(isForkException(err)).toBe(false)
+    expect(err).toBeInstanceOf(HttpError)
+    expect((err as HttpError).response.status).toBe(409)
+  })
+
+  // No ancestor to walk back to either, and `last()` throws on it.
+  it('surfaces a 409 whose previous blocks are an empty list', async () => {
+    portal = await mockPortal([{ statusCode: 409, data: { previousBlocks: [] } }] satisfies MockResponse[])
+
+    const client = new PortalClient({ url: portal.url })
+    const err = await streamError(client)
+
+    expect(isForkException(err)).toBe(false)
+    expect(err).toBeInstanceOf(HttpError)
+    expect((err as HttpError).response.status).toBe(409)
   })
 })
 
