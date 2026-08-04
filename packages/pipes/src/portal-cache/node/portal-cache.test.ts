@@ -463,6 +463,53 @@ describe('Portal cache', () => {
               },
             },
           },
+          {
+            "data": [],
+            "meta": {
+              "head": {
+                "finalized": {
+                  "hash": "0x5",
+                  "number": 5,
+                },
+                "latest": undefined,
+              },
+              "meta": {
+                "bytesSize": 0,
+              },
+              "query": {
+                "hash": "1137b8a50718df4ec48060ae5cef9c8e929b619a23846c34a2535b3548b589c5",
+                "raw": {
+                  "fields": {
+                    "block": {
+                      "hash": true,
+                      "number": true,
+                      "timestamp": true,
+                    },
+                  },
+                  "fromBlock": 0,
+                  "parentBlockHash": undefined,
+                  "toBlock": 5,
+                  "type": "evm",
+                },
+              },
+              "state": {
+                "current": {
+                  "hash": "0x5",
+                  "number": 5,
+                  "timestamp": 5000,
+                },
+                "initial": 0,
+                "last": 5,
+                "ranges": [
+                  {
+                    "from": 0,
+                    "to": 5,
+                  },
+                ],
+                "rollbackChain": [],
+              },
+            },
+          },
         ]
       `)
       expect(res2).toMatchInlineSnapshot(`
@@ -483,8 +530,8 @@ describe('Portal cache', () => {
             "meta": {
               "head": {
                 "finalized": {
-                  "hash": "0x2",
-                  "number": 2,
+                  "hash": "0x5",
+                  "number": 5,
                 },
                 "latest": undefined,
               },

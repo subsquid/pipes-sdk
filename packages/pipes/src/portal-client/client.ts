@@ -81,7 +81,7 @@ export interface PortalClientOptions {
 
 export type PortalRequestOptions = Pick<
   RequestOptions,
-  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout'
+  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout' | 'abort'
 >
 
 export interface PortalBlockStreamOptions {
@@ -197,8 +197,12 @@ export class PortalClient {
       headPollInterval: options?.headPollIntervalMs ?? this.#options.headPollInterval,
     }
 
-    return createPortalStream(query, settings, async (q, o) =>
-      this.getStreamRequest((options?.finalized ?? this.#options.finalized) ? 'finalized-stream' : 'stream', q, o),
+    return createPortalStream(
+      query,
+      settings,
+      async (q, o) =>
+        this.getStreamRequest((options?.finalized ?? this.#options.finalized) ? 'finalized-stream' : 'stream', q, o),
+      async (signal) => this.getHead({ ...settings.request, finalized: true, abort: signal }),
     )
   }
 
@@ -264,6 +268,7 @@ function createPortalStream<Q extends Query>(
     status: number
     stream?: AsyncIterable<string[]> | null | undefined
   }>,
+  getFinalizedHead: (signal?: AbortSignal) => Promise<BlockRef | undefined>,
 ): PortalBlockStream<GetBlock<Q>> {
   const { headPollInterval, request, perBlockUnfinalized, ...bufferOptions } = options
   const buffer = new StreamBuffer<GetBlock<Q>>(bufferOptions)
@@ -274,10 +279,48 @@ function createPortalStream<Q extends Query>(
   // survive into the next iteration.
   let requests: Record<number, number> = {}
 
+  // Highest finalized head any response has reported. Stays undefined for a no-finality dataset,
+  // which is also the answer to whether there is anything to wait for at the end of a range.
+  let finalizedSeen: number | undefined
+
+  // Cadence for re-asking the portal when it has nothing for us yet — finality still below
+  // `toBlock`, or a bounded range answered with no data. `headPollInterval` keeps its opt-in
+  // role for the 204 head-tail; this one must never hot-loop, so it defaults on.
+  const retryInterval = headPollInterval > 0 ? headPollInterval : 1_000
+
   const ingest = async () => {
     while (!buffer.signal.aborted) {
-      if (toBlock != null && fromBlock > toBlock) break
+      if (toBlock != null && fromBlock > toBlock) {
+        if (finalizedSeen == null || finalizedSeen >= toBlock) break
 
+        // Every requested block is delivered, but finality is still below `toBlock`. Ending here
+        // would strand the tail: a finalized-only consumer holds rows back until some batch
+        // reports them final, and after the last block no such batch would ever come — the stream
+        // "completes" while the consumer silently discards what it was never allowed to commit.
+        // So poll the finalized head until it reaches `toBlock` and deliver the catch-up as one
+        // final empty batch. This waits exactly as long as finality itself does — for a range
+        // ending above the chain's current finalized head, minutes, not forever.
+        // Wired to the buffer's signal like every stream request: an aborted consumer must not
+        // leave the poll running until the HTTP timeout.
+        const head = await getFinalizedHead(buffer.signal)
+        if (head != null && head.number > finalizedSeen) {
+          finalizedSeen = head.number
+          if (head.number >= toBlock) {
+            await buffer.put({
+              blocks: [],
+              head: { finalized: head },
+              meta: { bytes: 0, requestedFromBlock: fromBlock, lastBlockReceivedAt: new Date(), requests },
+            })
+            requests = {}
+            buffer.flush()
+            break
+          }
+        }
+        await wait(retryInterval, buffer.signal)
+        continue
+      }
+
+      const requestedFrom = fromBlock
       const res = await requestStream(
         {
           ...query,
@@ -295,6 +338,10 @@ function createPortalStream<Q extends Query>(
         },
       )
 
+      if (res.head.finalized != null) {
+        finalizedSeen = Math.max(finalizedSeen ?? -1, res.head.finalized.number)
+      }
+
       // We are on head, we need to wait a little bit until new dta arrives
       if (res.status === 204) {
         await buffer.put({
@@ -310,9 +357,15 @@ function createPortalStream<Q extends Query>(
         continue
       }
 
-      // If data is missing for a particular range,
-      // portal responds with 200 status and empty body
-      if (res.stream == null) break
+      // A 200 with no body: the portal has no data at `fromBlock` right now. For an open-ended
+      // stream that is the end of the dataset. For a bounded range it is a promise not yet kept —
+      // sealed chunks and hotblocks both lag the chain — so keep asking until the data shows up
+      // rather than silently ending `fromBlock..toBlock` short.
+      if (res.stream == null) {
+        if (toBlock == null) break
+        await wait(retryInterval, buffer.signal)
+        continue
+      }
 
       try {
         for await (let data of res.stream) {
@@ -418,6 +471,12 @@ function createPortalStream<Q extends Query>(
         if (!isStreamAbortedError(err)) {
           throw err
         }
+      }
+
+      // A response that advanced nothing (a 200 whose body carried no blocks) would otherwise be
+      // re-asked in a hot loop; pace it like the other empty answers.
+      if (fromBlock === requestedFrom) {
+        await wait(retryInterval, buffer.signal)
       }
     }
   }

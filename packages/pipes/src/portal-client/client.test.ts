@@ -50,13 +50,14 @@ async function countRequests(
 }
 
 describe('PortalClient batching', () => {
-  // What every target except Postgres gets.
+  // What every target except Postgres gets. Finality covers the whole range so the stream ends
+  // without a finality catch-up batch — that path has its own tests below.
   it('delivers one batch per response by default', async () => {
     portal = await mockPortal([
       {
         statusCode: 200,
         data: [block(1), block(2), block(3)],
-        head: { finalized: { number: 2, hash: '0x2' } },
+        head: { finalized: { number: 3, hash: '0x3' } },
       },
     ])
 
@@ -77,7 +78,9 @@ describe('PortalClient batching', () => {
 
     const client = new PortalClient({ url: portal.url })
 
-    expect(await batchShapes(client, true)).toEqual([[1], [2], [3]])
+    // The trailing [] is the finality catch-up: the range ends above the reported finalized
+    // head, so the stream waits for finality and delivers it as one final empty batch.
+    expect(await batchShapes(client, true)).toEqual([[1], [2], [3], []])
   })
 
   // Read as "no finality", every hot block would be filed as finalized instead.
@@ -92,7 +95,7 @@ describe('PortalClient batching', () => {
 
     const client = new PortalClient({ url: portal.url })
 
-    expect(await batchShapes(client, true)).toEqual([[1], [2], [3]])
+    expect(await batchShapes(client, true)).toEqual([[1], [2], [3], []])
   })
 
   // maxIdleTimeMs is pinned high so only cut() can separate the batches — on the default 300ms an
@@ -116,7 +119,7 @@ describe('PortalClient batching', () => {
     const shapes = await batchShapes(client, true, { maxIdleTimeMs: 60_000 })
 
     expect(shapes.some((s) => s.includes(1) && s.length > 1)).toBe(false)
-    expect(shapes).toEqual([[1], [2], [3]])
+    expect(shapes).toEqual([[1], [2], [3], []])
   })
 })
 
@@ -235,7 +238,8 @@ describe('PortalClient request accounting', () => {
       },
     ] satisfies MockResponse[])
 
-    const client = new PortalClient({ url: portal.url })
+    // A blockless 200 now waits before the re-ask (no more hot-looping the portal); keep it short.
+    const client = new PortalClient({ url: portal.url, headPollIntervalMs: 5 })
 
     expect(await countRequests(client)).toEqual({ 200: 2 })
   })
@@ -269,7 +273,7 @@ describe('PortalClient request accounting', () => {
       },
     ] satisfies MockResponse[])
 
-    const client = new PortalClient({ url: portal.url })
+    const client = new PortalClient({ url: portal.url, headPollIntervalMs: 5 })
 
     expect(await countRequests(client, false, { request: { retryAttempts: 2, retrySchedule: [1] } })).toEqual({
       200: 2,

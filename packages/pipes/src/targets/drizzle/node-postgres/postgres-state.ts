@@ -166,6 +166,9 @@ export class PostgresState {
     const finalizedBlock = head.finalized?.number
 
     logger.debug(`Saving cursor at block ${current.number} for ${this.#key.value} row...`)
+    // Upsert: a finality catch-up batch (the empty batch a bounded stream ends with) re-saves the
+    // offset of the last delivered block with a newer finalized head; that must update the row,
+    // not trip the (id, current_number) primary key.
     await parentSpan.measure({ name: 'insert cursor', labels: 'db' }, async () => {
       await tx.execute(
         sql`
@@ -180,6 +183,11 @@ export class PostgresState {
               ${JSON.stringify(head.finalized || {})},
               ${JSON.stringify(rollbackChain || [])}
           )
+          ON CONFLICT (id, current_number) DO UPDATE SET
+              current_hash = EXCLUDED.current_hash,
+              "current_timestamp" = EXCLUDED."current_timestamp",
+              finalized = EXCLUDED.finalized,
+              rollback_chain = EXCLUDED.rollback_chain
         `,
       )
     })

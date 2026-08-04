@@ -202,9 +202,14 @@ export function bigqueryTarget<T>(options: {
               ),
             )
 
-            await span.measure('user onData', () =>
-              Promise.resolve(onData({ store, data, ctx: { logger, profiler: span } })),
-            )
+            // Skipped for a batch built from zero source blocks (the finality catch-up a bounded
+            // stream ends with): it carries no rows, and user handlers never saw blockless
+            // batches before. The commit below still runs to record the caught-up finalized head.
+            if (ctx.batch?.blocksCount !== 0) {
+              await span.measure('user onData', () =>
+                Promise.resolve(onData({ store, data, ctx: { logger, profiler: span } })),
+              )
+            }
 
             // `getBufferStats` encodes rows lazily and caches the result so the eventual
             // `commitBatch` doesn't re-encode — single source of truth for both logs.

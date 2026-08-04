@@ -545,7 +545,13 @@ describe('Portal abstract stream', () => {
       await stream.pipeTo(target as any)
 
       // The persisted floor (5) survives the restart and clamps the lower reported head (3).
-      expect(seen).toEqual([{ number: 5, hash: '0x5f' }])
+      // The second batch is the finality catch-up: the range ends at 6, above every reported
+      // finalized head, so the stream waits for finality (the mock finalizes what it served)
+      // and delivers the caught-up head before ending.
+      expect(seen).toEqual([
+        { number: 5, hash: '0x5f' },
+        { number: 6, hash: '0x6' },
+      ])
     })
 
     it('leaves finalized undefined for a no-finality dataset (passthrough)', async () => {
@@ -702,9 +708,10 @@ describe('stop lifecycle', () => {
       }),
     )
 
-    // Two yielded, one dropped from the 204, one armed for the batch that never arrives.
+    // Two yielded, one dropped from the 204, one for the finality catch-up (the range ends at 2,
+    // above the reported finalized head 0), one armed for the batch that never arrives.
     expect(blocks.length).toBe(2)
-    expect(spans.started['batch']).toBe(4)
+    expect(spans.started['batch']).toBe(5)
     expect(spans.unbalanced()).toEqual([])
   })
 

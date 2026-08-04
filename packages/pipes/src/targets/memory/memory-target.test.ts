@@ -80,12 +80,15 @@ describe('createMemoryTarget', () => {
     const emitted: Row[][] = []
     await streamTo(portal, 5, emitted)
 
-    // Block 5 is never finalized, so it must not be emitted.
+    // Block 5 is above the last reported finalized head, so it is held back — until the
+    // finality catch-up the bounded stream ends with (the mock finalizes everything it served)
+    // releases it. Nothing is ever emitted ahead of a finalized head that covers it.
     const blockNumbers = emitted.flat().map((r) => r.blockNumber)
-    expect(blockNumbers).toEqual([1, 2, 3, 4])
+    expect(blockNumbers).toEqual([1, 2, 3, 4, 5])
 
-    // Buffered rows (2, 3) are released before the current batch's row (4).
-    expect(emitted.flat().map((r) => r.value)).toEqual([1n, 2n, 3n, 4n])
+    // Buffered rows (2, 3) are released before the current batch's row (4); 5 comes last, alone.
+    expect(emitted.flat().map((r) => r.value)).toEqual([1n, 2n, 3n, 4n, 5n])
+    expect(emitted.at(-1)!.map((r) => r.blockNumber)).toEqual([5])
   })
 
   it('passes every row straight through when the dataset has no finalized head', async () => {

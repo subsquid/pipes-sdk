@@ -136,16 +136,21 @@ export function drizzleTarget<T>({
                   SET LOCAL sqd.snapshot_block_number = ${ctx.stream.state.current.number};
                 `)
 
-                await target.measure('data handler', async (profiler) => {
-                  await onData({
-                    tx: tracker.wrapTransaction(tx),
-                    data,
-                    ctx: {
-                      logger,
-                      profiler,
-                    },
+                // Skipped for a batch built from zero source blocks (the finality catch-up a
+                // bounded stream ends with): it carries no rows, and user handlers never saw
+                // blockless batches before. The cursor save below still runs.
+                if (ctx.batch?.blocksCount !== 0) {
+                  await target.measure('data handler', async (profiler) => {
+                    await onData({
+                      tx: tracker.wrapTransaction(tx),
+                      data,
+                      ctx: {
+                        logger,
+                        profiler,
+                      },
+                    })
                   })
-                })
+                }
 
                 const { safeBlockNumber } = await state.saveCursor(tx, ctx, target)
                 if (safeBlockNumber > 0) {

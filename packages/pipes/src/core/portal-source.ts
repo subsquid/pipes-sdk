@@ -220,6 +220,13 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       this.#logger.warn(NOT_REAL_TIME_WARNING(datasetMetadata.dataset))
     }
 
+    // What the consumer has been shown so far: the cursor of the last delivered block and the
+    // finalized head that came with it. Both seed from the resume state. They decide whether an
+    // otherwise-empty batch carries news the consumer must see — the finality catch-up a bounded
+    // stream emits after its final block (see the portal client's finality wait).
+    let lastYielded = cursor
+    let consumerFinalized = state?.finalized?.number
+
     for (const { range, request } of bounded) {
       // Anchor the cursor's hash only to the range that continues from it; a later disjoint range
       // doesn't border the cursor and would fault a spurious 409, so it starts unanchored (ADR-20).
@@ -302,12 +309,65 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
               },
             }
 
+            lastYielded = ctx.stream.state.current
+            consumerFinalized = finalized?.number ?? consumerFinalized
+
             const data = await this.applyTransformers(ctx, batch.blocks as T)
 
             yield { data, ctx }
           } else {
-            // Never yielded, so batchEnd won't run.
-            batchSpan.end()
+            // An empty batch normally carries nothing the consumer needs. The exception: when it
+            // advances the finalized head over the last delivered block — the catch-up a bounded
+            // stream emits after its final block. Withholding that one would leave a
+            // finalized-only target holding a tail it never learns is final.
+            const finalized = this.#watermark.clamp(batch.head.finalized)
+            if (
+              lastYielded != null &&
+              finalized != null &&
+              finalized.number >= lastYielded.number &&
+              finalized.number > (consumerFinalized ?? -1)
+            ) {
+              const ctx: BatchContext = {
+                id: this.#id,
+                profiler: batchSpan,
+                metrics: this.#metricServer.metrics,
+                logger: this.#logger,
+                stream: {
+                  dataset: datasetMetadata,
+                  head: {
+                    finalized,
+                    latest: batch.head.latest,
+                  },
+                  query: {
+                    url: this.#portal.getUrl(),
+                    hash: await hashQuery(query),
+                    raw: query,
+                  },
+                  state: {
+                    initial,
+                    ranges,
+                    current: lastYielded,
+                    last: last(bounded)?.range?.to ?? batch.head.latest?.number ?? finalized.number,
+                    rollbackChain: [],
+                  },
+                },
+                batch: {
+                  blocksCount: 0,
+                  bytesSize: batch.meta.bytes,
+                  requests: batch.meta.requests,
+                  lastBlockReceivedAt: batch.meta.lastBlockReceivedAt,
+                },
+              }
+
+              consumerFinalized = finalized.number
+
+              const data = await this.applyTransformers(ctx, batch.blocks as T)
+
+              yield { data, ctx }
+            } else {
+              // Never yielded, so batchEnd won't run.
+              batchSpan.end()
+            }
           }
 
           batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
