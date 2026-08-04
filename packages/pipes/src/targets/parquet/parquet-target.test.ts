@@ -208,15 +208,32 @@ describe('parquetTarget', () => {
   })
 
   describe('finalized-only', () => {
-    it('does not write blocks above the finalized head', async () => {
-      portal = await mockPortal([blocksResponse([1, 2, 3, 4, 5], 2)])
+    it('never writes blocks above the finalized head, and publishes the tail only once finality reaches it', async () => {
+      // Finality sits at 2 for two polls, then catches up to 5. Snapshot the published files
+      // while it still lags: nothing above 2 may exist on disk at that point.
+      let polls = 0
+      let midStream: Promise<{ blockNumber: number }[]> | undefined
+      portal = await mockPortal([blocksResponse([1, 2, 3, 4, 5], 2)], {
+        finalizedHead: () => {
+          polls++
+          if (polls === 2) {
+            midStream = readBlocks(dir).catch(() => [])
+          }
+          return polls < 3 ? { number: 2, hash: '0x2' } : { number: 5, hash: '0x5' }
+        },
+      })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
-        parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
-      )
+      await evmPortalStream({
+        id: 'test',
+        portal: { url: portal.url, headPollIntervalMs: 5 },
+        outputs: blockDecoder({ from: 0, to: 5 }),
+      }).pipeTo(parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }))
 
-      // Only blocks 1–2 are finalized (head = 2); 3–5 stay buffered and are never written.
-      expect((await readBlocks(dir)).map((r) => r.blockNumber)).toEqual([1, 2])
+      // The stream genuinely waited for finality rather than ending at delivery.
+      expect(polls).toBeGreaterThanOrEqual(3)
+      expect(((await midStream) ?? []).every((r) => r.blockNumber <= 2)).toBe(true)
+      // …and the tail is not silently dropped once finality arrives: all five land in files.
+      expect((await readBlocks(dir)).map((r) => r.blockNumber)).toEqual([1, 2, 3, 4, 5])
     })
 
     it('publishes previously-unfinalized blocks once a later batch finalizes them', async () => {
@@ -462,7 +479,13 @@ describe('parquetTarget', () => {
       )
 
       // The persisted floor (5) survives the restart and clamps the lower reported head (3).
-      expect(seen).toEqual([{ number: 5, hash: '0x5f' }])
+      // The second batch is the finality catch-up: the range ends at 6, above every reported
+      // finalized head, so the stream waits for finality (the mock finalizes what it served)
+      // and delivers the caught-up head before ending.
+      expect(seen).toEqual([
+        { number: 5, hash: '0x5f' },
+        { number: 6, hash: '0x6' },
+      ])
     })
   })
 

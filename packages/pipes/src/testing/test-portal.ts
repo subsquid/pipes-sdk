@@ -65,14 +65,35 @@ export async function finalizedMockPortal(mockResponses: MockResponse[]) {
 
 export async function mockPortal(
   mockResponses: MockResponse[],
-  { finalized = false }: { finalized?: boolean } = {},
+  {
+    finalized = false,
+    finalizedHead,
+  }: {
+    finalized?: boolean
+    /**
+     * Answer for GET `/finalized-head`, polled by a bounded stream whose delivered blocks are not
+     * yet reported final. Defaults to "everything served so far is final" — the highest block
+     * number any 200 response has carried — so existing scenarios complete without scripting it.
+     */
+    finalizedHead?: () => { number: number; hash: string } | undefined
+  } = {},
 ): Promise<MockPortal> {
   const promise = new Promise<Server>((resolve, reject) => {
     let requestCount = 0
+    let maxServedBlock: { number: number; hash: string } | undefined
 
     const streamUrl = finalized ? '/finalized-stream' : '/stream'
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (req.url === '/finalized-head') {
+        const head = finalizedHead ? finalizedHead() : maxServedBlock
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        if (head) {
+          res.write(JSON.stringify(head))
+        }
+        res.end()
+        return
+      }
       if (req.url?.startsWith('/metadata')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.write(
@@ -134,6 +155,9 @@ export async function mockPortal(
             res.writeHead(mockResp.statusCode, headers)
             // Send each mock data item as a JSON line
             mockResp.data.forEach((data) => {
+              if (maxServedBlock == null || data.header.number > maxServedBlock.number) {
+                maxServedBlock = { number: data.header.number, hash: data.header.hash }
+              }
               res.write(JSON.stringify(data) + '\n')
             })
             break

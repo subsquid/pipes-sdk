@@ -114,16 +114,21 @@ export function clickhouseTarget<T>({
         const target = ctx.profiler.start({ name: 'clickhouse', labels: 'db' })
 
         try {
-          await target.measure('data handler', async (profiler) => {
-            await onData({
-              store,
-              data: data,
-              ctx: {
-                logger,
-                profiler,
-              },
+          // A batch built from zero source blocks (the finality catch-up a bounded stream ends
+          // with) carries no rows to insert; it exists so the offset below records the caught-up
+          // finalized head. User handlers never saw blockless batches before, so keep it that way.
+          if (ctx.batch?.blocksCount !== 0) {
+            await target.measure('data handler', async (profiler) => {
+              await onData({
+                store,
+                data: data,
+                ctx: {
+                  logger,
+                  profiler,
+                },
+              })
             })
-          })
+          }
 
           await state.saveCursor(ctx, target)
         } finally {

@@ -121,6 +121,8 @@ describe('Drizzle target', () => {
       )
 
       const rows = await getAllFromSyncTable('test')
+      // Block 5's offset reflects the finality catch-up a bounded stream ends with (the mock
+      // finalizes everything it served): finalized 5, nothing left to roll back.
       expect(rows).toMatchInlineSnapshot(`
         [
           {
@@ -173,17 +175,11 @@ describe('Drizzle target', () => {
             "current_number": "5",
             "current_timestamp": 1970-01-01T01:23:20.000Z,
             "finalized": {
-              "hash": "0x2",
-              "number": 2,
+              "hash": "0x5",
+              "number": 5,
             },
             "id": "test",
-            "rollback_chain": [
-              {
-                "hash": "0x5",
-                "number": 5,
-                "timestamp": 5000,
-              },
-            ],
+            "rollback_chain": [],
           },
         ]
       `)

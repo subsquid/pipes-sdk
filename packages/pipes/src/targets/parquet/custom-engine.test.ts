@@ -154,11 +154,12 @@ describe('parquetTarget with a custom engine', () => {
     // engine's own business (its factory), so no context travels across the seam.
     expect(calls).toEqual(['table:blocks'])
 
-    // Only the finalized rows (1-3) published; the file is named by the target for the coverage
-    // window — from the configured start (0) to the finalized boundary (3). The engine never saw
-    // the window or chose the name.
+    // All rows published: the bounded stream waits for finality to reach the range end (the mock
+    // finalizes everything it served), so the tail is released before the stream ends. The file
+    // is named by the target for the coverage window — from the configured start (0) to the
+    // final boundary (5). The engine never saw the window or chose the name.
     const files = (await readdir(path.join(dir, 'blocks'))).sort()
-    expect(files).toEqual(['000000000000-000000000003.parquet'])
+    expect(files).toEqual(['000000000000-000000000005.parquet'])
 
     // The published file is real Parquet, readable by an actual reader, with the rows the
     // engine received — in order, in the engine-neutral plain shape.
@@ -167,6 +168,8 @@ describe('parquetTarget with a custom engine', () => {
       [1n, '0x1'],
       [2n, '0x2'],
       [3n, '0x3'],
+      [4n, '0x4'],
+      [5n, '0x5'],
     ])
 
     // The checkpoint that published the segment also persisted the cursor.

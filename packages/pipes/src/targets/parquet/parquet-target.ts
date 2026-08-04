@@ -312,10 +312,15 @@ export function parquetTarget<T>(options: {
               store.advanceCoverageInto(range.from)
             }
 
-            // 1. user stages rows via store.insert(...)
-            await target.measure('data handler', async (profiler) => {
-              await onData({ store, data, ctx: { logger, profiler } })
-            })
+            // 1. user stages rows via store.insert(...). Skipped for a batch built from zero
+            //    source blocks (the finality catch-up a bounded stream ends with): it carries no
+            //    rows, and user handlers never saw blockless batches before. Steps 2-4 still run —
+            //    the caught-up finalized head is exactly what releases the buffered tail.
+            if (ctx.batch?.blocksCount !== 0) {
+              await target.measure('data handler', async (profiler) => {
+                await onData({ store, data, ctx: { logger, profiler } })
+              })
+            }
 
             // 2. finalization + the cursor this batch could checkpoint to. The boundary carries the
             //    HASH needed for resume; boundary.number = min(finalized, current), correct for

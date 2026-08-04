@@ -71,6 +71,8 @@ describe('Clickhouse state', () => {
       )
 
       const data = await getAllFromSyncTable()
+      // Two offsets: the batch that delivered 3..5 as unfinalized, then the finality catch-up a
+      // bounded stream waits for before ending (the mock portal finalizes everything it served).
       expect(data).toMatchInlineSnapshot(`
         [
           {
@@ -78,6 +80,13 @@ describe('Clickhouse state', () => {
             "finalized": "{"hash":"0x2","number":2}",
             "id": "test",
             "rollback_chain": "[{"number":3,"hash":"0x3","timestamp":3000},{"number":4,"hash":"0x4","timestamp":4000},{"number":5,"hash":"0x5","timestamp":5000}]",
+            "sign": 1,
+          },
+          {
+            "current": "{"number":5,"hash":"0x5","timestamp":5000}",
+            "finalized": "{"number":5,"hash":"0x5"}",
+            "id": "test",
+            "rollback_chain": "[]",
             "sign": 1,
           },
         ]
@@ -903,6 +912,13 @@ describe('Clickhouse state', () => {
             "finalized": "{"hash":"0x4a","number":4}",
             "id": "test",
             "rollback_chain": "[{"number":5,"hash":"0x5a","timestamp":5000},{"number":6,"hash":"0x6a","timestamp":6000},{"number":7,"hash":"0x7a","timestamp":7000}]",
+            "sign": 1,
+          },
+          {
+            "current": "{"number":7,"hash":"0x7a","timestamp":7000}",
+            "finalized": "{"number":7,"hash":"0x7a"}",
+            "id": "test",
+            "rollback_chain": "[]",
             "sign": 1,
           },
         ]
