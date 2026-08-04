@@ -134,6 +134,38 @@ describe('bounded range above the finalized head', () => {
     expect(polls).toBe(0)
   })
 
+  it('treats a headless finalized-head poll as no progress and keeps waiting', async () => {
+    // The first poll finds no finalized head at all (204); the second finds it at toBlock.
+    let polls = 0
+    portal = await mockPortal(
+      [
+        {
+          statusCode: 200,
+          data: [1, 2, 3].map((number) => ({ header: { number, hash: `0x${number}`, timestamp: number * 1000 } })),
+          head: { finalized: { number: 1, hash: '0x1' }, latest: { number: 3 } },
+        },
+      ],
+      {
+        finalizedHead: () => {
+          polls++
+          return polls === 1 ? undefined : { number: 3, hash: '0x3' }
+        },
+      },
+    )
+
+    const stream = evmPortalStream({
+      id: 'test',
+      portal: { url: portal.url, headPollIntervalMs: 5 },
+      outputs: blockDecoder({ from: 1, to: 3 }),
+    })
+
+    const finalizedSeen: (number | undefined)[] = []
+    await stream.pipeTo(target(finalizedSeen) as any)
+
+    expect(finalizedSeen.at(-1)).toBe(3)
+    expect(polls).toBe(2)
+  })
+
   it('retries a bounded range the portal answers with no data instead of ending it short', async () => {
     // First response: 200 with an empty body (no blocks at fromBlock yet). Second: the data.
     portal = await mockPortal([

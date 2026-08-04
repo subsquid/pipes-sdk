@@ -87,10 +87,15 @@ export async function mockPortal(
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       if (req.url === '/finalized-head') {
         const head = finalizedHead ? finalizedHead() : maxServedBlock
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        if (head) {
-          res.write(JSON.stringify(head))
+        // No head → 204: a JSON content-type with an empty body would make the client's
+        // res.json() throw instead of resolving to undefined.
+        if (!head) {
+          res.writeHead(204)
+          res.end()
+          return
         }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.write(JSON.stringify(head))
         res.end()
         return
       }
