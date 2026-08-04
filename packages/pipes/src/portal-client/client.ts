@@ -81,7 +81,7 @@ export interface PortalClientOptions {
 
 export type PortalRequestOptions = Pick<
   RequestOptions,
-  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout'
+  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout' | 'abort'
 >
 
 export interface PortalBlockStreamOptions {
@@ -202,7 +202,7 @@ export class PortalClient {
       settings,
       async (q, o) =>
         this.getStreamRequest((options?.finalized ?? this.#options.finalized) ? 'finalized-stream' : 'stream', q, o),
-      async () => this.getHead({ ...settings.request, finalized: true }),
+      async (signal) => this.getHead({ ...settings.request, finalized: true, abort: signal }),
     )
   }
 
@@ -268,7 +268,7 @@ function createPortalStream<Q extends Query>(
     status: number
     stream?: AsyncIterable<string[]> | null | undefined
   }>,
-  getFinalizedHead: () => Promise<BlockRef | undefined>,
+  getFinalizedHead: (signal?: AbortSignal) => Promise<BlockRef | undefined>,
 ): PortalBlockStream<GetBlock<Q>> {
   const { headPollInterval, request, perBlockUnfinalized, ...bufferOptions } = options
   const buffer = new StreamBuffer<GetBlock<Q>>(bufferOptions)
@@ -300,7 +300,9 @@ function createPortalStream<Q extends Query>(
         // So poll the finalized head until it reaches `toBlock` and deliver the catch-up as one
         // final empty batch. This waits exactly as long as finality itself does — for a range
         // ending above the chain's current finalized head, minutes, not forever.
-        const head = await getFinalizedHead()
+        // Wired to the buffer's signal like every stream request: an aborted consumer must not
+        // leave the poll running until the HTTP timeout.
+        const head = await getFinalizedHead(buffer.signal)
         if (head != null && head.number > finalizedSeen) {
           finalizedSeen = head.number
           if (head.number >= toBlock) {
