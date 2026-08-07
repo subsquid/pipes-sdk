@@ -181,6 +181,62 @@ describe('SqlitePubsubState', () => {
     await expect(openState(path)).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_LOCKED })
   })
 
+  it('refuses a state file that belongs to another producer', async () => {
+    const path = statePath()
+
+    const first = new SqlitePubsubState({ path, delivery: 'lww' })
+    await first.open({ cursorKey: 'pipe-a', logger: testLogger() })
+    await first.commit({
+      operations: [operation()],
+      ledger: [],
+      cursor: block(100),
+      finalized: null,
+      forkCapable: true,
+    })
+    await first.close()
+
+    // The outbox, the manifest and the counters are producer-wide — only the cursor row is
+    // keyed — so adopting this file would publish pipe-a's pending operations as pipe-b.
+    const second = new SqlitePubsubState({ path, delivery: 'lww' })
+    await expect(second.open({ cursorKey: 'pipe-b', logger: testLogger() })).rejects.toMatchObject({
+      code: PUBSUB_ERROR_CODES.STATE_IDENTITY_MISMATCH,
+    })
+  })
+
+  it('refuses a state file written under the other delivery profile', async () => {
+    const path = statePath()
+
+    const first = await openState(path, 'lww')
+    await first.state.commit({
+      operations: [operation()],
+      ledger: [],
+      cursor: block(100),
+      finalized: null,
+      forkCapable: true,
+    })
+    await first.state.close()
+
+    // The profiles scope `_seq` differently, so continuing would re-issue sequence 1.
+    await expect(openState(path, 'ordered')).rejects.toMatchObject({
+      code: PUBSUB_ERROR_CODES.STATE_PROFILE_MISMATCH,
+    })
+  })
+
+  it('releases the lock when open refuses, so a corrected retry can proceed', async () => {
+    const path = statePath()
+
+    const first = await openState(path, 'lww')
+    await first.state.close()
+
+    await expect(openState(path, 'ordered')).rejects.toMatchObject({
+      code: PUBSUB_ERROR_CODES.STATE_PROFILE_MISMATCH,
+    })
+
+    // A refusal must not leave the file locked — the retry is a first producer, not a second.
+    const retry = await openState(path, 'lww')
+    expect(retry.coldStart).toBe(false)
+  })
+
   it('refuses a state file written by another schema version', async () => {
     const path = statePath()
     const first = await openState(path)
@@ -390,6 +446,33 @@ describe('SqlitePubsubState', () => {
       expect(text((await second.state.pending())[0].payload)).toBe('EMPTY')
     })
 
+    it('keeps ids whose separator-joined identity would collide apart', async () => {
+      const state = await seed('ordered')
+
+      // ("pool a", "b") and ("pool", "a b") join to the same string under a space separator;
+      // grouped together, the fork would publish one compensation where two are owed.
+      await commit(state, {
+        operations: [
+          operation({ id: 'b', orderingKey: 'pool a', blockNumber: 101 }),
+          operation({ id: 'a b', orderingKey: 'pool', blockNumber: 101 }),
+        ],
+        ledger: [block(100), block(101)],
+        cursor: block(101),
+        finalized: block(90),
+      })
+      await state.confirm((await state.pending()).map((row) => row.rowId))
+
+      await state.fork([block(100), block(101, 'b')])
+
+      // Order follows the manifest scan, not the insertion order; what matters is that both
+      // rows are repaired rather than folded into one.
+      const pending = await state.pending()
+      expect(pending.map((row) => `${row.orderingKey}/${row.id}/${row.op}`).sort()).toEqual([
+        'pool a/b/delete',
+        'pool/a b/delete',
+      ])
+    })
+
     it('never rewinds the sequence across a fork', async () => {
       const state = await seed('ordered')
 
@@ -466,6 +549,105 @@ describe('SqlitePubsubState', () => {
         ['evt-2', 'delete'],
       ])
       expect((await state.stats()).manifest).toBe(0)
+    })
+  })
+
+  it('applies batch bookkeeping inside the batch transaction', async () => {
+    const { state } = await openState(statePath())
+
+    await commit(state, {
+      operations: [operation()],
+      ledger: [],
+      cursor: block(100),
+      finalized: null,
+      meta: { 'hb_bucket:t': '7' },
+    })
+
+    expect(await state.getMeta('hb_bucket:t')).toBe('7')
+  })
+
+  describe('materialized identity', () => {
+    async function revise(state: SqlitePubsubState, overrides: Partial<PendingOperation>) {
+      await commit(state, {
+        operations: [operation({ id: 'candle-1', mode: 'materialized', blockNumber: 101, ...overrides })],
+        ledger: [block(100), block(101)],
+        cursor: block(101),
+        finalized: block(90),
+      })
+    }
+
+    it('refuses a revision that changes the row’s filter attributes', async () => {
+      const { state } = await openState(statePath())
+      await revise(state, { attributes: { token: 'A' } })
+
+      // A fork restores the row under the attributes it was FIRST published with, so a
+      // subscription filtered on B would keep the orphaned revision forever.
+      await expect(revise(state, { attributes: { token: 'B' } })).rejects.toMatchObject({
+        code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
+      })
+    })
+
+    it('refuses a revision that moves the row to another partition or topic', async () => {
+      const first = await openState(statePath(), 'ordered')
+      await revise(first.state, { orderingKey: 'pool-a' })
+      await expect(revise(first.state, { orderingKey: 'pool-b' })).rejects.toMatchObject({
+        code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
+      })
+
+      const second = await openState(statePath())
+      await revise(second.state, { topic: 'one' })
+      await expect(revise(second.state, { topic: 'two' })).rejects.toMatchObject({
+        code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
+      })
+    })
+
+    it('accepts the same attributes written in a different order', async () => {
+      const { state } = await openState(statePath())
+
+      await revise(state, { attributes: { token: 'A', pool: 'P' } })
+      await expect(revise(state, { attributes: { pool: 'P', token: 'A' } })).resolves.toBeUndefined()
+    })
+
+    it('holds the invariant against a row that only exists as a finalized baseline', async () => {
+      const { state } = await openState(statePath())
+
+      await commit(state, {
+        operations: [
+          operation({
+            id: 'candle-1',
+            mode: 'materialized',
+            blockNumber: 100,
+            attributes: { token: 'A' },
+            rollbackable: false,
+          }),
+        ],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: block(100),
+      })
+
+      await expect(revise(state, { attributes: { token: 'B' } })).rejects.toMatchObject({
+        code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
+      })
+    })
+
+    it('leaves event routes alone — a write-once id is never revised', async () => {
+      const { state } = await openState(statePath())
+
+      await commit(state, {
+        operations: [operation({ id: 'evt', attributes: { token: 'A' }, blockNumber: 101 })],
+        ledger: [block(101)],
+        cursor: block(101),
+        finalized: block(90),
+      })
+      await expect(
+        commit(state, {
+          operations: [operation({ id: 'evt', attributes: { token: 'B' }, blockNumber: 102 })],
+          ledger: [block(102)],
+          cursor: block(102),
+          finalized: block(90),
+        }),
+      ).resolves.toBeUndefined()
     })
   })
 

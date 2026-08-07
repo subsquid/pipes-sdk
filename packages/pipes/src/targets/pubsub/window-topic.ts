@@ -29,7 +29,7 @@ export type WindowTopicOptions<Out> = {
    * revision and every fork compensation of a window id carries the same attributes.
    */
   attributes?: (row: WindowRow<Out>) => Record<string, string>
-  /** Payload encoder. Defaults to the canonical codec (5.4). */
+  /** Payload encoder. Defaults to the canonical codec (RP-24). */
   encode?: (data: object) => Uint8Array | string
   /**
    * What an emptied window publishes: `delete` (default) removes the row, `upsert` keeps the
@@ -48,14 +48,14 @@ export type WindowTopicOptions<Out> = {
 /**
  * Builds a `TopicRoute` for an aggregator window stream: every re-emission of a window is an
  * `upsert` on the same id, so "last write wins by `_seq`" replaces any consumer-side revision
- * arithmetic (8.6).
+ * arithmetic.
  */
 export function windowTopic<Out>(options: WindowTopicOptions<Out>): TopicRoute<WindowRow<Out>[]> {
   const emptyWindows = options.emptyWindows ?? 'delete'
 
   if (emptyWindows === 'upsert' && !options.emptyValues) {
     // A route that is delete-free in normal operation but emits a delete on a fork is the worst
-    // of both: its consumers skipped tombstone retention on the strength of the guarantee (6.6).
+    // of both: its consumers skipped tombstone retention on the strength of the guarantee.
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.MISSING_EMPTY_VALUES, [
       `windowTopic("${options.topic}") sets \`emptyWindows: "upsert"\` without \`emptyValues\`.`,
       'The two go together: a fork can orphan every revision of a window id, and the compensation for ' +

@@ -650,6 +650,17 @@ volume — not ephemeral container storage.
 
 **Fix** — check the path and its permissions, and mount it on durable storage.
 
+### E2413 · Materialized row changed its identity
+
+A row declared `mode: 'materialized'` changed its topic, ordering key, or filter attributes
+between revisions. A fork restores a row under the identity it was **first** published with, so
+a subscription filtered on the newer attributes would never receive the repair and would keep
+the orphaned revision indefinitely.
+
+**Fix** — keep a materialized row's topic, ordering key and attributes stable for its whole
+lifetime, or give the new shape a new id. (Attribute *order* is irrelevant; only the set of
+names and values matters.)
+
 ### E2418 · Two drafts with the same id in one batch
 
 An `event` route produced two operations sharing an id in one batch. On an event route every id is
@@ -657,3 +668,24 @@ write-once, so the second would silently overwrite the first for every consumer.
 
 **Fix** — make the id unique per row, or declare `mode: 'materialized'` if the row is meant to be
 revised.
+
+### E2419 · State file belongs to another producer
+
+The state file records a different cursor key than the one this pipe binds. Only the cursor row
+is keyed — the outbox, the manifest and the sequence counters are producer-wide — so adopting
+another producer's file would report a clean warm start while publishing its pending operations
+under this pipe's identity.
+
+**Fix** — one state file per producer. Give this pipe its own `state.path`, or pin
+`settings.id` to the key the file was written under if this pipe really is that producer
+renamed.
+
+### E2420 · State file was written under the other delivery profile
+
+`publish.delivery` changed between runs against the same state. The two profiles scope `_seq`
+differently — one producer-wide counter versus one dense counter per partition — so continuing
+would re-issue sequence numbers consumers already hold, and a conforming consumer would discard
+the new operations as duplicates.
+
+**Fix** — changing profile is a new feed, not a config tweak: fresh `namespace`, fresh state
+file, re-bootstrapped consumers.

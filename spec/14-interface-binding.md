@@ -253,7 +253,7 @@ consumers MUST NOT read it as a block number.
 | E21xx | Postgres binding | E2101–E2106 (client, config, advisory lock, untracked table, missing PK, FK cycle) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
 | E23xx | Parquet binding | E2301–E2317 and E2320 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused). E2318–E2319 retired, unassigned |
-| E24xx | Pub/Sub binding | E2401–E2418 (topic/attribute/payload guards E2401–E2404; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417; profile and identity guards E2412–E2413, E2418; route configuration E2414–E2416) |
+| E24xx | Pub/Sub binding | E2401–E2420 (topic/attribute/payload guards E2401–E2404, checked pre-commit; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, and state-identity/profile binding E2419–E2420; row-identity guards E2412–E2413, E2418; route configuration E2414–E2416) |
 
 **IB-51 — Transport errors.** Non-coded, typed: HTTP error (with response), request
 timeout, body-stall timeout. Retryability: request timeouts and connection-class errors

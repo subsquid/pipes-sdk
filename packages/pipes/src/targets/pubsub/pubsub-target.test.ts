@@ -391,6 +391,45 @@ describe('pubsubTarget', () => {
       expect(JSON.parse(heartbeats[1].payload)).toEqual({ block: 4, namespace: 'test-pipe', opsSinceLast: 2 })
     })
 
+    it('counts only its own topic’s operations', async () => {
+      const publisher = new FakePublisher()
+
+      const target = pubsubTarget<Blocks & { others: Blocks['blocks'] }>({
+        pubsub: {} as never,
+        publisher,
+        state: { path: tempStatePath() },
+        publishFrom: 0,
+        heartbeat: { everyBlocks: 2 },
+        topics: {
+          blocks: blocksRoute('blocks'),
+          // Three operations per batch against the other topic's one.
+          others: {
+            topic: 'others',
+            map: ({ data }) =>
+              data.flatMap((header) =>
+                [0, 1, 2].map((n) => ({ data: { n }, block: header, id: `${header.number}-${n}` })),
+              ),
+          },
+        },
+      })
+
+      async function* read() {
+        for (const number of [1, 2]) {
+          const header = { number, hash: `0x${number}`, timestamp: number }
+          yield {
+            data: { blocks: [header], others: [header] },
+            ctx: makeBatchContext({ current: header, finalized: { number: 0, hash: '0x0' } }),
+          }
+        }
+      }
+
+      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
+
+      const heartbeats = publisher.published.filter((m) => m.attributes['_op'] === 'heartbeat')
+      const counts = Object.fromEntries(heartbeats.map((m) => [m.topic, JSON.parse(m.payload).opsSinceLast]))
+      expect(counts).toEqual({ blocks: 2, others: 6 })
+    })
+
     it('stays off by default', async () => {
       const publisher = new FakePublisher()
 
@@ -540,6 +579,85 @@ describe('pubsubTarget', () => {
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.DUPLICATE_DRAFT_ID })
     })
 
+    it('refuses an oversized id before it can reach the durable outbox', async () => {
+      const publisher = new FakePublisher()
+
+      // Pub/Sub rejects an oversized `_id` at publish time; committed first, the row would sit
+      // at the head of its partition and fail identically on every restart.
+      await expect(
+        runPipe({
+          publisher,
+          statePath: tempStatePath(),
+          responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+          to: 1,
+          targetOptions: {
+            topics: {
+              blocks: {
+                topic: 'blocks',
+                map: ({ data }) => data.map((header) => ({ data: header, block: header, id: 'x'.repeat(1025) })),
+              },
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET })
+
+      expect(publisher.published).toHaveLength(0)
+    })
+
+    it('refuses an oversized ordering key', async () => {
+      await expect(
+        runPipe({
+          publisher: new FakePublisher(),
+          statePath: tempStatePath(),
+          responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+          to: 1,
+          targetOptions: {
+            publish: { delivery: 'ordered' },
+            topics: {
+              blocks: {
+                topic: 'blocks',
+                map: ({ data }) =>
+                  data.map((header) => ({ data: header, block: header, orderingKey: 'k'.repeat(1025) })),
+              },
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET })
+    })
+
+    it('refuses a _uid that could not fit once its sequence is appended', async () => {
+      await expect(
+        runPipe({
+          publisher: new FakePublisher(),
+          statePath: tempStatePath(),
+          responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+          to: 1,
+          targetOptions: { namespace: 'n'.repeat(1010), publish: { uidAttribute: true } },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET })
+    })
+
+    it('refuses an oversized rollback inverse — it is published with no draft left to fix', async () => {
+      await expect(
+        runPipe({
+          publisher: new FakePublisher(),
+          statePath: tempStatePath(),
+          responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 0, hash: '0x0' } } }],
+          to: 1,
+          targetOptions: {
+            topics: {
+              blocks: {
+                topic: 'blocks',
+                mode: 'materialized',
+                map: ({ data }) => data.map((header) => ({ data: header, block: header, id: 'row' })),
+                rollbackWhenMissing: () => ({ op: 'upsert', data: 'x'.repeat(11 * 1024 * 1024) }),
+              },
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.MESSAGE_TOO_LARGE })
+    })
+
     it('refuses a delete-free window route declared without its empty value', () => {
       expect(() => windowTopic({ topic: 'candles', emptyWindows: 'upsert' })).toThrow(
         PUBSUB_ERROR_CODES.MISSING_EMPTY_VALUES,
@@ -547,7 +665,58 @@ describe('pubsubTarget', () => {
     })
   })
 
-  describe('crash recovery (7.4)', () => {
+  describe('startup failures', () => {
+    it('releases the state lock when topic validation fails', async () => {
+      const statePath = tempStatePath()
+      const failing = new FakePublisher()
+      failing.setup = async () => {
+        throw new Error('topic does not exist')
+      }
+
+      await expect(
+        runPipe({
+          publisher: failing,
+          statePath,
+          responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+          to: 1,
+        }),
+      ).rejects.toThrow('topic does not exist')
+      await portal?.close()
+
+      // The state file holds an exclusive lock; a startup failure that kept it would make the
+      // corrected retry fail as a second producer instead of starting.
+      const retry = new FakePublisher()
+      await runPipe({
+        publisher: retry,
+        statePath,
+        responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+        to: 1,
+      })
+
+      expect(retry.published).toHaveLength(1)
+    })
+
+    it('releases the state lock when the recovery drain fails', async () => {
+      const statePath = tempStatePath()
+
+      const first = new FakePublisher()
+      await driveBatches({ statePath, publisher: first, blocks: [1], finalized: 0 })
+
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+      // Leaves an unconfirmed row behind, so the next start drains before it reads anything.
+      await expect(driveBatches({ statePath, publisher: failing, blocks: [2], finalized: 0 })).rejects.toThrow(
+        'network down',
+      )
+
+      const retry = new FakePublisher()
+      await driveBatches({ statePath, publisher: retry, blocks: [], finalized: 0 })
+
+      expect(retry.published.map((m) => m.payload)).toEqual(['{"number":2}'])
+    })
+  })
+
+  describe('crash recovery (CN-17, CN-46)', () => {
     it('republishes an unconfirmed operation with the same seq and bytes', async () => {
       const statePath = tempStatePath()
 

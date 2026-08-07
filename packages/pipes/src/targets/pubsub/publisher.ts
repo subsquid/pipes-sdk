@@ -44,7 +44,8 @@ export interface Publisher {
   close(): Promise<void>
 }
 
-const partitionOf = (row: { topic: string; orderingKey: string }) => `${row.topic} ${row.orderingKey}`
+// Unambiguous: a separator-joined string would put ("a", "b c") and ("a b", "c") in one partition.
+const partitionOf = (row: { topic: string; orderingKey: string }) => JSON.stringify([row.topic, row.orderingKey])
 
 /**
  * Groups an outbox drain into partitions, preserving each partition's enqueue order.
@@ -124,28 +125,36 @@ export class GooglePubsubPublisher implements Publisher {
         const done: number[] = []
         let published = 0
 
-        // Fire the whole partition first so the client can batch it, then settle in order:
-        // under `ordered` a failed publish fails everything behind it on the key anyway, so
-        // the confirmed prefix is exactly the set that is safe to drop from the outbox.
-        const inflight = partition.map((row) =>
-          this.#topic(row.topic).publishMessage({
-            data: Buffer.from(row.payload.buffer, row.payload.byteOffset, row.payload.byteLength),
-            attributes: row.attributes,
-            orderingKey: row.orderingKey || undefined,
-          }),
+        // Fire the whole partition so the client can batch it, but give every publish its
+        // handler at creation: bailing out of an await loop on the first rejection leaves the
+        // ones behind it unobserved, and Node reports those as unhandled rejections.
+        const settled = await Promise.all(
+          partition.map((row) =>
+            this.#topic(row.topic)
+              .publishMessage({
+                data: Buffer.from(row.payload.buffer, row.payload.byteOffset, row.payload.byteLength),
+                attributes: row.attributes,
+                orderingKey: row.orderingKey || undefined,
+              })
+              .then(
+                () => ({ ok: true, error: undefined as unknown }),
+                (error: unknown) => ({ ok: false, error }),
+              ),
+          ),
         )
 
-        for (let i = 0; i < inflight.length; i++) {
-          try {
-            await inflight[i]
-          } catch (e) {
+        // Only the confirmed PREFIX may leave the outbox: under `ordered` a failed publish
+        // fails everything behind it on the key, and under either profile a row that follows
+        // a gap must be republished rather than dropped.
+        for (let i = 0; i < settled.length; i++) {
+          if (!settled[i].ok) {
             // Ordered publishing latches the key on error: without this every later publish
             // on that partition rejects immediately, including our own republish.
             if (this.#options.delivery === 'ordered' && partition[i].orderingKey) {
               this.#topic(partition[i].topic).resumePublishing(partition[i].orderingKey)
             }
 
-            return { done, published, error: e }
+            return { done, published, error: settled[i].error }
           }
 
           done.push(partition[i].rowId)

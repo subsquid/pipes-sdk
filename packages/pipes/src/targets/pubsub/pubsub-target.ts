@@ -14,7 +14,15 @@ import {
 } from '~/core/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { PubsubOp, assertPayloadSize, buildEnvelope, encodePayload, validateUserAttributes } from './protocol.js'
+import {
+  PubsubOp,
+  assertPayloadSize,
+  assertWireLimits,
+  buildEnvelope,
+  encodePayload,
+  uidValue,
+  validateUserAttributes,
+} from './protocol.js'
 import {
   GooglePubsubPublisher,
   Publisher,
@@ -28,7 +36,7 @@ import { DeliveryProfile, PendingOperation, PubsubState, RouteMode, SqlitePubsub
 export type MessageDraft = {
   /**
    * `Uint8Array | string` are sent as-is; plain objects are encoded with the canonical codec
-   * (5.4) — decoded ABI values contain `bigint`, on which plain `JSON.stringify` throws.
+   * (RP-24) — decoded ABI values contain `bigint`, on which plain `JSON.stringify` throws.
    */
   data: Uint8Array | string | object
   /** The block this operation belongs to — drives fork compensation. Required. */
@@ -69,10 +77,10 @@ export type TopicRoute<Data> = {
   /**
    * Map one batch of this stream's data to operations. Must be pure and deterministic (no wall
    * clock, no randomness): replays must reproduce identical bytes so duplicates stay
-   * recognizable (9.1).
+   * recognizable.
    */
   map: (batch: { data: Data; ctx: BatchContext }) => MessageDraft[]
-  /** Payload encoder for object drafts. Defaults to the canonical codec (5.4). Must be pure. */
+  /** Payload encoder for object drafts. Defaults to the canonical codec (RP-24). Must be pure. */
   encode?: (data: object) => Uint8Array | string
   /**
    * Identity for drafts that leave `id` unset, when the block-derived default does not fit.
@@ -109,8 +117,8 @@ export type PubsubTargetOptions<T> = {
   publish?: {
     /**
      * `lww` (default) — no ordering keys, no throughput cap; consumers apply per-id by `_seq`
-     * version (6.6). `ordered` — one ordering key per topic, dense seq, strict cursor contract
-     * with gap detection (6.7); caps each partition at 1 MB/s.
+     * version. `ordered` — one ordering key per topic, dense seq, strict cursor contract with
+     * gap detection; caps each partition at 1 MB/s. See IB-28.
      */
     delivery?: DeliveryProfile
     /**
@@ -122,7 +130,7 @@ export type PubsubTargetOptions<T> = {
     flowControl?: FlowControlOptions
   }
   /**
-   * Opt in to publishing from a dataset that reports no finalized head (6.9). Without it such a
+   * Opt in to publishing from a dataset that reports no finalized head (RP-44). Without it such a
    * dataset is refused at start: no watermark means no manifest, and this medium cannot retract
    * what it already published. A fork reported anyway stays fatal.
    */
@@ -135,7 +143,8 @@ export type PubsubTargetOptions<T> = {
   publishFrom?: number | 'latest'
   /**
    * Publish one `heartbeat` operation per topic every N blocks. A liveness/freshness signal for
-   * monitoring — NOT a completeness proof (6.6). Off by default.
+   * monitoring — NOT a completeness proof: delivery is unordered and filtered subscriptions
+   * typically never receive heartbeats. Off by default.
    */
   heartbeat?: { everyBlocks: number }
   /**
@@ -194,73 +203,80 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
 
       const { coldStart } = await state.open({ cursorKey: options.settings?.id ?? id ?? '', logger })
 
-      if (!publisher) {
-        const client = await resolvePubsubClient(options.pubsub)
-        const publisherOptions: PublisherOptions = {
-          delivery,
-          topicSetup,
-          batching: options.publish?.batching,
-          flowControl: options.publish?.flowControl,
-        }
-        publisher = new GooglePubsubPublisher(client, publisherOptions)
-      }
-
-      await publisher.setup([...new Set(routes.map((r) => r.topic))], logger)
-
-      logger.info({
-        message:
-          `publishing ${routes.length} route(s) to Pub/Sub — profile "${delivery}", namespace "${namespace}", ` +
-          `state "${'path' in options.state ? options.state.path : 'custom'}"`,
-        topics: routes.map((r) => `${r.stream} → ${r.topic} (${r.mode})`),
-      })
-
-      if (coldStart) {
-        // A cold start on an already-live namespace means a lost sequencer: the producer will
-        // hand out `_seq`s consumers already hold, and nothing on the wire says so (6.6).
-        logger.warn(
-          `Pub/Sub state at "${'path' in options.state ? options.state.path : 'custom'}" started EMPTY under ` +
-            `namespace "${namespace}". On a first run this is expected. On an existing feed it means the ` +
-            `sequencer was lost — no consumer can detect that for itself. Recover with a fresh namespace and ` +
-            `a re-bootstrap, not with a restart.`,
-        )
-      }
-
-      if (options.assumeNoForks && !finalizedStream) {
-        logger.warn(
-          'assumeNoForks is set: nothing is recorded for compensation. If this dataset ever forks, the ' +
-            'published operations cannot be retracted and the pipe fails.',
-        )
-      }
-
-      context = new WriteContext({
-        state,
-        publisher,
-        routes,
-        namespace,
-        delivery,
-        logger,
-        uidAttribute: options.publish?.uidAttribute ?? false,
-        heartbeat: options.heartbeat,
-        assumeNoForks: options.assumeNoForks ?? false,
-        finalizedStream: finalizedStream ?? false,
-        publishFrom: options.publishFrom ?? 'latest',
-        coldStart,
-      })
-
-      const cursor = await state.getCursor()
-
-      // Recovery needs no compensation of its own: the cursor only ever advances in the same
-      // transaction that enqueues the outbox, so a crash leaves unpublished rows, never
-      // unrecorded published ones. Restart = drain, then resume.
-      await context.drain()
-
+      // Everything past `open` runs under cleanup: the state holds an exclusive lock on its
+      // file, so a failure in topic validation or the recovery drain would otherwise leave it
+      // locked for the life of the process and make the retry fail as a second producer.
       try {
+        await run()
+      } finally {
+        await state.close()
+        await publisher?.close()
+      }
+
+      async function run() {
+        if (!publisher) {
+          const client = await resolvePubsubClient(options.pubsub)
+          const publisherOptions: PublisherOptions = {
+            delivery,
+            topicSetup,
+            batching: options.publish?.batching,
+            flowControl: options.publish?.flowControl,
+          }
+          publisher = new GooglePubsubPublisher(client, publisherOptions)
+        }
+
+        await publisher.setup([...new Set(routes.map((r) => r.topic))], logger)
+
+        logger.info({
+          message:
+            `publishing ${routes.length} route(s) to Pub/Sub — profile "${delivery}", namespace "${namespace}", ` +
+            `state "${'path' in options.state ? options.state.path : 'custom'}"`,
+          topics: routes.map((r) => `${r.stream} → ${r.topic} (${r.mode})`),
+        })
+
+        if (coldStart) {
+          // A cold start on an already-live namespace means a lost sequencer: the producer will
+          // hand out `_seq`s consumers already hold, and nothing on the wire says so (GAP-38).
+          logger.warn(
+            `Pub/Sub state at "${'path' in options.state ? options.state.path : 'custom'}" started EMPTY under ` +
+              `namespace "${namespace}". On a first run this is expected. On an existing feed it means the ` +
+              `sequencer was lost — no consumer can detect that for itself. Recover with a fresh namespace and ` +
+              `a re-bootstrap, not with a restart.`,
+          )
+        }
+
+        if (options.assumeNoForks && !finalizedStream) {
+          logger.warn(
+            'assumeNoForks is set: nothing is recorded for compensation. If this dataset ever forks, the ' +
+              'published operations cannot be retracted and the pipe fails.',
+          )
+        }
+
+        context = new WriteContext({
+          state,
+          publisher,
+          routes,
+          namespace,
+          delivery,
+          logger,
+          uidAttribute: options.publish?.uidAttribute ?? false,
+          heartbeat: options.heartbeat,
+          assumeNoForks: options.assumeNoForks ?? false,
+          finalizedStream: finalizedStream ?? false,
+          publishFrom: options.publishFrom ?? 'latest',
+          coldStart,
+        })
+
+        const cursor = await state.getCursor()
+
+        // Recovery needs no compensation of its own: the cursor only ever advances in the same
+        // transaction that enqueues the outbox, so a crash leaves unpublished rows, never
+        // unrecorded published ones. Restart = drain, then resume.
+        await context.drain()
+
         for await (const batch of read(cursor)) {
           await context.write(batch)
         }
-      } finally {
-        await state.close()
-        await publisher.close()
       }
     },
 
@@ -325,13 +341,14 @@ class WriteContext {
       await this.#resolveGoLive(ctx)
       this.#warnSkippedStreams(data, logger)
 
-      const operations = await span.measure('map', async () => this.#map(data, ctx))
+      const { operations, meta } = await span.measure('map', async () => this.#map(data, ctx))
       const forkCapable = this.#rollbackable(ctx)
 
       await span.measure('state tx', () =>
         state.commit({
           operations,
           forkCapable,
+          meta,
           // Under `assumeNoForks` (or on the finalized stream) no fork can arrive, so the
           // ledger would only be write amplification.
           ledger: forkCapable ? ctx.stream.state.rollbackChain : [],
@@ -394,7 +411,7 @@ class WriteContext {
       this.#metrics.publishedBytes.inc(result.bytes)
 
       // Per-partition throughput at or near Pub/Sub's per-key cap: the ordered profile's
-      // headroom requirement (6.7) is a deployment invariant, so make its erosion visible.
+      // headroom requirement is a deployment invariant (IB-28), so make its erosion visible.
       if (this.#options.delivery === 'ordered' && elapsed > 0) {
         for (const partition of partitionRows(wire)) {
           const bytes = partition.reduce((sum, row) => sum + row.payload.byteLength, 0)
@@ -415,7 +432,7 @@ class WriteContext {
   /**
    * A dataset that never reports a finalized head is refused, not silently trusted: the absence
    * of a watermark is not evidence that forks cannot happen, and nothing published here can be
-   * retracted (6.9).
+   * retracted (RP-44).
    */
   #assertFinality(ctx: BatchContext): void {
     if (this.#finalityChecked) return
@@ -475,8 +492,11 @@ class WriteContext {
     logger.warn(`no Pub/Sub route configured for stream(s): ${skipped.join(', ')} — they are not published`)
   }
 
-  async #map(data: any, ctx: BatchContext): Promise<PendingOperation[]> {
+  async #map(data: any, ctx: BatchContext): Promise<{ operations: PendingOperation[]; meta: Record<string, string> }> {
     const operations: PendingOperation[] = []
+    // Per topic, not per batch: a heartbeat reports what its own topic published since the
+    // last one, so a busy topic cannot inflate a quiet one's count.
+    const opsByTopic = new Map<string, number>()
     const finalizedNumber = ctx.stream.head.finalized?.number
     const goLive = this.#goLive ?? 0
 
@@ -502,7 +522,7 @@ class WriteContext {
 
         // Only on event routes: a materialized id may legitimately be revised several times in
         // one batch (a window preview followed by its close), and `_seq` orders those.
-        const identity = `${operation.orderingKey} ${operation.id}`
+        const identity = JSON.stringify([operation.orderingKey, operation.id])
         if (resolved.mode === 'event') {
           if (seenIds.has(identity)) {
             throw new PubsubTargetError(PUBSUB_ERROR_CODES.DUPLICATE_DRAFT_ID, [
@@ -515,12 +535,13 @@ class WriteContext {
         }
 
         operations.push(operation)
+        opsByTopic.set(operation.topic, (opsByTopic.get(operation.topic) ?? 0) + 1)
       }
     }
 
-    const heartbeats = await this.#heartbeats(ctx, operations.length)
+    const { heartbeats, meta } = await this.#heartbeats(ctx, opsByTopic)
 
-    return [...operations, ...heartbeats]
+    return { operations: [...operations, ...heartbeats], meta }
   }
 
   #assertDraftBlock(draft: MessageDraft, resolved: ResolvedRoute): void {
@@ -572,10 +593,32 @@ class WriteContext {
       envelopeSize: 4 + (uidAttribute ? 1 : 0),
     })
 
+    // Every limit the service enforces is checked HERE, before the operation becomes durable.
+    // A message Pub/Sub will reject is not a lost message but a stuck one: it sits at the head
+    // of its partition's outbox and fails identically on every restart.
+    assertWireLimits(
+      {
+        id,
+        orderingKey,
+        uidPreimage: uidAttribute ? uidValue({ topic: resolved.topic, orderingKey, seq: 0 }, namespace) : undefined,
+      },
+      { topic: resolved.topic, route: resolved.stream },
+    )
+
     const payload = op === 'delete' ? new Uint8Array() : encodePayload(draft.data, resolved.route.encode)
     assertPayloadSize(payload, { topic: resolved.topic, route: resolved.stream })
 
     const rollbackable = this.#rollbackable(ctx) && draft.block.number > (finalizedNumber ?? -1)
+    const inverse =
+      rollbackable && resolved.route.rollbackWhenMissing
+        ? this.#encodeInverse({ draft: { ...draft, id }, resolved })
+        : undefined
+
+    if (inverse) {
+      // The inverse is published verbatim at fork time, when there is no draft left to
+      // re-encode and nowhere to report a rejection to — so it is bounded now.
+      assertPayloadSize(inverse.payload, { topic: resolved.topic, route: `${resolved.stream} (rollbackWhenMissing)` })
+    }
 
     return {
       topic: resolved.topic,
@@ -587,10 +630,7 @@ class WriteContext {
       payload,
       blockNumber: draft.block.number,
       rollbackable,
-      inverse:
-        rollbackable && resolved.route.rollbackWhenMissing
-          ? this.#encodeInverse({ draft: { ...draft, id }, resolved })
-          : undefined,
+      inverse,
     }
   }
 
@@ -636,32 +676,34 @@ class WriteContext {
    * Block-count cadence, bucketed so the stamped block is the bucket boundary rather than
    * whichever block a batch happened to end on.
    */
-  async #heartbeats(ctx: BatchContext, opsThisBatch: number): Promise<PendingOperation[]> {
+  async #heartbeats(
+    ctx: BatchContext,
+    opsByTopic: Map<string, number>,
+  ): Promise<{ heartbeats: PendingOperation[]; meta: Record<string, string> }> {
     const cadence = this.#options.heartbeat?.everyBlocks
-    if (!cadence || cadence <= 0) return []
+    const heartbeats: PendingOperation[] = []
+    // Returned rather than written here: the cadence must advance in the same transaction that
+    // enqueues the heartbeat, or a failed commit consumes a beat that was never published.
+    const meta: Record<string, string> = {}
+
+    if (!cadence || cadence <= 0) return { heartbeats, meta }
 
     const { state, namespace, delivery } = this.#options
     const current = ctx.stream.state.current.number
-    if (current < (this.#goLive ?? 0)) return []
+    if (current < (this.#goLive ?? 0)) return { heartbeats, meta }
 
     const bucket = Math.floor(current / cadence)
     const topics = [...new Set(this.#options.routes.map((r) => r.topic))]
-    const heartbeats: PendingOperation[] = []
 
     for (const topic of topics) {
       const stored = await state.getMeta(`hb_bucket:${topic}`)
-      const pending = Number((await state.getMeta(`hb_ops:${topic}`)) ?? '0') + opsThisBatch
+      const pending = Number((await state.getMeta(`hb_ops:${topic}`)) ?? '0') + (opsByTopic.get(topic) ?? 0)
 
       // The first batch only anchors the cadence: emitting there would stamp whatever bucket
       // the pipe happened to start in, which says nothing about liveness.
-      if (stored === undefined) {
-        await state.setMeta(`hb_bucket:${topic}`, String(bucket))
-        await state.setMeta(`hb_ops:${topic}`, String(pending))
-        continue
-      }
-
-      if (bucket <= Number(stored)) {
-        await state.setMeta(`hb_ops:${topic}`, String(pending))
+      if (stored === undefined || bucket <= Number(stored)) {
+        meta[`hb_bucket:${topic}`] = stored ?? String(bucket)
+        meta[`hb_ops:${topic}`] = String(pending)
         continue
       }
 
@@ -677,11 +719,11 @@ class WriteContext {
         rollbackable: false,
       })
 
-      await state.setMeta(`hb_bucket:${topic}`, String(bucket))
-      await state.setMeta(`hb_ops:${topic}`, '0')
+      meta[`hb_bucket:${topic}`] = String(bucket)
+      meta[`hb_ops:${topic}`] = '0'
     }
 
-    return heartbeats
+    return { heartbeats, meta }
   }
 }
 

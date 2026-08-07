@@ -66,4 +66,16 @@ export const PUBSUB_ERROR_CODES = {
   STATE_UNAVAILABLE: 'E2417',
   /** Two drafts of the same batch claim the same id on the same partition. */
   DUPLICATE_DRAFT_ID: 'E2418',
+  /**
+   * The state file belongs to a different producer: its stored cursor key is not the one
+   * this pipe binds. Sequence counters, outbox and manifest are producer-wide, so adopting
+   * another producer's file would hand its consumers this pipe's operations.
+   */
+  STATE_IDENTITY_MISMATCH: 'E2419',
+  /**
+   * The state file was written under the other delivery profile. The two scope `_seq`
+   * differently (one producer-wide counter vs one dense counter per partition), so reusing
+   * the file would re-issue sequence numbers consumers already hold.
+   */
+  STATE_PROFILE_MISMATCH: 'E2420',
 } as const

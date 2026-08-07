@@ -1,25 +1,33 @@
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 
 /**
- * Wire-protocol version: the envelope (5.2) plus the canonical codec (5.4). Bumped only on
+ * Wire-protocol version: the envelope plus the canonical codec (RP-24). Bumped only on
  * breaking changes, so a consumer can branch on it before decoding anything.
  */
 export const WIRE_VERSION = '1'
 
-/** Pub/Sub hard limits the target validates against before a publish (section 10). */
+/**
+ * Pub/Sub hard limits, checked before an operation is committed rather than at publish time
+ * (IB-28): a message the service will reject must never reach the durable outbox, where it
+ * would block that partition on every restart.
+ */
 export const PUBSUB_LIMITS = {
   maxMessageBytes: 10 * 1024 * 1024,
   maxAttributes: 100,
   maxAttributeKeyBytes: 256,
   maxAttributeValueBytes: 1024,
+  maxOrderingKeyBytes: 1024,
 } as const
+
+/** Upper bound on the decimal `_seq` a `_uid` can carry, for the pre-commit length check. */
+const MAX_SEQ_DIGITS = 20
 
 export type PubsubOp = 'upsert' | 'delete' | 'heartbeat'
 
 /** Attribute names the envelope owns. Everything unprefixed belongs to the user. */
 export const ENVELOPE_ATTRIBUTES = ['_seq', '_id', '_op', '_v', '_uid'] as const
 
-// ─── Canonical payload codec (5.4) ────────────────────────────────────────────
+// ─── Canonical payload codec (RP-24) ──────────────────────────────────────────
 
 const HEX = '0123456789abcdef'
 
@@ -72,7 +80,7 @@ function encodeValue(value: unknown, path: string, seen: Set<object>, out: strin
       return
 
     case 'string':
-      // Minimal escaping of `"`, `\` and U+0000–U+001F, matching the table in 5.4.
+      // Minimal escaping of `"`, `\` and U+0000–U+001F.
       out.push(JSON.stringify(value))
       return
 
@@ -180,12 +188,13 @@ function encodeValue(value: unknown, path: string, seen: Set<object>, out: strin
 }
 
 /**
- * The normative payload encoding for object drafts (PUBSUB.md 5.4).
+ * The normative payload encoding for object drafts (RP-24).
  *
  * Decoded chain data is not plain-JSON-safe — ABI integers decode to `bigint`, byte fields to
- * `Uint8Array` — and "same operation ⇒ same bytes" (9.1) is a protocol guarantee, not an
- * implementation detail. So the mapping is total: every input either encodes to one specific
- * minified JSON document or raises a coded error naming its path.
+ * `Uint8Array` — and "same operation ⇒ same bytes" is a protocol guarantee, not an
+ * implementation detail: it is what lets a consumer recognise a republished operation. So the
+ * mapping is total — every input either encodes to one specific minified JSON document or
+ * raises a coded error naming its path.
  */
 export function canonicalJson(value: unknown): string {
   const out: string[] = []
@@ -208,7 +217,7 @@ export function encodePayload(data: Uint8Array | string | object, encode?: (data
   return toBytes(encode ? encode(data as object) : canonicalJson(data))
 }
 
-// ─── Envelope (5.2) ───────────────────────────────────────────────────────────
+// ─── Envelope (RP-24) ─────────────────────────────────────────────────────────
 
 export type WireOperation = {
   topic: string
@@ -244,13 +253,63 @@ export function buildEnvelope(
   if (options.uidAttribute) {
     // Fully qualified because neither the producer nor the partition is implied by `_seq`
     // alone: a fan-in topic runs one counter per producer, a sharded topic one per key.
-    attributes['_uid'] = `${options.namespace}:${operation.topic}:${operation.orderingKey}:${operation.seq}`
+    attributes['_uid'] = uidValue(operation, options.namespace)
   }
 
   return attributes
 }
 
 const utf8Length = (value: string) => encoder.encode(value).length
+
+/** The `_uid` value for an operation: fully qualified, because `_seq` implies neither producer nor partition. */
+export function uidValue(operation: { topic: string; orderingKey: string; seq: number }, namespace: string): string {
+  return `${namespace}:${operation.topic}:${operation.orderingKey}:${operation.seq}`
+}
+
+/**
+ * Everything the service checks that the user-attribute pass does not: the envelope's own
+ * values and the ordering key. Run BEFORE the batch commits — Pub/Sub rejects an oversized
+ * `_id` or ordering key at publish time, and by then the operation is durable, so its
+ * partition would fail identically on every restart with no way to make progress.
+ */
+export function assertWireLimits(
+  message: { id?: string; orderingKey: string; uidPreimage?: string },
+  context: { topic: string; route: string },
+): void {
+  const where = `route "${context.route}" (topic "${context.topic}")`
+
+  if (message.id !== undefined) {
+    const bytes = utf8Length(message.id)
+    if (bytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
+        `The row id produced by ${where} is ${bytes} bytes; it is published as the \`_id\` attribute, ` +
+          `and Pub/Sub allows ${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
+        'Shorten the id — it is an identity, not a payload.',
+      ])
+    }
+  }
+
+  if (message.orderingKey) {
+    const bytes = utf8Length(message.orderingKey)
+    if (bytes > PUBSUB_LIMITS.maxOrderingKeyBytes) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
+        `The ordering key produced by ${where} is ${bytes} bytes; Pub/Sub allows ${PUBSUB_LIMITS.maxOrderingKeyBytes}.`,
+      ])
+    }
+  }
+
+  if (message.uidPreimage !== undefined) {
+    // The sequence is assigned in the commit transaction, so bound it by its widest decimal form.
+    const bytes = utf8Length(message.uidPreimage) + MAX_SEQ_DIGITS
+    if (bytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
+        `The \`_uid\` attribute for ${where} would be up to ${bytes} bytes; Pub/Sub allows ` +
+          `${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
+        'Shorten the namespace, the topic name, or the ordering key — `_uid` concatenates all three.',
+      ])
+    }
+  }
+}
 
 /**
  * Reject user attributes that collide with the protocol's namespace or blow Pub/Sub's
