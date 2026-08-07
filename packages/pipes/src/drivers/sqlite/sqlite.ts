@@ -11,6 +11,8 @@ export interface SqliteSync {
   all<T = unknown, P extends any[] = any[]>(sql: string, params?: P): T[]
   exec<P extends any[] = any[]>(sql: string, params?: P): void
   stream<P extends any[], R>(sql: string, params?: P): AsyncIterable<R>
+  /** Releases the file handle and any lock the connection holds. Idempotent. */
+  close(): void
 }
 
 function setupClient(client: SqliteSync, options: SqliteOptions): SqliteSync {

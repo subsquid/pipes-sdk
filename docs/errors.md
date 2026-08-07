@@ -12,6 +12,7 @@
     - packages/pipes/src/targets/drizzle/node-postgres/errors.ts (E21xx)
     - packages/pipes/src/targets/bigquery/errors.ts              (E22xx)
     - packages/pipes/src/targets/parquet/errors.ts               (E23xx)
+    - packages/pipes/src/targets/pubsub/errors.ts                (E24xx)
 -->
 
 # Error reference
@@ -36,6 +37,7 @@ are stable. Codes are grouped by where they originate:
 | `E21xx` | Postgres (Drizzle) target   |
 | `E22xx` | BigQuery target             |
 | `E23xx` | Parquet target              |
+| `E24xx` | Google Pub/Sub target       |
 
 ---
 
@@ -507,3 +509,183 @@ file with wrong contents is beyond it.
 **Fix** — the engine implementation is broken: it must write a complete Parquet file (including
 the footer) to the temp path it was given before resolving `finish()`. The built-in
 `parquetjsEngine` cannot produce this error.
+
+---
+
+## Google Pub/Sub target
+
+Pub/Sub is append-only: a published message cannot be read back, updated, or deleted. Most of the
+codes below fire *before* anything is published, because after that there is nothing to take back.
+
+### E2401 · Topic does not exist
+
+A configured route names a topic that is missing from the project. The default `topicSetup:
+'validate'` checks this once at start, before any data is accepted.
+
+**Fix** — create the topic, or set `topicSetup: 'create'` (dev convenience; needs admin IAM).
+`topicSetup: 'none'` skips topic administration entirely for least-privilege deployments.
+
+### E2402 · Reserved attribute name
+
+A user attribute collides with a reserved namespace: names starting with `_` belong to the wire
+envelope (`_op`, `_seq`, `_id`, `_v`, `_uid`), names starting with `goog` to Google Cloud.
+
+**Fix** — rename the attribute. Every unprefixed name is free, deliberately including common
+business names like `id` and `op`.
+
+### E2403 · Attribute budget exceeded
+
+The message exceeds Pub/Sub's per-message attribute limits: 100 attributes (96 for the user, or 95
+with `publish.uidAttribute`), 256 bytes per key, 1024 bytes per value. Non-string values are
+refused here too — Pub/Sub attributes are strings, and filters compare them as strings.
+
+**Fix** — publish the value in the payload instead, or shorten it. Filter attributes should stay
+short and low-cardinality.
+
+### E2404 · Message too large
+
+The encoded payload exceeds Pub/Sub's 10 MB per-message limit.
+
+**Fix** — split the row, or compress it with a route-level `encode`.
+
+### E2405 · Canonical codec cannot encode this value
+
+The canonical codec met a value outside the protocol: an unsafe integer, `NaN`/`±Infinity`, a
+`Map`/`Set`/`RegExp`/class instance, a function or symbol, an `undefined` inside an array, or an
+invalid `Date`. The message names the exact path (`$.swap.amounts[1]`).
+
+The codec is deliberately total rather than lenient: "same operation ⇒ same bytes" is a protocol
+guarantee, and a silent coercion (an unsafe integer rounding, an `undefined` becoming `null`) would
+break it invisibly.
+
+**Fix** — pass a `bigint` or a string for large integers, a number for sub-second timestamps, and a
+plain object/array for structures. A route-level `encode` takes over the wire format entirely.
+
+### E2406 · Canonical codec met a cycle
+
+The payload references itself.
+
+**Fix** — break the cycle, or supply a custom `encode`.
+
+### E2407 · Dataset reports no finalized head
+
+The dataset never reports a finalized watermark, so the target cannot keep a rollback manifest —
+and nothing it publishes could be compensated if the chain forked.
+
+**Fix** — read the finalized stream, or set `assumeNoForks: true` to assert that this dataset
+cannot fork. The absence of a watermark is not evidence that forks cannot happen, which is why the
+assertion has to be explicit.
+
+### E2408 · Fork reported under `assumeNoForks`
+
+A chain fork arrived on a pipe that declared the dataset fork-free. Nothing was recorded to
+compensate with, and the affected operations are already published.
+
+**Fix** — remove `assumeNoForks`, and re-bootstrap the consumers of the affected topics.
+
+### E2409 · Block has no hash
+
+A fork-capable dataset delivered a block without a hash, and the route relies on generated ids.
+Bare block numbers repeat after a fork, so the generated id would alias an orphaned row with a
+canonical one.
+
+**Fix** — supply an explicit `id` in the route's `map`.
+
+### E2410 · State file is locked
+
+Another process holds the state file. Exactly one producer may own one: it is the authoritative
+sequencer for every id it publishes, and a second writer would hand consumers `_seq` values they
+already hold.
+
+**Fix** — run one instance per state path.
+
+### E2411 · State schema version mismatch
+
+The state file was written by a different schema version of the target.
+
+**Fix** — upgrade or downgrade the SDK to match, or start a fresh state under a fresh `namespace`
+(a new state file is a new sequencer — see the cold-start warning in the target's logs).
+
+### E2412 · Ordering key under the `lww` profile
+
+A route set a per-draft `orderingKey`, but the pipe runs the default `lww` profile, which uses no
+Pub/Sub ordering keys at all.
+
+**Fix** — switch to `publish.delivery: 'ordered'` to partition a topic, or drop the key.
+
+### E2413 · Materialized id moved
+
+A materialized id changed its topic, ordering key, or filter attributes between revisions. A
+subscription filter selected on the old attributes would stop receiving the row mid-life.
+
+**Fix** — keep a materialized row's identity and attributes stable for its whole lifetime.
+
+### E2414 · Delete-free window route without an empty value
+
+`windowTopic({ emptyWindows: 'upsert' })` was declared without `emptyValues`. The two go together: a
+fork can orphan every revision of a window id, and the compensation for that has no row behind it —
+the target must synthesize one, and only the route knows what an empty window looks like.
+
+**Fix** — supply `emptyValues`. Without it the route would be delete-free in normal operation but
+emit a `delete` on a fork, which is the worst of both: its consumers skipped tombstone retention on
+the strength of the guarantee.
+
+### E2415 · Draft without a usable block
+
+A route produced an operation with no `block.number`. Every operation is attributed to its block —
+that attribution is what makes fork compensation possible.
+
+**Fix** — carry the row's block through `map`.
+
+### E2416 · `publishFrom: 'latest'` cannot be resolved
+
+The dataset reports neither a chain head nor a finalized head, so there is no head to go live at.
+
+**Fix** — pass an explicit `publishFrom` block.
+
+### E2417 · State file unavailable
+
+The state file could not be opened. It is the producer's sequencer, so it must live on a persistent
+volume — not ephemeral container storage.
+
+**Fix** — check the path and its permissions, and mount it on durable storage.
+
+### E2413 · Materialized row changed its identity
+
+A row declared `mode: 'materialized'` changed its topic, ordering key, or filter attributes
+between revisions. A fork restores a row under the identity it was **first** published with, so
+a subscription filtered on the newer attributes would never receive the repair and would keep
+the orphaned revision indefinitely.
+
+**Fix** — keep a materialized row's topic, ordering key and attributes stable for its whole
+lifetime, or give the new shape a new id. (Attribute *order* is irrelevant; only the set of
+names and values matters.)
+
+### E2418 · Two drafts with the same id in one batch
+
+An `event` route produced two operations sharing an id in one batch. On an event route every id is
+write-once, so the second would silently overwrite the first for every consumer.
+
+**Fix** — make the id unique per row, or declare `mode: 'materialized'` if the row is meant to be
+revised.
+
+### E2419 · State file belongs to another producer
+
+The state file records a different cursor key than the one this pipe binds. Only the cursor row
+is keyed — the outbox, the manifest and the sequence counters are producer-wide — so adopting
+another producer's file would report a clean warm start while publishing its pending operations
+under this pipe's identity.
+
+**Fix** — one state file per producer. Give this pipe its own `state.path`, or pin
+`settings.id` to the key the file was written under if this pipe really is that producer
+renamed.
+
+### E2420 · State file was written under the other delivery profile
+
+`publish.delivery` changed between runs against the same state. The two profiles scope `_seq`
+differently — one producer-wide counter versus one dense counter per partition — so continuing
+would re-issue sequence numbers consumers already hold, and a conforming consumer would discard
+the new operations as duplicates.
+
+**Fix** — changing profile is a new feed, not a config tweak: fresh `namespace`, fresh state
+file, re-bootstrapped consumers.

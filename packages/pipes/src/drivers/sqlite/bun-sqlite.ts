@@ -26,4 +26,8 @@ export class BunSQLite implements SqliteSync {
       yield message as R
     }
   }
+
+  close() {
+    this.#db.close()
+  }
 }
