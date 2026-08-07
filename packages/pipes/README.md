@@ -14,7 +14,8 @@ three composable parts:
 - **Decoders** turn raw blocks, logs, and instructions into strongly-typed objects.
 - **Targets** persist or forward the decoded data, managing offsets and chain reorgs.
 
-Storage targets are available for **ClickHouse**, **PostgreSQL** (via Drizzle), **Parquet**, and **BigQuery**.
+Storage targets are available for **ClickHouse**, **PostgreSQL** (via Drizzle), **Parquet**, and **BigQuery**;
+**Google Pub/Sub** publishes the stream as a live changelog for downstream consumers.
 Observability is built in: Prometheus metrics, Pino-compatible logging, and profiling utilities.
 
 ---
