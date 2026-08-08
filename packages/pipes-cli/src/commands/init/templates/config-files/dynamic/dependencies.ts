@@ -1,7 +1,10 @@
 import type { NetworkType, Target } from '~/types/init.js'
 
 const baseDependencies: Record<string, string> = {
-  '@subsquid/pipes': '^1.0.0',
+  // Prerelease-aware range: plain '^1.0.0' excludes prereleases, and every
+  // published 1.0 line is one so far, so it resolves to nothing. This range
+  // takes the 1.0 betas today and the stable 1.0.0 once it ships.
+  '@subsquid/pipes': '^1.0.0-beta.1',
   dotenv: '^16.4.5',
   zod: '^4.3.4',
 }
