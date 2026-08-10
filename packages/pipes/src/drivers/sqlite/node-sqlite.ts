@@ -26,4 +26,8 @@ export class NodeSQLite implements SqliteSync {
       yield message as R
     }
   }
+
+  close() {
+    if (this.#db.open) this.#db.close()
+  }
 }
