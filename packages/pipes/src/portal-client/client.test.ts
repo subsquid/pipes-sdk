@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 import { isForkException } from '~/portal-client/fork-exception.js'
-import { MockPortal, MockResponse, mockPortal } from '~/testing/index.js'
+import { MockPortal, MockResponse, finalizedMockPortal, mockPortal } from '~/testing/index.js'
 
 let portal: MockPortal | undefined
 
@@ -275,5 +275,41 @@ describe('PortalClient request accounting', () => {
       200: 2,
       503: 1,
     })
+  })
+})
+
+describe('PortalClient bounded range above the finalized head', () => {
+  // A finalized stream's blocks are final by definition, so delivering `toBlock` is the exit
+  // condition — not the current finalized head. The hot stream has no counterpart contract: there
+  // finality is a response header, and the range ends once it has been delivered.
+  it('waits at the finalized head, polling, until toBlock is delivered', async () => {
+    const polled: number[] = []
+    portal = await finalizedMockPortal([
+      {
+        statusCode: 200,
+        data: [block(1), block(2), block(3)],
+        head: { finalized: { number: 3, hash: '0x3' } },
+      },
+      { statusCode: 204, validateRequest: (req) => polled.push(req.fromBlock) },
+      { statusCode: 204, validateRequest: (req) => polled.push(req.fromBlock) },
+      {
+        statusCode: 200,
+        data: [block(4), block(5)],
+        head: { finalized: { number: 5, hash: '0x5' } },
+        validateRequest: (req) => polled.push(req.fromBlock),
+      },
+    ] satisfies MockResponse[])
+
+    const client = new PortalClient({ url: portal.url, finalized: true, headPollIntervalMs: 5 })
+
+    const delivered: number[] = []
+    for await (const batch of client.getStream({ ...query, fromBlock: 1, toBlock: 5 })) {
+      delivered.push(...batch.blocks.map((b: any) => b.header.number))
+    }
+
+    // The stream neither ended short at the finalized head (3) nor crashed on the wait.
+    expect(delivered).toEqual([1, 2, 3, 4, 5])
+    // The tail was genuinely waited for: the endpoint kept being polled at the finalized head.
+    expect(polled).toEqual([4, 4, 4])
   })
 })
