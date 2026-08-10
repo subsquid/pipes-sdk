@@ -7,10 +7,9 @@
  * read directly by DuckDB, Spark, Athena and ClickHouse `s3()` (no import step).
  *
  * Why this target:
- *   - **Finalized-only.** A row is written only once its block is at/below the portal's
- *     finalized head, so a reorg never touches a file on disk. This example uses a fixed,
- *     already-finalized range, so every row is written immediately; on a live `from: 'latest'`
- *     range the unfinalized tail is held in memory until it finalizes.
+ *   - **Finalized-only.** The target reads `/finalized-stream`, so every delivered block is final
+ *     and a reorg never touches a file on disk. This example uses a fixed historical range; a live
+ *     `{ from: 'latest' }` range resolves against the finalized head and follows finalized blocks.
  *   - **Constant memory.** Rows stream to a temp file that rotates by byte size
  *     (`rollover.maxBytes`), so a multi-GB backfill never lands wholly in RAM. The engine's
  *     `rowGroupSize` factory option bounds the writer's in-memory buffer.
@@ -48,11 +47,10 @@ const OUT = process.env['PARQUET_OUT'] ?? './parquet-out'
 async function main() {
   await evmPortalStream({
     id: 'erc20-parquet',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    portal: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet', finalized: true },
     outputs: evmEventDecoder({
-      // A small, already-finalized historical range so files appear immediately and the run
-      // terminates. Swap to `{ from: 'latest' }` to watch the finalized-only buffer hold the
-      // unfinalized tail back until it finalizes.
+      // A small historical range so files appear immediately and the run terminates. Swap to
+      // `{ from: 'latest' }` to follow the finalized head without an in-memory finality buffer.
       range: { from: 21_000_000, to: 21_000_100 },
       events: {
         transfers: commonAbis.erc20.events.Transfer,

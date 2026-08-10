@@ -284,7 +284,7 @@ describe('ParquetStore', () => {
         { from: 5, to: 6 },
       ])
       store.insert('blocks', [{ blockNumber: 1, hash: '0x1', timestamp: 1 }])
-      await store.flushBatch({ finalized: { number: 1, hash: '0x1' }, rollbackChain: [] })
+      await store.flushBatch()
 
       await store.publishAll(1)
 
@@ -304,14 +304,12 @@ describe('ParquetStore', () => {
         engine: parquetjsEngine({ rowGroupSize: 1 }),
       })
       store.seedCoverage(undefined, 0)
-      const stuck = { finalized: { number: 1, hash: '0x1' }, rollbackChain: [] }
-
       store.insert('blocks', [{ blockNumber: 1, hash: '0x1', timestamp: 1 }])
-      await store.flushBatch(stuck)
+      await store.flushBatch()
       await store.publishAll(1)
 
       store.insert('blocks', [{ blockNumber: 1, hash: '0x1', timestamp: 1 }])
-      await store.flushBatch(stuck)
+      await store.flushBatch()
       expect(await store.publishAll(1)).toEqual([])
       expect(store.hasOpenWriters).toBe(true)
 
@@ -337,7 +335,7 @@ describe('ParquetStore', () => {
 
       store.insert('blocks', [{ blockNumber: 1, hash: '0x1', timestamp: 1 }])
       store.insert('other', [{ blockNumber: 1 }])
-      await store.flushBatch({ finalized: { number: 1, hash: '0x1' }, rollbackChain: [] })
+      await store.flushBatch()
 
       const published = await store.publishAll(1, { closeTails: true, tables: ['blocks'] })
 
@@ -356,7 +354,7 @@ describe('ParquetStore', () => {
         engine: parquetjsEngine({ rowGroupSize: 1 }),
       })
       store.insert('blocks', [{ blockNumber: 1, hash: '0x1', timestamp: 1 }])
-      await store.flushBatch({ finalized: { number: 1, hash: '0x1' }, rollbackChain: [] })
+      await store.flushBatch()
 
       expect.assertions(1)
       try {

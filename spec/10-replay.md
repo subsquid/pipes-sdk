@@ -25,9 +25,8 @@ code is a pure function of ⟨batch content, static configuration⟩ for finaliz
 no wall-clock, no randomness, no external mutable reads that can change between runs.
 The sink cannot verify purity; the spec makes it a *stated author obligation* whose
 violation voids INV-43 (byte-identical regeneration).
-*Consequence:* aggregate rows spanning blocks MUST be attributed to their **last**
-contributing block, else hold-back release publishes them before their inputs are
-final.
+Finalized-only source selection does not weaken this obligation: it removes the local
+finality buffer, but class-K crash recovery still re-fetches and regenerates rows.
 
 **RS-11 — Stateful transformers across replay.** [MUST] A transformer holding state
 MUST rebuild it deterministically from the stream (its rollback hook discards state

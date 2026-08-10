@@ -124,15 +124,18 @@ solanaInstructionDecoder({
 
 ## Fork handling
 
-Raised while unwinding a chain reorganization (fork). The built-in targets handle forks; the first
-three mostly surface in **custom** targets.
+Raised while unwinding a chain reorganization (fork). Targets that read the hot stream — ClickHouse,
+Postgres, BigQuery — handle forks themselves, so E1001–E1003 mostly surface in **custom** targets.
+The finalized-only targets (Parquet, memory) read `/finalized-stream`, where a fork cannot occur;
+they raise E1005 instead if one is reported anyway.
 
 ### E1001 · Target does not support fork handling
 
 A fork was detected, but the target does not implement `resolveFork()`.
 
 **Fix** — implement `resolveFork(canonicalBlocks)` on the target. It must remove rows above the fork
-point and return the cursor to resume from.
+point and return the cursor to resume from. A target that commits only finalized data should instead
+set `requiresFinalizedStream: true`, which puts it on a stream no fork can reach.
 
 ### E1002 · Fork with no canonical blocks
 
@@ -155,6 +158,17 @@ to proceed. Any target that tracks a cursor can raise this.
 
 **Fix** — none in user code; please
 [report it as a bug](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal contract.
+
+### E1005 · Fork reported on the finalized stream
+
+The pipe reads `/finalized-stream`, where every delivered block is already final, and the portal
+answered a request with a fork. The target commits only finalized data and has no rollback path by
+design, so the pipe stopped without changing anything it had already written.
+
+**Fix** — [report it](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal. To
+restart, rewind (or clear) the target's persisted cursor to a block the portal still considers
+canonical — for the Parquet target that is the `_sqd_parquet_state.<pipe-id>.json` file in its
+output directory.
 
 ---
 
@@ -417,8 +431,8 @@ The persisted state file exists but could not be parsed.
 
 ### E2311 · Block-number column is optional
 
-The block-number column is declared `optional`, but finalization, file-range naming, and crash
-recovery all key off it — a null coerces to an immutable block-0 row.
+The block-number column is declared `optional`, but every row must be attributable to a block for
+file-range reasoning and crash recovery. Null or missing values are rejected before append.
 
 **Fix** — declare the block-number column required (remove `optional`).
 

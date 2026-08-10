@@ -1,8 +1,8 @@
 # 13 — Conformance & TDD (CT-n, GAP-n) — MUTABLE
 
-Last updated: 2026-07-22. Statuses reflect the actual TypeScript test inventory at
-commit `744ea82` (this branch's mainline merge base), plus the parquet
-coverage-naming suites landing with it, not aspiration.
+Last updated: 2026-08-11. Statuses reflect the actual TypeScript test inventory at this
+change's mainline merge base plus the finalized-only target suites in this change, not
+aspiration.
 
 ## Harness architecture
 
@@ -13,7 +13,7 @@ coverage-naming suites landing with it, not aspiration.
 │   block/head/fork│  fork signals, faults │   black box)     │
 │   it ever served)│◀──────────────────────│                  │
 └─────────────────┘   requests (asserted   └──────┬───────────┘
-        │              against IB-1…IB-9)         │ commits
+        │              against IB-1…IB-11)        │ commits
         │                                          ▼
         │            ┌──────────────┐      ┌──────────────────┐
         └───────────▶│ reference    │      │ sink store probe │
@@ -35,7 +35,14 @@ evaluated at quiescence.
 ## Reference model (normative pseudocode)
 
 ```
-state: C←⊥, F←⊥, RC←[], D←{}, B←[], V←{}          # per DEF tuple
+state: C←⊥, F←⊥, RC←[], D←{}, V←{}                # per DEF tuple
+mode ← configured stream mode
+
+bind(target):                                      # WP-7 / RP-7
+  if target requires finalized-only: mode ← finalized-only
+  portal ← effective-view(mode)
+  resolve symbolic ranges through portal
+  pass the same portal view to transformers and caches
 
 recover(persisted):                                  # T-INIT
   require well-formed(persisted) else REFUSE          # INV-5, INV-44
@@ -44,15 +51,15 @@ recover(persisted):                                  # T-INIT
 
 batch(blocks, head):                                 # T-BATCH
   require blocks strictly ascending, first = C+1 (within range)   # INV-20
+  if class ∈ {K, ∅}: require mode = finalized-only   # INV-25
   F ← max(F, head.finalized)                          # INV-12
   RC ← [b ∈ processed : b.number > F]                 # INV-1
   rows ← transform(blocks)                            # pure per RS-10
-  if class ∈ {K, ∅}: B ← B + rows; release ← {r ∈ B : r.block ≤ F}; B ← B − release
-  else: release ← rows
-  commit(D += release, C ← last(blocks), F, RC)       # per class CN-10…CN-14
+  commit(D += rows, C ← last(blocks), F, RC)          # per class CN-10…CN-14
   wellformed_check()
 
 fork(canonical):                                     # T-FORK
+  require mode = full else CODED-ERROR                # WP-45 / FM-13
   require canonical ≠ ∅ else CODED-ERROR              # WP-41
   require max(canonical).number ≥ C.number else CODED-ERROR   # RP-43 (class W enforces today — GAP-9)
   W ← canonical                                       # narrowing window
@@ -64,7 +71,7 @@ fork(canonical):                                     # T-FORK
     W ← {w ∈ W : w.number < r.number}
   if A unset and |W| = 1 and W.hash = F.hash → A ← F   # floor fallback (WP-42)
   if A unset → CODED-ERROR                             # no ancestor (E1003)
-  D ← D − rows(> A.number); B ← B − rows(> A.number)
+  D ← D − rows(> A.number)
   C ← A; RC ← RC[≤ A.number]                           # F unchanged; INV-13/14
   commit-point(fork)                                   # CN-34 (class A deviates — GAP-21)
 
@@ -84,11 +91,11 @@ windows, persisted formats — is deterministic against the oracle.
 
 | CT | Class | Primary properties |
 |---|---|---|
-| CT-1 | pipeline property tests (simulator ↔ oracle lockstep, structural validators, quiescence diff) | INV-1…INV-5, INV-10…INV-17, INV-20…INV-25, INV-30, WP-*, RP-20…RP-23 |
+| CT-1 | pipeline property tests (simulator ↔ oracle lockstep, structural validators, quiescence diff) | INV-1…INV-5, INV-10…INV-17, INV-20…INV-25, INV-30, WP-*, RP-7, RP-20…RP-23 |
 | CT-2 | crash-recovery kill-point matrix (kill at every class commit-protocol step; double-kill; corrupted-state corpus) | INV-40…INV-44, CN-*, REQ-3, REQ-6 |
-| CT-3 | fork conformance (depth × timing × class; fork-during-hold-back; fork-storm) | REQ-4, WP-40…WP-47, INV-13, INV-14, LIV-4 |
+| CT-3 | fork conformance (depth × timing × full-stream class; fork-storm; impossible-fork refusal on finalized-only routes) | REQ-4, WP-40…WP-47, INV-13, INV-14, LIV-4 |
 | CT-4 | input/dependency fault corpus (every FM row) | FM-*, LIV-2, LIV-7, INV-31, INV-32 |
-| CT-5 | interface conformance (wire fixtures IB-1…IB-9; persisted-format round-trips IB-20…IB-26 incl. cross-implementation resume; decode/selection fixtures; observability golden scrapes IB-40…IB-46; error-code registry sync IB-50…IB-52) | REQ-23, INV-5, INV-21, INV-23, CN-45 |
+| CT-5 | interface conformance (wire fixtures IB-1…IB-11; persisted-format round-trips IB-20…IB-26 incl. cross-implementation resume; decode/selection fixtures; observability golden scrapes IB-40…IB-46; error-code registry sync IB-50…IB-52) | REQ-23, INV-5, INV-21, INV-23, CN-45 |
 | CT-6 | performance benchmarks (S1–S6, SLO gates, saturation knee) | SLI-*, PF-*, LIV-3, LIV-5 |
 | CT-7 | soak/endurance (S4 sparse coverage honesty, memory plateau, reclamation) | INV-4, REQ-20, LIV-8, LIV-9, CN-24 |
 | CT-8 | isolation (co-resident pipes, dual-instance where lock declared, legacy-migration races) | INV-15, INV-35, LIV-10, RP-31, RP-32 |
@@ -104,9 +111,10 @@ A — after data pre-cursor, after cursor · all — during recovery itself, dur
 Applicable to any emission/state without domain knowledge: decodable (parses per
 format) · ordered (ascending attribution) · linked (batch first = cursor+1) ·
 items-belong-to-parent (rows within their unit's window) · in-range (attribution within
-configured ranges) · watermark coherence (RC above F; C consistent with data bound).
+configured ranges) · watermark coherence (RC above F; C consistent with data bound) ·
+route-mode coherence (classes K/∅ bound to finalized-only delivery).
 
-## Traceability matrix (2026-07-18)
+## Traceability matrix (2026-08-11)
 
 Status: **C** covered · **P** partial · **U** unchecked. Suffix ⚠ = known-violated or
 known-suspect in the current implementation (see gap register).
@@ -117,6 +125,7 @@ known-suspect in the current implementation (see gap register).
 | WP-3 (id validation) | CT-1 | P ⚠ | rejects, but uncoded (GAP-4) |
 | WP-4 (range resolution) | CT-1 | C | range-algebra + builder tests |
 | WP-5/CN-40…CN-44 recovery-before-write | CT-2 | P ⚠ | class K covered; T/W/A unchecked (GAP-14); orphan guard W-only and table-wide rather than key-scoped (GAP-20) |
+| WP-7, RP-7, DEF-15, INV-25, IB-11 (finalized-only selection) | CT-1/5 | C | portal-source asserts hot override + warning, finalized `latest` and its no-finality fallback, transformer-start view honouring an explicit hot head, per-pipe (non-sticky) selection, effective cache client and node-cache forwarding, quiet pre-finalized mode, and unchanged non-requiring mode; Parquet/memory assert direct delivery and the coded impossible-fork refusal |
 | WP-10, WP-15, INV-20 (ordering) | CT-1 | P | buffer/split unit tests; no adversarial simulator (GAP-29) |
 | WP-11, HZ-1 (assembly bounds) | CT-1 | C | stream-buffer tests |
 | WP-12 (backpressure) | CT-1/6 | P | unit-level only; no end-to-end saturation test |
@@ -127,7 +136,7 @@ known-suspect in the current implementation (see gap register).
 | WP-24 (attribution uniqueness) | CT-5 | P ⚠ | collision only logged in evm, undetected in solana (GAP-15, OQ-6) |
 | WP-25 (query union) | CT-1 | C | merge/heap tests + multi-output isolation |
 | WP-30…WP-32 (lifecycle) | CT-1 | P ⚠ | stop-once + partial-start tested; fork path re-fires start/stop per segment (GAP-22) |
-| WP-40…WP-43 (fork core) | CT-3 | C | fork/finalization-buffer/portal-source suites; WP-42 text normativized from the tested deep-fork/floor-fallback semantics |
+| WP-40…WP-43 (fork core) | CT-3 | C | core fork, portal-source, and fork-capable target suites; WP-42 text normativized from the tested deep-fork/floor-fallback semantics; K/∅ excluded by WP-7 |
 | WP-41 (empty canonical) | CT-4 | U ⚠ | ctor crash preempts coded path (GAP-8) |
 | WP-44 (finality conflict) | CT-3 | P ⚠ | null result tested; downstream halt untested (GAP-6) |
 | WP-46 (rollback idempotence) | CT-2/3 | P | netting idempotence tested (one binding); others U |
@@ -139,7 +148,7 @@ known-suspect in the current implementation (see gap register).
 | RP-43 (contract guard) | CT-3 | P ⚠ | one binding only (GAP-9) |
 | CN-10 T atomicity | CT-2 | P ⚠ | live tx tests; kill-points U (GAP-14) |
 | CN-11 W protocol | CT-2 | P | unit/lifecycle C; integration gated off CI |
-| CN-12 K protocol | CT-2 | C | crash-safety + recovery suites; straddle refusal asserted (E2317) |
+| CN-12 K protocol | CT-1/2 | C | finalized-route selection plus crash-safety + recovery suites; straddle refusal asserted (E2317) |
 | CN-13 A protocol | CT-2 | U ⚠ | recovery/fork with a hook untested; no-hook window is an accepted deviation (ADR-15); kill-point owed (GAP-14) |
 | CN-17, CN-35, CN-46 C protocol | CT-2/3 | P ⚠ | fold-per-id, baseline restore, route-declared inverse, seq monotonicity across forks and the commit-then-publish crash window are asserted against a publisher seam; no live-bus conformance run, and the lost-sequencer exposure is operational only (GAP-38) |
 | RP-24, RP-44 (changelog contract) | CT-5 | P ⚠ | canonical codec tested as a contract (accept/reject table + golden bytes); attribute inheritance through forks asserted; consumer-side convergence untested against a real subscription |
@@ -158,12 +167,12 @@ known-suspect in the current implementation (see gap register).
 | RS-20…RS-25 (cache) | CT-5 | C | except overlap re-insert (U) |
 | FM corpus | CT-4 | P | scattered unit coverage; no systematic corpus |
 | SLI/PF | CT-6 | U | no benchmarks recorded |
-| IB-1…IB-9 wire | CT-5 | P | client-side tested; no golden wire fixtures |
+| IB-1…IB-11 wire | CT-5 | P | client-side tested, including finalized route selection; no golden wire fixtures |
 | IB-20…IB-26 formats | CT-5 | P ⚠ | per-binding tests; no round-trip corpus; timestamp units per-network (GAP-24) |
 | IB-40…IB-46 observability | CT-5 | U ⚠ | consumed by dashboard, no golden scrapes (GAP-16) |
 | IB-50…IB-52 error registry | CT-5 | U ⚠ | no registry-sync test (GAP-13) |
 
-## Gap register (2026-07-23)
+## Gap register (2026-08-11)
 
 Priorities: P0 active production risk · P1 correctness hole, plausible trigger ·
 P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry point.
@@ -185,7 +194,7 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-20 | The orphan-data guard is table-wide where it must be key-scoped: the write-ahead binding (E2212) probes the tracked table with no key filter while reading its sync row by key, so a co-resident pipe's legitimate first run into a populated shared table is refused — one pipe's startup made dependent on another's data, blocking a configuration INV-35/RP-41 support. The other bindings run no guard at all and restart from scratch over genuinely orphan data | CN-44, INV-35, REQ-3 | P2 | second pipe id, first run into a table another pipe populates → assert start, not refusal; then on declared-exclusive tables delete cursor state and assert coded refusal per binding |
 | GAP-21 | Append-lagged fork completion persists nothing (no rewound cursor row); a crash after resolveFork and before the next commit resumes from pre-fork state | CN-34 | P2 | kill between resolveFork and the next commit; assert recovered C = ancestor |
 | GAP-22 | A fork tears down and restarts the whole lifecycle (stop + start hooks, metrics server) per streaming segment — hooks fire per segment, not exactly once per run | WP-30, INV-17 | P2 | count start/stop hook invocations across one resolved fork; assert one each |
-| GAP-23 | Head-only (204) responses are dropped before the progress tracker (no per-signal OB-2 emission) and their finalized-head report is discarded — the floor stalls while idle at head, delaying hold-back release on quiet chains | WP-13, DEF-6 | P2 | serve 204 with a raised finalized header; assert floor advance + progress emission |
+| GAP-23 | Head-only (204) responses are dropped before the progress tracker (no per-signal OB-2 emission) and their finalized-head report is discarded — the floor stalls while idle at head, so persisted finality and rollback-retention state lag on quiet chains | WP-13, DEF-6 | P2 | serve 204 with a raised finalized header; assert floor advance + progress emission |
 | GAP-24 | Cursor timestamps are portal-verbatim and network-dependent — tron reports milliseconds (hyperliquid presumed ms) — and the write-ahead binding's lag metric assumes seconds (off by 1000×) | DEF-1, IB-20…IB-26 | P2 | tron fixture cursor round-trip asserting the declared unit; normalization decision is OQ-7 |
 | GAP-25 | Block schema-validation failures surface as an uncoded `DataValidationError` without identifying the offending block | FM-11, WP-16, REQ-13 | P2 | stream one schema-violating block; assert a coded error naming the block |
 | GAP-26 | Class-T batch-transaction retry is ungated (any error retried, including integrity faults) and the serializable-isolation default is operator-downgradable without a guard | FM-21, FM-2, CN-10 | P2 | throw an integrity error in onData → assert no retry; configure read-committed → assert refusal or documented degradation |

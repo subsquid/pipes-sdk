@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PortalBatch } from '~/core/index.js'
 import { evmPortalStream } from '~/evm/index.js'
 import { portalSqliteCache } from '~/portal-cache/node/node-sqlite-cache-adapter.js'
-import { MockPortal, blockDecoder, mockPortal } from '~/testing/index.js'
+import { createMemoryTarget } from '~/targets/memory/memory-target.js'
+import { MockPortal, blockDecoder, finalizedMockPortal, mockPortal } from '~/testing/index.js'
 
 // Transform batch to only include data and meta without any functions or complex objects
 const transformBatch = ({
@@ -608,6 +609,49 @@ describe('Portal cache', () => {
       )
 
       expect(rows).toHaveLength(2)
+    })
+
+    it('forwards the finalized option to the portal when the target requires it', async () => {
+      // The mock serves /finalized-stream ONLY, so the cache's own portal call — the one leg the
+      // client-side proxy does not cover — has to carry the flag or this 404s. The second pass then
+      // replays the same blocks from the cache without touching the portal at all.
+      portal = await finalizedMockPortal([
+        {
+          statusCode: 200,
+          data: [
+            { header: { number: 1, hash: '0x1', timestamp: 1000 } },
+            { header: { number: 2, hash: '0x2', timestamp: 2000 } },
+          ],
+          head: { finalized: { number: 2, hash: '0x2' } },
+        },
+      ])
+
+      const cache = portalSqliteCache({ path: DB_PATH })
+      const seen: number[][] = []
+
+      const run = () =>
+        evmPortalStream({
+          id: 'test',
+          portal: { url: portal.url, finalized: false },
+          logger: 'silent',
+          outputs: blockDecoder({ from: 0, to: 2 }).pipe((d) => d.map((b) => ({ blockNumber: b.number }))),
+          cache,
+        }).pipeTo(
+          createMemoryTarget({
+            onData: (data) => {
+              seen.push(data.map((b) => b.blockNumber))
+            },
+          }),
+        )
+
+      await run()
+      // The single mocked response is spent; a second portal request would 500.
+      await run()
+
+      expect(seen).toEqual([
+        [1, 2],
+        [1, 2],
+      ])
     })
   })
 })

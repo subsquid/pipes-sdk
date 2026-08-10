@@ -2,6 +2,7 @@ import { event, indexed } from '@subsquid/evm-abi'
 import * as p from '@subsquid/evm-codec'
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest'
 
+import { createTarget } from '~/core/target.js'
 import { createMemoryTarget } from '~/targets/memory/memory-target.js'
 import { encodeEvent, mockBlock, mockEvmPortalStream, resetMockBlockCounter } from '~/testing/evm/index.js'
 import { MockPortal, mockPortal, readAll } from '~/testing/index.js'
@@ -402,10 +403,17 @@ describe('Factory', () => {
         }),
       ),
     }).pipeTo(
-      createMemoryTarget({
-        onData: (data) => {
-          res.push(data)
+      // A hot sink with a trivial rollback: the subject is the factory's own fork handling, and a
+      // finalized-only target (like the memory one) would never be shown the 409 at all.
+      createTarget<any>({
+        write: async ({ read }) => {
+          for await (const batch of read()) {
+            if (batch.data.length > 0) {
+              res.push(batch.data)
+            }
+          }
         },
+        resolveFork: async (canonicalBlocks) => canonicalBlocks.at(-1) ?? null,
       }),
     )
 

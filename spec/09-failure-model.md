@@ -28,7 +28,7 @@ Bands 10–19.
 | FM-10 | slow / unresponsive portal | mask via retry (P-RETRY-SCHEDULE-MS, unbounded for streaming) + alarm OB-13 while stalled |
 | FM-11 | malformed batch line (invalid JSON, schema-violating block) | fail-safe + alarm, diagnostic names the offending block (WP-16; GAP-5, GAP-25) |
 | FM-12 | regressing / vanishing finalized head | mask: clamp at floor (INV-12); never un-finalize |
-| FM-13 | fork signal on a no-finality dataset feeding an immutable sink | fail-safe (no rollback possible for published rows) — documented class limitation |
+| FM-13 | finalized-only delivery cannot establish finality (no-finality dataset), or receives a fork signal | no floor: degrade with the explicit "not reorg-safe" limitation; fork: fail-safe because the sink intentionally has no rollback path (WP-45) |
 | FM-14 | fork signal with empty canonical chain | fail-safe with coded contract violation (WP-41) |
 | FM-15 | canonical chain entirely below persisted cursor | fail-safe with coded contract violation (RP-43) |
 | FM-16 | duplicate / out-of-order blocks within a stream | fail-safe: violates the trusted-ordering premise (ADR-1); MUST NOT be silently reordered *(no local detection exists today — GAP-29)* |

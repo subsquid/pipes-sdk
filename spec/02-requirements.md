@@ -29,21 +29,26 @@ restart, output identical to an uninterrupted run.
 *Trace:* RP-1…RP-6, CN-10…CN-24, INV-40…INV-44; ADR-5.
 
 **REQ-4 — Automatic fork rollback.** [MUST]
-On a portal fork signal, the pipe locates the canonical ancestor, removes all sink data
-above it, rewinds the cursor, notifies transformers, and resumes from the ancestor —
-without operator action and without touching finalized data.
-*Acceptance:* fork conformance suite (CT-3): any fork depth within retention resolves to
-the oracle's ancestor; post-rollback output equals a run that never saw the orphaned blocks.
+On a portal fork signal from the full stream, the pipe locates the canonical ancestor,
+removes all sink data above it, rewinds the cursor, notifies transformers, and resumes
+from the ancestor — without operator action and without touching finalized data.
+Finalized-only delivery receives no fork signal and therefore needs no sink rollback path.
+*Acceptance:* fork conformance suite (CT-3): for every fork-capable sink, any fork depth
+within retention resolves to the oracle's ancestor; post-rollback output equals a run
+that never saw the orphaned blocks.
 *Trace:* WP-40…WP-47, INV-13, INV-14; ADR-3.
 
 **REQ-5 — Finality safety.** [MUST]
 The finalized floor is monotonic across batches, forks, and restarts. Sinks with
-immutable storage expose only finalized data; reorg-able data stays in a bounded
-hold-back buffer.
+immutable storage declare finalized-only delivery, causing the pipe to select the
+portal's finalized head and stream before range resolution; no sink-side finality
+buffer is used. On a dataset that does not define finality, the route cannot provide
+reorg safety and the output is explicitly not reorg-safe (FM-13).
 *Acceptance:* no sequence of portal head reports (including regressions and absences)
-ever lowers the floor; immutable-sink output never contains a block above the floor at
-publish time.
-*Trace:* INV-2, INV-12, INV-25, DEF-15; ADR-3.
+ever lowers the floor; a finalized-only target uses the finalized route even when the
+pipe was configured for the full stream, resolves symbolic `latest` against the
+finalized head, and receives every delivered row without a deferred tail.
+*Trace:* WP-7, INV-2, INV-12, INV-25, DEF-15, IB-11; ADR-3, ADR-22.
 
 **REQ-6 — Restart continuity.** [MUST]
 A restarted pipe resumes from the recovered committed state exactly: the first requested
@@ -95,8 +100,9 @@ is triggerable.
 
 **REQ-20 — Bounded memory.** [MUST]
 Peak memory is derivable from configuration: batch assembly is bounded by
-P-STREAM-MAX-BYTES plus one network chunk, hold-back by finality depth, sink buffers by
-their configured limits. No stage has an unbounded queue.
+P-STREAM-MAX-BYTES plus one network chunk, and sink buffers by their configured limits.
+Finalized-only delivery adds no finality-depth-dependent in-process buffer. No stage has
+an unbounded queue.
 *Acceptance:* soak run (CT-7) under W-* reference load shows memory plateau consistent
 with the derived bound.
 *Trace:* PF-1…PF-5, HZ-1.

@@ -10,6 +10,7 @@ What ANY sink, in any language, must do to plug into a pipe. Bands: 1–19 write
 | `recover` | pipe → sink | return persisted DEF-8 state (or ⊥ on cold start) |
 | `commit` | pipe → sink | persist one batch's data + cursor + floor + rollback chain |
 | `resolveFork` | pipe → sink | roll back above canonical ancestor; return ancestor (optional capability, WP-45) |
+| finalized-only capability | sink → pipe | require finalized head/stream selection before any read (DEF-15, WP-7) |
 | repair hooks | sink → author | recovery/rollback delegation where the class requires it (RP-42) |
 
 ## Write loop
@@ -20,8 +21,8 @@ use the bound key.
 
 **RP-2 — Recover-repair-read order.** [MUST] The sink's write loop is: bind → recover
 state → repair partial writes (CN-40…CN-44) → request the stream from the recovered
-state → per batch: deliver data to author code, then persist cursor per its class's
-commit protocol (CN-10…CN-14).
+state and the sink's finality capability → per batch: deliver data to author code, then
+persist cursor per its class's commit protocol (CN-10…CN-14).
 
 **RP-3 — State handshake fidelity.** [MUST] The state returned by `recover` is exactly
 the last committed ⟨C, F, RC⟩ — never a partially-written one (per-class guarantees in
@@ -39,12 +40,21 @@ acknowledged: the commit protocol aborts so recovery re-delivers (per class).
 (cursor rows, undo records) by the class retention parameter, scoped to their own
 cursor key, without ever deleting the newest committed state.
 
+**RP-7 — Finalized-only capability.** [MUST for classes K/∅] A sink whose class contract
+requires finalized-only delivery declares that capability before its write loop begins.
+It feeds every delivered row into its ordinary commit protocol without a finality
+hold-back and MAY omit `resolveFork`; it MUST NOT depend on a sink-side finality buffer
+to make a full stream safe. The pipe owns enforcement of the capability (WP-7),
+including overriding a configured full stream. Full-stream sinks MUST NOT declare it
+merely to avoid implementing their required fork path.
+
 ## Output contract (what downstream consumers may rely on)
 
 **RP-20 — Visibility class.** [MUST] Immediate-visibility sinks (classes T/W/A/C) expose
-committed rows as soon as the batch commits; deferred sinks (K/∅) expose only finalized
-rows (INV-25). A consumer never observes a torn batch within the class's atomic unit
-(CN-20…CN-24).
+committed rows as soon as the batch commits; source-gated sinks (K/∅) consume the
+finalized-only route and expose delivered rows at their class commit point (INV-25).
+A consumer never observes a torn batch within the class's atomic unit (CN-20…CN-24).
+The no-finality limitation of DEF-15/FM-13 applies.
 
 **RP-21 — Coverage honesty (file sinks).** [MUST] Every published unit is named for the
 coverage window it accounts for (DEF-14): windows tile the processed range per table —
@@ -94,7 +104,8 @@ guessing (e.g. orphan-data guard, CN-44).
 **RP-40 — resolveFork obligations.** [MUST] Given the canonical chain: find the
 ancestor per WP-42 using **own-key** rollback records only; remove all sink data above
 it (class mechanism, CN-30…CN-34); persist the rewound cursor state; return the
-ancestor. Return ⊥ only for the finality dead-end (WP-44).
+ancestor. Return ⊥ only for the finality dead-end (WP-44). This operation is required
+only for sinks consuming the full stream; RP-7 sinks normally omit it.
 
 **RP-41 — Fork scoping.** [MUST] Fork resolution and its deletions are scoped to the
 sink's own cursor key and its declared tracked tables; co-resident pipes and untracked

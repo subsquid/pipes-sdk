@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
+import { defaultLogger } from '~/core/logger.js'
+import { PortalCache } from '~/core/portal-source.js'
 import { SpanHooks } from '~/core/profiling.js'
 import { Target, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
+import { PortalBlockStreamOptions, PortalClient, PortalRequestOptions, Query } from '~/portal-client/index.js'
 import { MockPortal, blockDecoder, finalizedMockPortal, mockPortal, readAll } from '~/testing/index.js'
 
 /**
@@ -791,5 +794,255 @@ describe('pipe/pipeTo type guards', () => {
   it('pipeTo() should not accept plain functions', () => {
     type Fn = (data: any) => any
     expectTypeOf<Fn>().not.toMatchTypeOf<Target<any>>()
+  })
+})
+
+describe('finalized-only targets', () => {
+  let portal: MockPortal
+
+  afterEach(async () => {
+    await portal?.close()
+  })
+
+  const response = {
+    statusCode: 200 as const,
+    data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
+    head: { finalized: { number: 1, hash: '0x1' }, latest: { number: 1 } },
+  }
+
+  /** Records the `finalized` flag the source hands the target, and drains the stream. */
+  function recordingTarget(requiresFinalizedStream: boolean, seen: { finalized?: boolean }) {
+    return createTarget({
+      requiresFinalizedStream,
+      write: async ({ read, finalized }) => {
+        seen.finalized = finalized
+        for await (const _ of read()) {
+          // drained
+        }
+      },
+    })
+  }
+
+  it('switches a hot pipe to the finalized stream, and warns that it did', async () => {
+    // The mock serves /finalized-stream ONLY, so a hot request would 404 — reaching the end of the
+    // stream is itself the proof that the endpoint was switched.
+    portal = await finalizedMockPortal([response])
+    const logger = defaultLogger({ level: 'silent' })
+    const warn = vi.spyOn(logger, 'warn')
+    const seen: { finalized?: boolean } = {}
+
+    await evmPortalStream({
+      id: 'test',
+      portal: { url: portal.url, finalized: false },
+      logger,
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    }).pipeTo(recordingTarget(true, seen) as any)
+
+    // The flag the target is handed describes the stream it actually got, not the one configured.
+    expect(seen.finalized).toBe(true)
+    expect(warn).toHaveBeenCalledOnce()
+  })
+
+  it('refuses a fork on the finalized stream before invoking target rollback', async () => {
+    portal = await finalizedMockPortal([
+      {
+        statusCode: 409,
+        data: { previousBlocks: [{ number: 0, hash: '0x0' }] },
+      },
+    ])
+    const resolveFork = vi.fn(async () => ({ number: 0, hash: '0x0' }))
+
+    const run = evmPortalStream({
+      id: 'test',
+      portal: { url: portal.url, finalized: false },
+      logger: 'silent',
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    }).pipeTo(
+      createTarget<any>({
+        requiresFinalizedStream: true,
+        write: async ({ read }) => {
+          for await (const _ of read()) {
+            // drained
+          }
+        },
+        resolveFork,
+      }),
+    )
+
+    await expect(run).rejects.toMatchObject({ code: 'E1005', name: 'ForkHandling' })
+    expect(resolveFork).not.toHaveBeenCalled()
+  })
+
+  it("resolves 'latest' against the finalized head after switching the stream", async () => {
+    portal = await finalizedMockPortal([
+      {
+        ...response,
+        validateRequest: (query) => expect(query.fromBlock).toBe(1),
+      },
+    ])
+    let requestedFinalizedHead: boolean | undefined
+
+    class RecordingPortalClient extends PortalClient {
+      override async getHead(options?: PortalRequestOptions & { finalized: boolean }) {
+        requestedFinalizedHead = options?.finalized
+
+        // A hot-head lookup would make the configured range invalid (`from: 10, to: 1`).
+        return options?.finalized ? { number: 1, hash: '0x1' } : { number: 10, hash: '0x10' }
+      }
+    }
+
+    const client = new RecordingPortalClient({ url: portal.url, finalized: false })
+
+    await evmPortalStream({
+      id: 'test',
+      portal: client,
+      logger: 'silent',
+      outputs: blockDecoder({ from: 'latest', to: 1 }),
+    }).pipeTo(recordingTarget(true, {}) as any)
+
+    expect(requestedFinalizedHead).toBe(true)
+  })
+
+  it("falls back to the hot head for 'latest' on a dataset that finalizes nothing", async () => {
+    // Such a dataset still streams (its output just isn't reorg-safe). Taking the absent finalized
+    // head at face value would resolve 'latest' to 0 and silently backfill the whole chain.
+    portal = await finalizedMockPortal([
+      {
+        ...response,
+        validateRequest: (query) => expect(query.fromBlock).toBe(1),
+      },
+    ])
+
+    class NoFinalityPortalClient extends PortalClient {
+      override async getHead(options?: PortalRequestOptions & { finalized: boolean }) {
+        return options?.finalized ? undefined : { number: 1, hash: '0x1' }
+      }
+    }
+
+    await evmPortalStream({
+      id: 'test',
+      portal: new NoFinalityPortalClient({ url: portal.url, finalized: false }),
+      logger: 'silent',
+      outputs: blockDecoder({ from: 'latest', to: 1 }),
+    }).pipeTo(recordingTarget(true, {}) as any)
+  })
+
+  it('gives a transformer the hot head when it explicitly asks for one', async () => {
+    // `start` hooks get the finalized view, which pins the STREAM. A transformer measuring head lag
+    // still has to see the block the chain is actually on.
+    portal = await finalizedMockPortal([response])
+    let seenHead: { number: number } | undefined
+
+    class TwoHeadPortalClient extends PortalClient {
+      override async getHead(options?: PortalRequestOptions & { finalized: boolean }) {
+        return options?.finalized ? { number: 1, hash: '0x1' } : { number: 99, hash: '0x99' }
+      }
+    }
+
+    await evmPortalStream({
+      id: 'test',
+      portal: new TwoHeadPortalClient({ url: portal.url, finalized: false }),
+      logger: 'silent',
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    })
+      .pipe(
+        createTransformer({
+          profiler: { name: 'head-lag' },
+          transform: (data) => data,
+          start: async (ctx) => {
+            seenHead = await ctx.portal.getHead({ finalized: false })
+          },
+        }),
+      )
+      .pipeTo(recordingTarget(true, {}) as any)
+
+    expect(seenHead?.number).toBe(99)
+  })
+
+  it('does not pin later consumers of the same source to the finalized stream', async () => {
+    // One source, two sinks. The endpoint switch belongs to the pipe that asked for it — leaking it
+    // onto the next `pipeTo` would silently cost that sink every unfinalized block.
+    portal = await finalizedMockPortal([])
+    const requestedFinalized: (boolean | undefined)[] = []
+
+    class RecordingPortalClient extends PortalClient {
+      override async getMetadata(): Promise<any> {
+        return { dataset: 'mock-dataset', aliases: [], real_time: true, start_block: 0, metadata: { kind: 'evm' } }
+      }
+      override getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): any {
+        requestedFinalized.push(options?.finalized)
+
+        return (async function* () {})()
+      }
+    }
+
+    const stream = evmPortalStream({
+      id: 'test',
+      portal: new RecordingPortalClient({ url: portal.url, finalized: false }),
+      logger: 'silent',
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    })
+
+    await stream.pipeTo(recordingTarget(true, {}) as any)
+    const hot: { finalized?: boolean } = {}
+    await stream.pipeTo(recordingTarget(false, hot) as any)
+
+    expect(requestedFinalized).toEqual([true, false])
+    expect(hot.finalized).toBe(false)
+  })
+
+  it('keeps a custom cache safe even when it ignores the finalized option', async () => {
+    // The cache intentionally behaves like an implementation compiled against the old contract:
+    // it ignores `finalized` and relies entirely on the client defaults. The mock serves only
+    // /finalized-stream, so this completes only if the client handed to the cache is finalized.
+    portal = await finalizedMockPortal([response])
+    let cacheSawFinalizedClient: boolean | undefined
+    const cache: PortalCache = {
+      getStream({ portal: cachedPortal, query }) {
+        cacheSawFinalizedClient = cachedPortal.finalized
+        return cachedPortal.getStream(query)
+      },
+    }
+
+    await evmPortalStream({
+      id: 'test',
+      portal: { url: portal.url, finalized: false },
+      cache,
+      logger: 'silent',
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    }).pipeTo(recordingTarget(true, {}) as any)
+
+    expect(cacheSawFinalizedClient).toBe(true)
+  })
+
+  it('stays quiet when the pipe already asked for the finalized stream', async () => {
+    portal = await finalizedMockPortal([response])
+    const logger = defaultLogger({ level: 'silent' })
+    const warn = vi.spyOn(logger, 'warn')
+    const seen: { finalized?: boolean } = {}
+
+    await evmPortalStream({
+      id: 'test',
+      portal: { url: portal.url, finalized: true },
+      logger,
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    }).pipeTo(recordingTarget(true, seen) as any)
+
+    expect(seen.finalized).toBe(true)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('leaves a target that does not require finality on the hot stream', async () => {
+    // This mock serves /stream only, so the switch firing here would 404.
+    portal = await mockPortal([response])
+    const seen: { finalized?: boolean } = {}
+
+    await evmPortalStream({
+      id: 'test',
+      portal: { url: portal.url, finalized: false },
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    }).pipeTo(recordingTarget(false, seen) as any)
+
+    expect(seen.finalized).toBe(false)
   })
 })

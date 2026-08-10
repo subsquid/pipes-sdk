@@ -108,3 +108,20 @@ export class PortalContractViolationError extends PipeError {
     super('E1004', SdkErrorName.ForkHandling, message)
   }
 }
+
+/**
+ * E1005: Thrown when a fork is reported on `/finalized-stream`. Every block that stream delivers is
+ * final, so a 409 there means the portal contradicted its own finality. The pipe stops without
+ * rolling anything back — a finalized-only target has no rollback path by design.
+ */
+export class ForkOnFinalizedStreamError extends PipeError {
+  constructor() {
+    super('E1005', SdkErrorName.ForkHandling, [
+      'A fork was reported on the finalized stream, where every delivered block is already final.',
+      'The target commits only finalized data, so nothing was rolled back and the pipe stopped.',
+      '',
+      'Report this against the portal. To restart, rewind (or clear) the persisted cursor to a block',
+      'the portal still considers canonical.',
+    ])
+  }
+}

@@ -73,10 +73,15 @@ and clipped by the resume bound. A **coverage window** is the contiguous block i
 one published output unit (e.g. a file) accounts for: "window covered" asserts *the pipe
 processed this interval for this table*, not that rows exist in it.
 
-**DEF-15 — Hold-back buffer.** An in-memory buffer used by immutable-storage sinks:
-rows attributed to blocks above `F` wait there and are released only when their block
-finalizes. Bounded by finality depth. On a no-finality dataset it passes everything
-through immediately (such sinks are then not reorg-safe — FM-13).
+**DEF-15 — Finalized-only delivery.** A sink policy requiring every finality-sensitive
+source operation to use the finalized mode. The pipe selects that mode before range
+resolution and passes the same effective portal view through transformer startup,
+caching, and streaming (WP-7, IB-11). On a finalizing dataset, the portal admits a block
+only after finalization and emits no fork on that route, so the sink feeds delivered
+rows into its ordinary commit protocol without a finality hold-back and needs no
+rollback handler. On a no-finality dataset the route cannot establish reorg safety;
+delivered rows pass through under the dataset's semantics and the output is not
+reorg-safe (FM-13).
 
 **DEF-16 — Network module.** A chain family binding: a query builder (typed filters +
 field selection + request merging), a block schema validator, and optionally a decoder
@@ -91,7 +96,7 @@ which percent/ETA derive (OB-3…OB-5).
 
 ## Core state tuple
 
-Per pipe: `S ≡ ⟨C, F, RC, D, B, V⟩` —
+Per pipe: `S ≡ ⟨C, F, RC, D, V⟩` —
 
 | Component | Meaning | Persistence |
 |---|---|---|
@@ -99,7 +104,6 @@ Per pipe: `S ≡ ⟨C, F, RC, D, B, V⟩` —
 | `F` | finalized floor (DEF-6) | sink store (as last clamped value) |
 | `RC` | rollback chain (DEF-7) | sink store |
 | `D` | committed sink data: per-table multiset of rows, each attributed to one block number | sink store |
-| `B` | hold-back buffer contents (DEF-15) | memory only |
 | `V` | coverage map: per-table next-window start (file sinks) | sink store |
 
 Well-formedness is defined by the structural invariants INV-1…INV-5 (single source of
@@ -112,9 +116,9 @@ consumers is per durability class (CN-20…CN-24).
 |---|---|---|
 | Durability class | `T` transactional · `W` write-ahead · `K` checkpointed-immutable · `A` append-lagged · `∅` ephemeral | per sink family, CN-10…CN-14; ADR-5 |
 | Finality mode | finalizing dataset · no-finality dataset | per dataset, DEF-3 |
-| Visibility | immediate (T/W/A) · deferred-to-finality (K/∅) | per class, CN-20…CN-24 |
+| Visibility | immediate after commit (T/W/A/C) · source-gated finalized-only (K/∅) | per class, CN-20…CN-24 |
 | Decode-error policy | fatal-by-default, hook may skip-with-count (uniform, ADR-12) | all network modules, WP-23 |
-| Stream mode | full (unfinalized included) · finalized-only | per pipe, IB-2 |
+| Stream mode | full (unfinalized included, fork-capable) · finalized-only (configured or target-required) | per pipe, DEF-15, IB-11 |
 | Cache | off · local finalized-batch cache | per pipe, RS-20 |
 
 ## Input events
@@ -123,7 +127,7 @@ consumers is per durability class (CN-20…CN-24).
 |---|---|---|---|
 | Data batch | blocks + head | next slice of the stream | ordered, at-least-once across reconnects; duplicates excluded by resume bound |
 | Head-only signal | head, no blocks | caught up ("on head"); poll again | at-most-once per request |
-| Fork signal | canonical chain (DEF-10) | requested parent is not canonical; rollback required | replaces the data response |
+| Fork signal | canonical chain (DEF-10) | requested parent is not canonical; rollback required | replaces a full-stream data response; absent on finalized-only delivery |
 | Range end | — | requested range exhausted or data absent upstream | terminates one range |
 | Finality report | `head.finalized` | raises `F` after clamping | with every batch; may regress or vanish (clamp absorbs) |
 
@@ -135,7 +139,7 @@ Semantics in [04-ingestion.md](04-ingestion.md).
 |---|---|
 | T-INIT | recover state, repair partial writes, compute resume bound |
 | T-BATCH | ingest + transform + commit one batch; advance `C`; clamp `F`; refresh `RC` |
-| T-RELEASE | move newly finalized rows from `B` into committed output |
+| T-RELEASE | the finalized route admits a newly finalized block upstream; it reaches the pipe as an ordinary T-BATCH, with no local release state |
 | T-CHECKPOINT | (class K) publish open windows + persist cursor |
 | T-FORK | resolve canonical ancestor; delete above it; rewind `C`; trim `RC` |
 | T-STOP | run stop lifecycle exactly once; release resources |
@@ -158,7 +162,7 @@ Semantics in [04-ingestion.md](04-ingestion.md).
 | `Transformer`, `QueryAwareTransformer` | DEF-12 |
 | `Query`, `hashQuery` | DEF-13 |
 | "coverage" (file naming) | DEF-14 |
-| `FinalizationBuffer` | DEF-15 |
+| `requiresFinalizedStream` (reference binding) | DEF-15 |
 | network dir (`evm/`, `solana/`, …) | DEF-16 |
 | "checkpoint" (file sink) | DEF-17 |
 | `resolveFork` (sink op) | T-FORK entry point (RP-40) |

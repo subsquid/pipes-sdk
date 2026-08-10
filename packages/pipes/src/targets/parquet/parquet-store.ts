@@ -1,13 +1,7 @@
 import { unlink } from 'node:fs/promises'
 import path from 'node:path'
 
-import {
-  type BlockCursor,
-  type Finalization,
-  type FinalizationBuffer,
-  type Range,
-  finalizationBuffer,
-} from '~/core/index.js'
+import { type Range } from '~/core/index.js'
 
 import type { ParquetEngine, ParquetTableWriter } from './engine.js'
 import { PARQUET_ERROR_CODES, ParquetTargetError } from './errors.js'
@@ -64,21 +58,18 @@ export type RotationLimits = {
 export type AppendStat = { table: string; rows: number }
 
 /**
- * Staging + per-table finalization buffers + open segment writers for the Parquet target.
+ * Staging + open segment writers for the Parquet target.
  *
  * `insert(table, rows)` stages a batch's rows (rejecting unknown tables synchronously, like
- * `bigquery-store`). `flushBatch` folds each table's staged rows through its
- * {@link FinalizationBuffer} and appends the released (finalized) rows to that table's open
- * segment writer — opening a writer lazily only when there is at least one finalized row, so
- * empty/low-volume tables never create degenerate files.
+ * `bigquery-store`). `flushBatch` appends each table's staged rows to its segment writer —
+ * opening a writer lazily only when there is at least one row, so empty/low-volume tables never
+ * create degenerate files.
  *
- * Every declared table's buffer is advanced on every batch (even with no staged rows) so that
- * (a) low-volume tables still release previously-buffered rows once a later finalized head passes
- * them, and (b) every buffer carries the same rollback chain for fork resolution.
+ * The target reads `/finalized-stream` (`requiresFinalizedStream`), so every staged row is already
+ * final: there is nothing to hold back and no fork to roll back.
  */
 export class ParquetStore {
   readonly #configs = new Map<string, TableConfig>()
-  readonly #buffers = new Map<string, FinalizationBuffer<Row>>()
   readonly #staged = new Map<string, Row[]>()
   // The current open segment per table — at most one. Reset (published/discarded) at checkpoints.
   readonly #segments = new Map<string, OpenSegment>()
@@ -105,7 +96,6 @@ export class ParquetStore {
         dir,
         tableWriter: options.engine.table(table),
       })
-      this.#buffers.set(table.table, finalizationBuffer<Row>({ getBlockNumber }))
     }
   }
 
@@ -138,23 +128,26 @@ export class ParquetStore {
   }
 
   /**
-   * Advances every table's finalization buffer with this batch's staged rows + finalization
-   * state, appends the now-finalized rows to each table's (lazily-opened) segment writer, and
-   * clears staging. Returns per-table appended-row counts for metrics.
+   * Appends each table's staged rows to its (lazily-opened) segment writer and clears staging.
+   * Returns per-table appended-row counts for metrics.
    */
-  async flushBatch(finalization: Finalization): Promise<AppendStat[]> {
+  async flushBatch(): Promise<AppendStat[]> {
     const stats: AppendStat[] = []
 
     for (const [table, config] of this.#configs) {
-      const buffer = this.#buffers.get(table)!
       const staged = this.#staged.get(table) ?? []
-      const released = buffer.push(staged, finalization)
 
-      if (released.length > 0) {
+      if (staged.length > 0) {
+        // Every row must be attributable to a block for recovery to reason about what a file
+        // covers. Nothing else reads the number now, so this call IS the guard.
+        for (const row of staged) {
+          config.getBlockNumber(row)
+        }
+
         const segment = this.#getOrCreateSegment(table, config)
-        await segment.writer.append(released)
-        segment.rows += released.length
-        stats.push({ table, rows: released.length })
+        await segment.writer.append(staged)
+        segment.rows += staged.length
+        stats.push({ table, rows: staged.length })
       }
     }
 
@@ -173,7 +166,7 @@ export class ParquetStore {
     return false
   }
 
-  /** Whether any segment writer is currently open (has buffered ≥1 finalized row on disk). */
+  /** Whether any segment writer is currently open (contains at least one finalized row). */
   get hasOpenWriters(): boolean {
     return this.#segments.size > 0
   }
@@ -371,29 +364,6 @@ export class ParquetStore {
   }
 
   /**
-   * Resolves the safe cursor for a reorg and drops every buffered (unfinalized) row above it.
-   * Open writers and published files are never touched — they hold only finalized rows, which
-   * can never reorg.
-   *
-   * Every buffer carries an identical rollback chain (`flushBatch` advances them all in lockstep
-   * with the same finalization), so resolve the safe cursor ONCE and reuse it to drop rows in
-   * each buffer — resolving per buffer would repeat the identical walk N times.
-   */
-  async resolveFork(canonicalBlocks: BlockCursor[]): Promise<BlockCursor | null> {
-    const buffers = [...this.#buffers.values()]
-    if (buffers.length === 0) {
-      return null
-    }
-
-    const safe = await buffers[0].resolveForkCursor(canonicalBlocks)
-    for (const buffer of buffers) {
-      buffer.dropAbove(safe)
-    }
-
-    return safe
-  }
-
-  /**
    * Best-effort teardown for the error path: aborts every open segment's writer (releasing its
    * resources) and deletes its temp file — file removal is target-owned, like naming. The
    * discarded rows are finalized-but-not-checkpointed, so they regenerate from the portal on the
@@ -427,9 +397,8 @@ const INT32_MAX = 2_147_483_647
 
 /**
  * Reads a row's block number and fails loudly on a missing/non-finite value. The block column is
- * load-bearing — it drives finalization (`<= finalized`), `<min>-<max>` file naming and recovery —
- * so coercing `null` to 0 (an immutable block-0 row) or `undefined` to `NaN` (buffered forever and
- * silently lost) would corrupt durability. This guard is always on, including in production.
+ * load-bearing for file-range attribution and recovery, so coercing `null` to 0 or accepting
+ * `undefined` as `NaN` would corrupt durability. This guard is always on, including in production.
  */
 function readBlockNumber(table: string, blockColumn: string, row: Row): number {
   const raw = row[blockColumn]

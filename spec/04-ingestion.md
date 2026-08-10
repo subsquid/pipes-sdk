@@ -9,18 +9,19 @@ Bands: 1–9 init/resume, 10–19 streaming & batching, 20–29 transform/decode
 state ← sink.recover()                     # T-INIT: TargetState or ⊥
 repair_partial_writes(state)               # per durability class (06)
 F ← clamp-seed(state.finalized)            # never from state.latest
-ranges ← resolve(range set) ⊓ [state.latest+1, ∞)
+portal ← select(configured mode, sink finality capability)  # WP-7
+ranges ← resolve(range set, portal) ⊓ [state.latest+1, ∞)
 for range in ranges:
   request ← merged query + range + parent hash anchor
   loop:
     batch | head-only | fork | end ← portal.stream(request)
-    on fork  → T-FORK; restart loop from ancestor
+    on fork  → T-FORK; restart loop from ancestor  # full stream only
     on end   → next range
     on head-only → emit progress; poll after P-HEAD-POLL-MS
     F ← max(F, batch.head.finalized)       # clamp, INV-12
     RC ← blocks above F (with hashes)
     data ← transformers(batch)             # declaration order
-    sink.commit(data, C←last(batch), F, RC)  # T-BATCH / T-RELEASE / T-CHECKPOINT
+    sink.commit(data, C←last(batch), F, RC)  # T-BATCH / T-CHECKPOINT
 T-STOP (exactly once, every exit path)
 ```
 
@@ -51,6 +52,15 @@ before the first new commit. No new data may land while orphan data above `C` ex
 **WP-6 — Query freeze.** [MUST] Query-aware transformers contribute filters/fields
 during configuration, before range resolution; after streaming starts the query is
 immutable for the life of the run.
+
+**WP-7 — Finalized-only source selection.** [MUST] When a sink declares finalized-only
+delivery (DEF-15), the pipe selects an effective finalized portal before resolving
+symbolic ranges, starting transformers, consulting a cache, or requesting blocks. All
+finality-sensitive operations use that same effective view: `latest` resolves against
+the finalized head, the data request uses the finalized stream, a cache receives both
+the finalized mode and a portal view pinned to it, and the sink is told the effective
+mode. A configured full-stream preference is overridden with a warning. A sink that
+does not declare the capability follows the configured stream mode unchanged (IB-11).
 
 ## Streaming & batching
 
@@ -143,7 +153,8 @@ resumes (stateful transformers must discard state above it).
 
 **WP-40 — Detection.** [MUST] A fork is signaled by the portal rejecting the
 parent-hash anchor (IB-4) and supplying the canonical chain (DEF-10). The pipe treats
-this as authoritative (ADR-1).
+this as authoritative (ADR-1). This transition applies to the full stream; the
+finalized-only route does not emit forks (DEF-15).
 
 **WP-41 — Empty canonical chain.** [MUST] A fork signal with an empty canonical chain
 is a portal-contract violation: fail with the coded error (E1xxx band), never guess.
@@ -164,8 +175,8 @@ ancestor (rollback to `F`).
 
 **WP-43 — Rollback effect.** [MUST] Given ancestor `A`: all sink data attributed to
 blocks `> A.number` is removed (per class mechanism, 06); `C ← A`; `RC` is trimmed to
-`≤ A.number`; `F` is unchanged; hold-back buffers drop rows `> A.number`. Then WP-32,
-then streaming resumes at `A.number + 1` with `A.hash` as the new anchor.
+`≤ A.number`; `F` is unchanged. Then WP-32, then streaming resumes at `A.number + 1`
+with `A.hash` as the new anchor.
 
 **WP-44 — Finality conflict.** [MUST] A fork that cannot resolve above the finalized
 floor halts the pipe with the coded fork error *(today the generic ancestor-unresolvable
@@ -173,8 +184,10 @@ code E1003 — the resolve layer returns ⊥ with an open TODO)*. Finalized data
 rolled back (INV-13). *(Whether halt is the final intent is OQ-2/GAP-6.)*
 
 **WP-45 — Sink capability.** [MUST] A fork arriving at a sink that does not implement
-rollback halts with the coded not-supported error. Fork support is per sink, declared,
-and part of its conformance surface.
+rollback halts with the coded not-supported error. Fork support is per full-stream sink,
+declared, and part of its conformance surface. A finalized-only sink MAY omit rollback
+because WP-7 selects a route on which no fork can arrive; a fork response on that route
+is a portal-contract violation and still halts safely (FM-13).
 
 **WP-46 — Rollback idempotence.** [MUST] Re-running a completed rollback (crash between
 rollback and next commit, then recovery) is a no-op: the mechanism must tolerate its
@@ -182,8 +195,9 @@ own partial or duplicated application (per-class details in 06).
 
 **WP-47 — Depth bound.** [MUST] Rollback is guaranteed only within the retained history:
 class-specific retention (P-CH-CURSOR-RETENTION, P-PG-UNFINALIZED-RETENTION,
-P-BQ-CURSOR-RETENTION, hold-back depth for class K). A fork deeper than retention (but
-above `F`) resolves via the deep-fork restart of WP-42.
+P-BQ-CURSOR-RETENTION, and the class-C rollback manifest down to `F`). A fork deeper
+than retention (but above `F`) resolves via the deep-fork restart of WP-42. Classes K/∅
+use finalized-only delivery and therefore do not retain fork history for rollback.
 
 ## Commit & acknowledgement
 

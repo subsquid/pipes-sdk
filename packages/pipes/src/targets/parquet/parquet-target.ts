@@ -1,7 +1,6 @@
 import {
   type BlockCursor,
   type Counter,
-  type Finalization,
   type Histogram,
   type HookContext,
   type Logger,
@@ -69,19 +68,11 @@ type ParquetTargetMetrics = {
  * Writes a stream to rotating, **finalized-only** Parquet files — the columnar format read by
  * DuckDB, Spark, Athena and ClickHouse's `s3()`.
  *
- * **Finalized-only.** Parquet files are immutable once written, so a block that could still
- * reorg is never written. Each table buffers unfinalized rows in memory (via the shared
- * {@link finalizationBuffer}) and only appends a row once its block is at or below the
- * portal's finalized head. A reorg drops the in-memory buffer; published files are never touched.
- *
- * **Key a row at the last block it depends on.** The buffer holds a row until *its own block
- * column* finalizes — that column is the row's declaration of "I am safe once this block can no
- * longer reorg". For a plain per-event row that is simply the event's block. For an **aggregate**
- * (an OHLC candle, a rolling sum) it must be the *last* block in the window, not the first: a candle
- * over blocks 1–5 keyed at block 1 is released as soon as block 1 finalizes, so if blocks 2–5 later
- * reorg the already-written file keeps a candle computed from a dead chain (and a recomputed one is
- * appended beside it). Keyed at block 5 it stays buffered until the whole window finalizes, and a
- * reorg drops and recomputes it cleanly.
+ * **Finalized-only.** Parquet files are immutable once written, so a block that could still reorg
+ * is never written. The target gets that from the stream rather than from buffering: it sets
+ * `requiresFinalizedStream`, so the pipe reads `/finalized-stream` whatever the portal options say
+ * (warning when it had to override them). Every delivered block is final, so no row is ever held
+ * back and no fork can arrive.
  *
  * **Constant memory.** Finalized rows stream straight to a temp file and the file rotates by byte
  * size, so a multi-gigabyte finalized backfill never lands wholly in RAM (the default parquetjs
@@ -129,9 +120,9 @@ type ParquetTargetMetrics = {
  * - Byte-only rotation can stall the cursor on a slow live tail (finalized data stays invisible
  *   until the file closes; a crash re-fetches more). Set `rollover.intervalMs`/`intervalBlocks`
  *   for live tailing.
- * - A **no-finality dataset has no finalized head**, so the threshold is `Infinity` and every row
- *   is written immediately: the files are **not reorg-safe**, and if such a chain forks the pipe
- *   goes fatal (same as the memory target).
+ * - Reorg-safety is inherited from `/finalized-stream`, so it is only as good as the dataset's own
+ *   notion of finality: for a dataset that never finalizes anything, the files are **not**
+ *   reorg-safe.
  *
  * @param options.dir - Output directory. It is the isolation unit — **one pipe per dir**. Holds a
  *   `<table>/` sub-directory per table plus a `_sqd_parquet_state.<pipe-id>.json` cursor file
@@ -161,6 +152,8 @@ export function parquetTarget<T>(options: {
   const store = new ParquetStore({ dir, tables, engine })
 
   return createTarget<T>({
+    // Parquet files are immutable once published, so the target may only ever see final blocks.
+    requiresFinalizedStream: true,
     write: async ({ read, logger, id }) => {
       // Lazy: registered on the first batch from `ctx.metrics`.
       let metrics: ParquetTargetMetrics | undefined
@@ -285,9 +278,9 @@ export function parquetTarget<T>(options: {
             // names a window on the far side of the gap. The tail closes at `lastBoundary` itself and
             // never at a re-labelled copy of it — a cursor pairing one block's number with another
             // block's hash would be persisted, and the next resume would hand the portal that hash as
-            // its parent. `lastBoundary` is the previous batch's min(finalized, current) and
-            // `openRange` is the range that batch's `current` fell in, so it is inside the range;
-            // the guard covers `openRange` having gone stale over a batch outside every range.
+            // its parent. `lastBoundary` is the previous batch's last block and `openRange` is the
+            // range that block fell in, so it is inside the range; the guard covers `openRange`
+            // having gone stale over a batch outside every range.
             const range = rangeOf(ctx.stream.state.ranges, ctx.stream.state.current.number)
             const tail = lastBoundary
             if (
@@ -317,23 +310,23 @@ export function parquetTarget<T>(options: {
               await onData({ store, data, ctx: { logger, profiler } })
             })
 
-            // 2. finalization + the cursor this batch could checkpoint to. The boundary carries the
-            //    HASH needed for resume; boundary.number = min(finalized, current), correct for
-            //    backfill / tip / no-finality / straddling batches. `finalized` is already clamped by
-            //    the source, so it never regresses — persist it as the restart-seed floor.
+            // 2. the cursor this batch could checkpoint to, carrying the HASH needed for resume.
+            //    It is the batch's last block, NOT min(finalized, current): the stream is
+            //    finalized-only, so every delivered block is final, and `flushBatch` below appends
+            //    all of them. Clamping to the reported finalized head — which lags whenever finality
+            //    advances inside one response — would publish a file holding rows above the cursor
+            //    it persists, and the restart would re-fetch and duplicate them.
             const finalized = ctx.stream.head.finalized
             if (finalized) {
+              // Already clamped by the source, so it never regresses — persist it as the
+              // restart-seed floor for the watermark.
               lastFinalized = finalized
             }
-            const current = ctx.stream.state.current
-            const finalization: Finalization = { finalized, rollbackChain: ctx.stream.state.rollbackChain }
-            const boundaryCursor = finalized && finalized.number <= current.number ? finalized : current
+            const boundaryCursor = ctx.stream.state.current
             lastBoundary = boundaryCursor
 
-            // 3. release finalized rows into the (lazily-opened) writers.
-            const appended = await target.measure({ name: 'flush batch', labels: 'db' }, () =>
-              store.flushBatch(finalization),
-            )
+            // 3. append the batch's rows into the (lazily-opened) writers.
+            const appended = await target.measure({ name: 'flush batch', labels: 'db' }, () => store.flushBatch())
             for (const stat of appended) {
               metrics.rowsWritten.inc({ id: ctx.id, table: stat.table }, stat.rows)
             }
@@ -376,10 +369,6 @@ export function parquetTarget<T>(options: {
         await store.close()
       }
     },
-
-    // Reorg: drop buffered (unfinalized) rows above the safe cursor across every table buffer.
-    // Published files and open writers hold only finalized rows, so they are never rolled back.
-    resolveFork: (canonicalBlocks) => store.resolveFork(canonicalBlocks),
   })
 }
 

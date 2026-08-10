@@ -30,10 +30,12 @@ chain reorganizations without human intervention.
   from persistent state written by any other. → REQ-23, IB-20…IB-26, CN-45.
 - **G2 — Effective exactly-once delivery.** After any crash/restart sequence, sink
   output contains each block's data exactly once. → REQ-3, REQ-6, CN-10…CN-24, INV-40…INV-44.
-- **G3 — Automatic fork correctness.** Chain reorganizations are detected and rolled
-  back to the canonical ancestor without operator action. → REQ-4, WP-40…WP-47, INV-13, INV-14.
-- **G4 — Finality safety.** Immutable storage never contains reorg-able data; the
-  finalized floor never regresses. → REQ-5, INV-2, INV-12, INV-25.
+- **G3 — Automatic fork correctness.** On fork-capable streams, chain reorganizations
+  are detected and rolled back to the canonical ancestor without operator action.
+  → REQ-4, WP-40…WP-47, INV-13, INV-14.
+- **G4 — Finality safety.** On datasets that define finality, immutable storage receives
+  only the finalized stream; the finalized floor never regresses.
+  → REQ-5, INV-2, INV-12, INV-25.
 - **G5 — Unattended liveness.** Transient faults are retried with visible progress
   signals; only integrity violations halt the pipe. → REQ-22, LIV-1…LIV-8, FM-1.
 - **G6 — Observable progress.** A dashboard can read progress, throughput, ETA, and
@@ -78,6 +80,8 @@ chain reorganizations without human intervention.
                  └─────────── rollback to canonical ancestor ◀──────────┘
 ```
 
-Entity lifecycle (one pipe): `INIT/RESUME → {BATCH | RELEASE | CHECKPOINT}* → (FORK → BATCH…)* → STOP`, with `CRASH → RESUME` possible at any point.
+Entity lifecycle (one pipe): `INIT/RESUME → {BATCH | CHECKPOINT}* → (FORK → BATCH…)* → STOP`,
+with `CRASH → RESUME` possible at any point. `FORK` occurs only on the full stream;
+finalized-only delivery applies the finality gate upstream (T-RELEASE).
 
 Process lifecycle: start → recover committed state → repair partial writes → stream → clean stop (hooks exactly once) or crash (recovery restores a committed state).
