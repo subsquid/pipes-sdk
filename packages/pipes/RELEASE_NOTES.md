@@ -139,7 +139,7 @@ Functions and types have been renamed for clarity and consistency. These are **h
 | `chunk` | `chunkForInsert` |
 | `createClickhouseTarget` | `clickhouseTarget` |
 | `createDefaultLogger` | `defaultLogger` |
-| `createFinalizationBuffer` | `finalizationBuffer` |
+| `createFinalizationBuffer` | Removed — use `requiresFinalizedStream` on finalized-only targets (breaking change 14) |
 | `addLog` / `addTransaction` / `addInstruction` / … (all query builders) | `addLogRequest` / `addTransactionRequest` / `addInstructionRequest` / … (`addFields` / `addRange` unchanged) |
 | `toSnakeKeys` | `toSnakeCaseKeys` |
 | `displayEstimatedTime` | `formatEta` |
@@ -165,6 +165,7 @@ Functions and types have been renamed for clarity and consistency. These are **h
 | `Settings` (ClickHouse) | `ClickhouseSettings` |
 | `ForkNoPreviousBlocksError` | `MissingForkAncestorError` (code E1002 unchanged) |
 | `BQ_ERR` / `PQ_ERR` | `BIGQUERY_ERROR_CODES` / `PARQUET_ERROR_CODES` |
+| `Finalization` | Removed — the buffer state it described no longer exists (breaking change 14) |
 | `BigQueryState` / `BigQueryStore` / `BigQueryTracker` | `BigQuerySyncState` / `BigQueryWriter` / `BigQueryTableRegistry` |
 
 `PortalClientOptions` duration keys are unit-suffixed: `maxIdleTime` → `maxIdleTimeMs`, `maxWaitTime` → `maxWaitTimeMs`, `headPollInterval` → `headPollIntervalMs` (all were already milliseconds).
@@ -254,7 +255,6 @@ The fork/rollback vocabulary is now consistent: *fork* names the blockchain even
 
 - The `Target` contract method is `resolveFork(canonicalBlocks)` (was `fork(previousBlocks)`). The parameter rename is semantic: the blocks are the portal's view of the **canonical** chain (`previousBlocks` in the Portal API's 409 body), not the blocks you just processed.
 - The transformer lifecycle hook and `Factory` method that receive an **already-resolved** safe cursor are named `rollback` (were `fork`) — their whole job is the undo.
-- `FinalizationBuffer`: the combined resolve-and-drop method is now `resolveFork(canonicalBlocks)` (was `fork`), mirroring the `Target` method it exists to implement. **Careful:** the name `resolveFork` previously belonged to the *pure* resolver, which is now `resolveForkCursor(canonicalBlocks)` — code calling the old `resolveFork` for side-effect-free inspection compiles unchanged but now drops buffered rows. `dropAbove(safe)` is unchanged.
 - `ForkNoPreviousBlocksError` is renamed `MissingForkAncestorError` (code E1002 unchanged).
 
 ### 10. ClickHouse `onRollback` discriminator: `reason: 'recovery' | 'fork'`
@@ -305,6 +305,36 @@ event.blockNumber // number
 event.block.number // number
 event.block.hash   // string
 ```
+
+### 14. Finalized-only targets read the finalized stream instead of buffering
+
+A target that commits only finalized data now declares `requiresFinalizedStream: true`. The source
+uses a finalized client view for range resolution, caches and block streaming, warning when it had
+to override a hot portal configuration. The selection is per pipe: piping the same source to another
+target afterwards leaves that one on the stream it asked for. The Parquet and memory targets set the
+flag.
+
+They previously took a hot stream and held unfinalized rows in a `finalizationBuffer`. That could
+not make bounded completion correct: a hot stream completes when the range is delivered, even if
+the target still holds an uncommitted tail above the reported finalized head.
+
+**This changes when such a pipe finishes.** A bounded range whose `to` sits above the finalized head
+used to complete as soon as the portal had delivered it; it now waits for those blocks to finalize.
+On a chain with slow finality that is minutes, and on a dataset that finalizes nothing it never
+returns — so a bounded backfill in CI or cron should end at or below the finalized head, or run
+against a target that reads the hot stream.
+
+Consequences for custom targets and caches:
+
+- `finalizationBuffer` / `FinalizationBuffer` / `Finalization` are **removed**. Declare
+  `requiresFinalizedStream: true` and write rows as they arrive.
+- A finalized-only target no longer needs `resolveFork`; no fork can reach it.
+- A custom `PortalCache` should use the client passed to `getStream`. It receives the effective
+  finalized client as well as `finalized: true`.
+- `ParquetStore.flushBatch()` no longer accepts finalization state, and
+  `ParquetStore.resolveFork()` is removed.
+- Reorg-safety comes from the dataset's own finality. For a dataset that never finalizes anything,
+  files are not reorg-safe.
 
 ---
 
@@ -554,6 +584,7 @@ All framework errors extend `PipeError` and carry a unique code linking to the d
 | `MissingForkAncestorError` | E1002 | Fork exception carried an empty canonical block list |
 | `ForkCursorMissingError` | E1003 | Target `resolveFork()` returned `null` |
 | `PortalContractViolationError` | E1004 | Portal delivered `canonicalBlocks` whose highest block is below the persisted cursor |
+| `ForkOnFinalizedStreamError` | E1005 | Portal reported a fork on the finalized stream, where every delivered block is already final |
 
 Targets carry their own codes in the `E2xxx` band — `E20xx` ClickHouse, `E21xx` Postgres, `E22xx` BigQuery, `E23xx` Parquet — thrown as `ClickhouseTargetError`, `PostgresTargetError`, `BigQueryTargetError` and `ParquetTargetError`. Every code is documented in the [error reference](https://docs.sqd.dev/en/sdk/pipes-sdk/errors).
 
@@ -626,5 +657,6 @@ There are **no deprecated aliases** in this release — every rename in breaking
 - `DecodedInstruction.blockNumber` removed — use `block.number`
 - ClickHouse `onRollback` context's `cursor` removed — use `safeCursor`
 - Parquet `'TIMESTAMP_MILLIS'` column type removed — write `'TIMESTAMP'` (identical wire format)
+- `finalizationBuffer` / `FinalizationBuffer` / `Finalization` removed — see breaking change 14
 - `TransformerFn` removed from public exports
 - `Subset<T, U>` removed from `query-builder.ts` exports — now a recursive type in `types.ts`

@@ -4,17 +4,13 @@ Step-by-step instructions for updating from the previous release.
 
 ---
 
-## ⚠️ Naming overhaul: hard renames, and one name that changed meaning
+## ⚠️ Naming overhaul: hard renames and removals
 
 The public API naming overhaul renames symbols **without** compatibility aliases — this lands in a major release, so old names simply stop existing and the compiler will point you at each one (`resolveFork`, `canonicalBlocks`, `rollback` hooks, `PortalStream`, `add*Request` builder methods, `evmEventDecoder`, `chunkForInsert`, `contractFactorySqliteStore`, CLI `target` config key, `/preview/transformation`, `sqd_processed_block`/`sqd_end_block`, and friends). All previously deprecated APIs are removed as well: the aliases `evmPortalSource`/`solanaPortalSource`/`hyperliquidFillsPortalSource`, `factory`, `factorySqliteDatabase`, `chunk`, and `createClickhouseTarget`; the `DecodedInstruction.blockNumber` duplicate of `block.number`; the ClickHouse `onRollback` context's `cursor` duplicate of `safeCursor`; and the Parquet `'TIMESTAMP_MILLIS'` column-type alias (write `'TIMESTAMP'` — identical wire format).
 
-**One rename will NOT surface as a compile error — the name changed meaning:**
-
-- Before, `FinalizationBuffer.resolveFork(blocks)` was the **pure** resolver: it returned the safe cursor and did **not** touch the buffer.
-- Now, `buffer.resolveFork(blocks)` **resolves and drops** — it also removes every buffered row above the safe cursor (it is the old `buffer.fork()`).
-- The old pure behavior lives on under a new name: `buffer.resolveForkCursor(blocks)`.
-
-If you called `resolveFork` to inspect the cursor without mutating (e.g. resolving once and applying `dropAbove` to several sibling buffers yourself), switch those calls to `resolveForkCursor` — the call is no longer side-effect-free, and your code will compile without complaint.
+`finalizationBuffer`, `FinalizationBuffer` and the `Finalization` state type are removed. A target
+that commits only finalized data now declares `requiresFinalizedStream: true` and writes rows as
+they arrive; see section 14.
 
 Other silent-at-compile-time changes to check: the ClickHouse `onRollback` callback receives `reason: 'recovery' | 'fork'` instead of `type: 'offset_check' | 'blockchain_fork'`; Prometheus dashboards must move to `sqd_processed_block`/`sqd_end_block`; Pipes UI older than this release reads endpoints/payload keys that no longer exist.
 
@@ -371,7 +367,7 @@ The `PortalClientOptions` duration keys are unit-suffixed: `maxIdleTime` → `ma
 |---|---|
 | `chunk` (also `batchForInsert` in earlier 1.0 alphas) | `chunkForInsert` |
 | `createDefaultLogger` | `defaultLogger` |
-| `createFinalizationBuffer` | `finalizationBuffer` |
+| `createFinalizationBuffer` | Removed — use `requiresFinalizedStream` on the target (section 14) |
 | `toSnakeKeys` | `toSnakeCaseKeys` |
 | `displayEstimatedTime` | `formatEta` |
 | `coerceFinalized` | `normalizeFinalized` |
@@ -399,7 +395,7 @@ The `PortalClientOptions` duration keys are unit-suffixed: `maxIdleTime` → `ma
 
 ---
 
-## 14. Update custom targets: `fork()` → `resolveFork(canonicalBlocks)`
+## 14. Update custom targets and remove finalization buffers
 
 If you implement the `Target` interface directly, the contract method the engine calls on a
 detected chain fork is renamed `fork(previousBlocks)` → `resolveFork(canonicalBlocks)`: it must
@@ -412,15 +408,51 @@ The word *rollback* is reserved for hooks that receive an **already-resolved** c
 undo state: the transformer hook (`fork` → `rollback`, see section 8) and the target callbacks
 (`onRollback`, `onBeforeRollback`/`onAfterRollback`), which fire for forks *and* startup recovery.
 
-`FinalizationBuffer` implements the resolution for you — but note its method names shifted (see
-the warning at the top: `resolveFork` now resolves *and drops*; the pure variant is
-`resolveForkCursor`):
+For a target that writes only finalized data, remove its `FinalizationBuffer` entirely. Declare
+`requiresFinalizedStream: true`; the source then resolves `latest` against the finalized head
+(falling back to the hot head on a dataset that finalizes nothing) and reads `/finalized-stream`,
+even when the portal was configured hot. Every delivered block is final, so write rows immediately
+and remove the target's `resolveFork` implementation:
 
 ```ts
-// a single-buffer target's fork handler, before → after
-fork:        (blocks) => buffer.fork(blocks)
-resolveFork: (blocks) => buffer.resolveFork(blocks)
+// before
+const buffer = finalizationBuffer<Row>({ getBlockNumber: (row) => row.blockNumber })
+const target = createTarget<Row[]>({
+  write: async ({ read }) => {
+    for await (const { data, ctx } of read()) {
+      const rows = buffer.push(data, {
+        finalized: ctx.stream.head.finalized,
+        rollbackChain: ctx.stream.state.rollbackChain,
+      })
+      if (rows.length > 0) await append(rows)
+    }
+  },
+  resolveFork: (canonicalBlocks) => buffer.resolveFork(canonicalBlocks),
+})
+
+// after
+const target = createTarget<Row[]>({
+  requiresFinalizedStream: true,
+  write: async ({ read }) => {
+    for await (const { data } of read()) {
+      if (data.length > 0) await append(data)
+    }
+  },
+})
 ```
+
+Hot targets that can undo writes still use `resolveFork(canonicalBlocks)` as described above.
+Custom `PortalCache` implementations receive both `finalized: true` and a client whose
+finality-sensitive methods are pinned to the finalized endpoints; use the client passed to
+`getStream` rather than a separately retained client.
+
+If you drive `ParquetStore` directly, call `flushBatch()` without finalization state;
+`ParquetStore.resolveFork` is removed.
+
+Check your ranges before upgrading: a bounded pipe whose `to` sits above the finalized head used to
+finish once the portal had delivered the range, and now waits for it to finalize. If a job is
+expected to terminate — a CI check, a cron backfill — end it at or below the finalized head, or
+point it at a target that reads the hot stream.
 
 ---
 
@@ -514,7 +546,8 @@ schema: {
 - [ ] Query builders: `addLog` / `addTransaction` / `addInstruction` / … → `addLogRequest` / `addTransactionRequest` / `addInstructionRequest` / …
 - [ ] Custom transformers: `data.blocks` → `data`; `fork` hook → `rollback`
 - [ ] Custom `.build({ transform })` → `.build().pipe()`
-- [ ] Custom targets: `fork(previousBlocks)` → `resolveFork(canonicalBlocks)`; check `FinalizationBuffer.resolveFork` call sites (it now drops rows — use `resolveForkCursor` for pure resolution)
+- [ ] Hot custom targets: `fork(previousBlocks)` → `resolveFork(canonicalBlocks)`
+- [ ] Finalized-only custom targets: remove `FinalizationBuffer` / `Finalization` / `resolveFork`, set `requiresFinalizedStream: true`, and write delivered rows immediately
 - [ ] `StartState` → `StartEvent`, `ProgressState` → `ProgressEvent` (progress state reads `from`/`to`; interval stats under `intervalStats`)
 - [ ] ClickHouse `onRollback`: `type: 'offset_check' | 'blockchain_fork'` → `reason: 'recovery' | 'fork'`; `cursor` → `safeCursor`
 - [ ] ClickHouse rollbacks: nothing to do for CollapsingMergeTree tables (optionally call `store.ensureRollbackIndex` in `onStart` on large tables); non-collapsing tables now roll back via `DELETE` (needs ClickHouse ≥ 23.3) and their MVs keep rolled-back data

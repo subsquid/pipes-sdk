@@ -18,13 +18,14 @@ satisfies `F < e.number ≤ C.number` (when `F`/`C` present). An empty `RC` is l
 `F` never exceeds the portal's true finalized history's reach in a way the pipe invented:
 `F` is always some previously reported finalized cursor (or ⊥). Every consumer of
 finality reads the clamped `F`, never a raw report.
-*Why:* an invented floor would release reorg-able rows from hold-back.
+*Why:* an invented floor would admit reorg-able data to finalized output and prune
+rollback history too early.
 *Check:* CT-1 oracle comparison of floor against the simulator's report history.
 
 **INV-3 — Data attribution.** [state]
 Every committed row is attributed to exactly one block number within the pipe's
-processed range; visible data respects the class visibility rule (CN-20…CN-24): for
-deferred sinks, visible rows satisfy `number ≤ F` at publication.
+processed range; visible data respects the class visibility rule (CN-20…CN-24): on a
+finalizing dataset, source-gated sinks receive rows only from the finalized route.
 *Why:* rollback and coverage reasoning operate on block attribution.
 *Check:* CT-1 validator: attribution column present, in-range, class-visible.
 
@@ -138,11 +139,15 @@ leak through.
 *Why:* portal over-fetch is an implementation detail, not an output.
 *Check:* CT-1 with adversarial over-returning simulator.
 
-**INV-25 — Deferred visibility.** [response]
-(Classes K/∅) No emitted-to-storage row precedes its block's finalization; hold-back
-release preserves arrival order.
+**INV-25 — Finalized-source visibility.** [response]
+(Classes K/∅) Finalized-only source selection occurs before range resolution and every
+sink-visible row arrives through that effective route, in source order; the sink does
+not defer or release rows based on finality locally. On a finalizing dataset, no
+delivered row precedes its block's finalization. On a no-finality dataset, output is
+explicitly not reorg-safe (DEF-15, FM-13).
 *Why:* immutable storage + reorg-able data are incompatible.
-*Check:* CT-1 finality-lag scenarios; CT-3 fork-during-hold-back.
+*Check:* CT-1/CT-5 finalized-route selection, symbolic-latest, cache-view, immediate-
+delivery, and no-finality scenarios.
 
 ## Reporting
 

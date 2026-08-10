@@ -1,7 +1,6 @@
 export * from './cursor-key.js'
 export * from './decode-error.js'
 export * from './errors.js'
-export * from './finalization-buffer.js'
 // Only `normalizeFinalized` is consumed across module boundaries (the target state classes). The
 // watermark class is imported directly by the source, and maxFinalized is module-internal — keep
 // them out of the package's public surface.

@@ -20,16 +20,19 @@ between (1) and (3) — recovery finds the in-flight record, deletes the intent 
 from every tracked table (idempotent), records the abort, and resumes from the
 pre-batch cursor. Delivery: effectively exactly-once.
 
-**CN-12 — Class K (checkpointed-immutable).** Only finalized rows are written (via the
-hold-back buffer, DEF-15). At a checkpoint (DEF-17): open units are published
-atomically (write-temp → sync → rename), **then** the cursor/state record is persisted
-atomically. Crash window: units published above the persisted cursor — recovery deletes
-every unit whose window end exceeds the cursor plus all temporary files, then re-fetches;
-requires replay purity (RS-10). A unit *straddling* the cursor is an integrity fault —
-refuse before deleting anything — **unless** it starts where the recorded coverage says
-that table was next due to publish from, which identifies it as the interrupted
-checkpoint's own unit (a sparse table's stretched unit straddles by construction) and so
-as a remnant to delete. Delivery: effectively exactly-once.
+**CN-12 — Class K (checkpointed-immutable).** The sink declares finalized-only delivery
+(RP-7) and stages every delivered row for its ordinary checkpoint protocol; the source
+gate, not a sink buffer, excludes reorg-able blocks on a finalizing dataset (DEF-15).
+At a checkpoint (DEF-17): open units are published atomically (write-temp → sync →
+rename), **then** the cursor/state record is persisted atomically. Crash window: units
+published above the persisted cursor — recovery deletes every unit whose window end
+exceeds the cursor plus all temporary files, then re-fetches; requires replay purity
+(RS-10). A unit
+*straddling* the cursor is an integrity fault — refuse before deleting anything —
+**unless** it starts where the recorded coverage says that table was next due to
+publish from, which identifies it as the interrupted checkpoint's own unit (a sparse
+table's stretched unit straddles by construction) and so as a remnant to delete.
+Delivery: effectively exactly-once.
 
 **CN-13 — Class A (append-lagged).** Data is appended by author code first; the cursor
 record is appended **after**, non-atomically. Crash window: data committed above the
@@ -40,8 +43,8 @@ obligation (RP-42) is met. *(Hook optional by design — the binding is schema-b
 absence is warned, not repaired: an accepted deviation, ADR-15.)*
 
 **CN-14 — Class ∅ (ephemeral).** No persistence; every run is a cold start; only
-finalized rows are emitted to author code. Exists as the executable minimal model of
-the hold-back contract.
+rows delivered by the finalized-only route are emitted to author code, immediately.
+Exists as the executable minimal model of the source-gated finality contract (DEF-15).
 
 **CN-17 — Class C (compensating append-only).** [MUST] For a medium that can neither
 rewrite nor delete what it published (message buses). Output is a changelog of keyed
@@ -79,9 +82,10 @@ corresponding cursor record (the crash window is reader-visible); after recovery
 completes, visible data and cursor agree. Consumers requiring exactness read ≤ the
 committed cursor.
 
-**CN-22 — Visibility (K/∅).** [MUST] Only finalized data is ever visible; published
-units are immutable from the moment of publication — no in-place rewrite, ever
-(INV-13 corollary).
+**CN-22 — Visibility (K/∅).** [MUST] On a finalizing dataset, only finalized data is
+ever visible; finalized-only source selection provides that guarantee. Published units
+are immutable from the moment of publication — no in-place rewrite, ever (INV-13
+corollary). No-finality datasets carry the explicit DEF-15/FM-13 limitation.
 
 **CN-23 — Monotonic reads.** [MUST] For a single reader, the observable cursor never
 moves backward except across an observed fork/recovery repair.
@@ -107,8 +111,10 @@ table, bracketed by intent/commit WAL records; both bounds mandatory (bounded wo
 partition pruning). Guarded by RP-43. (The delete range may exceed `C`; rows exist only
 `≤ C` (INV-42), so the deleted data set equals INV-14's `(ancestor, C]`.)
 
-**CN-32 — K.** Fork drops hold-back rows above the ancestor only; published units are
-never touched (they contain only finalized rows).
+**CN-32 — K.** Class K has no normal fork transition: RP-7 binds it to finalized-only
+delivery, whose route emits no fork. It exposes no rollback capability and published
+units are never touched. A fork response on that route is a portal-contract violation
+and halts safely before further publication (WP-45, FM-13).
 
 **CN-33 — A.** Fork resolves the ancestor from own-key rollback records, then delegates
 deletion to the repair hook (`fork`, ancestor). The storage-level mechanism MUST be
@@ -130,11 +136,11 @@ baselines before the sink returns ⊥ — fail-closed, not a convergence claim: 
 invalidated the persisted floor, local data cannot repair it and consumers need a
 rebuild *(GAP-6)*.
 
-**CN-34 — Ancestor persistence.** [MUST] After any class's fork completes, persisted
-state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process crashes
-immediately after (fork completion is itself a commit point). *(The append-lagged
-binding persists nothing at fork completion — a crash before the next commit resumes
-pre-fork; GAP-21.)*
+**CN-34 — Ancestor persistence.** [MUST] After any fork-capable class's fork completes,
+persisted state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process
+crashes immediately after (fork completion is itself a commit point). *(The
+append-lagged binding persists nothing at fork completion — a crash before the next
+commit resumes pre-fork; GAP-21.)*
 
 ## Recovery contract
 

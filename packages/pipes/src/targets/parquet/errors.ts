@@ -39,7 +39,7 @@ export const PARQUET_ERROR_CODES = {
   STATE_CORRUPT: 'E2310',
   /** The block-number column is declared `optional` — it must be present on every row. */
   BLOCK_COLUMN_OPTIONAL: 'E2311',
-  /** A row carried a missing/non-finite block number (would corrupt finalization & recovery). */
+  /** A row carried a missing/non-finite block number (would corrupt attribution and recovery). */
   BLOCK_VALUE_INVALID: 'E2312',
   /** A row value does not match its declared column type (dev-mode value check). */
   VALUE_INVALID: 'E2313',

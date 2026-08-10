@@ -6,7 +6,7 @@ import { ParquetReader, ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { evmPortalStream } from '~/evm/index.js'
-import { type MockPortal, type MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
+import { type MockPortal, type MockResponse, blockDecoder, finalizedMockPortal } from '~/testing/index.js'
 
 import type { ParquetEngine } from './engine.js'
 import { parquetTarget } from './parquet-target.js'
@@ -127,11 +127,11 @@ describe('parquetTarget with a custom engine', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
-  it('drives a from-scratch engine through finalization, publish and cursor persistence', async () => {
-    portal = await mockPortal([blocksResponse([1, 2, 3, 4, 5], 3)])
+  it('drives a from-scratch engine through append, publish and cursor persistence', async () => {
+    portal = await finalizedMockPortal([blocksResponse([1, 2, 3], 3)])
     const calls: string[] = []
 
-    await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
+    await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
       parquetTarget({
         dir,
         tables: [
@@ -154,9 +154,8 @@ describe('parquetTarget with a custom engine', () => {
     // engine's own business (its factory), so no context travels across the seam.
     expect(calls).toEqual(['table:blocks'])
 
-    // Only the finalized rows (1-3) published; the file is named by the target for the coverage
-    // window — from the configured start (0) to the finalized boundary (3). The engine never saw
-    // the window or chose the name.
+    // The file is named by the target for the coverage window — from the configured start (0) to
+    // the range end (3). The engine never saw the window or chose the name.
     const files = (await readdir(path.join(dir, 'blocks'))).sort()
     expect(files).toEqual(['000000000000-000000000003.parquet'])
 
@@ -175,7 +174,7 @@ describe('parquetTarget with a custom engine', () => {
   })
 
   it('refuses an engine output that merely wraps non-Parquet bytes in the magic', async () => {
-    portal = await mockPortal([blocksResponse([1, 2, 3], 3)])
+    portal = await finalizedMockPortal([blocksResponse([1, 2, 3], 3)])
 
     await expect(
       evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(

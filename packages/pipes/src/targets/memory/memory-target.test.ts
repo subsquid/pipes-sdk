@@ -4,7 +4,7 @@ import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
 import { evmPortalStream } from '~/evm/evm-portal-source.js'
 import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
-import { MockPortal, mockPortal } from '~/testing/index.js'
+import { MockPortal, finalizedMockPortal } from '~/testing/index.js'
 
 import { createMemoryTarget } from './memory-target.js'
 
@@ -32,7 +32,9 @@ type Row = { blockNumber: number; value: bigint }
 function streamTo(portal: MockPortal, to: number, emitted: Row[][]) {
   return evmPortalStream({
     id: 'memory-target-test',
-    portal: portal.url,
+    // `maxBytes: 1` keeps each mock response its own batch; without it they coalesce and a target
+    // that only emitted once at stream end would pass the arrival-order assertions unchanged.
+    portal: { url: portal.url, maxBytes: 1 },
     outputs: evmEventDecoder({
       range: { from: 1, to },
       events: {
@@ -59,39 +61,40 @@ describe('createMemoryTarget', () => {
     await portal?.close()
   })
 
-  it('emits only finalized rows and releases buffered rows once a later head finalizes them', async () => {
+  // The target requires the finalized stream, so every row it is handed is already final: it emits
+  // them as they arrive, in order, instead of holding any back.
+  it('emits every row in arrival order across batches', async () => {
     const [b1, b2, b3, b4, b5] = [1, 2, 3, 4, 5].map(blockWithTransfer)
 
-    portal = await mockPortal([
-      // finalized head = 1: block 1 is emitted, blocks 2 & 3 are held back
+    portal = await finalizedMockPortal([
       {
         statusCode: 200,
         data: [b1, b2, b3],
-        head: { finalized: { number: b1.header.number, hash: b1.header.hash } },
+        head: { finalized: { number: b3.header.number, hash: b3.header.hash } },
       },
-      // finalized head = 4: the buffered 2 & 3 plus the new 4 are released; 5 stays held
       {
         statusCode: 200,
         data: [b4, b5],
-        head: { finalized: { number: b4.header.number, hash: b4.header.hash } },
+        head: { finalized: { number: b5.header.number, hash: b5.header.hash } },
       },
     ])
 
     const emitted: Row[][] = []
     await streamTo(portal, 5, emitted)
 
-    // Block 5 is never finalized, so it must not be emitted.
-    const blockNumbers = emitted.flat().map((r) => r.blockNumber)
-    expect(blockNumbers).toEqual([1, 2, 3, 4])
-
-    // Buffered rows (2, 3) are released before the current batch's row (4).
-    expect(emitted.flat().map((r) => r.value)).toEqual([1n, 2n, 3n, 4n])
+    // Per batch, not flattened: the target releases each batch as it arrives rather than
+    // accumulating and emitting once at the end.
+    expect(emitted.map((batch) => batch.map((r) => r.blockNumber))).toEqual([
+      [1, 2, 3],
+      [4, 5],
+    ])
+    expect(emitted.flat().map((r) => r.value)).toEqual([1n, 2n, 3n, 4n, 5n])
   })
 
-  it('passes every row straight through when the dataset has no finalized head', async () => {
+  it('emits rows for a dataset that reports no finalized head at all', async () => {
     const [b1, b2] = [1, 2].map(blockWithTransfer)
 
-    portal = await mockPortal([
+    portal = await finalizedMockPortal([
       {
         statusCode: 200,
         data: [b1, b2],

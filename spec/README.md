@@ -43,7 +43,7 @@ lives in [13-conformance-tdd.md](13-conformance-tdd.md).
 |---|---|---|---|---|
 | ClickHouse | [A — append-lagged](06-consistency-durability.md#durability-classes-adr-5) | [IB-20](14-interface-binding.md#persisted-state-formats) | [CN-33](06-consistency-durability.md#fork-mechanics-per-class) | [ADR-7 — sign-netting rollback](decisions/ADR-7-clickhouse-sign-netting-rollback.md) · [ADR-15 — class-A repair ownership](decisions/ADR-15-mandatory-repair-hook.md) |
 | Postgres | [T — transactional](06-consistency-durability.md#durability-classes-adr-5) | [IB-21](14-interface-binding.md#persisted-state-formats) | [CN-30](06-consistency-durability.md#fork-mechanics-per-class) | — |
-| Parquet | [K — checkpointed-immutable](06-consistency-durability.md#durability-classes-adr-5) | [IB-22](14-interface-binding.md#persisted-state-formats) | [CN-32](06-consistency-durability.md#fork-mechanics-per-class) | [ADR-6 — coverage-window naming](decisions/ADR-6-coverage-window-naming.md) · [ADR-18 — pluggable engine seam](decisions/ADR-18-parquet-pluggable-engine-seam.md) · [ADR-19 — duckdb engine (external)](decisions/ADR-19-duckdb-segment-writer-engine.md) |
+| Parquet | [K — checkpointed-immutable](06-consistency-durability.md#durability-classes-adr-5) | [IB-22](14-interface-binding.md#persisted-state-formats) | [CN-32](06-consistency-durability.md#fork-mechanics-per-class) | [ADR-6 — coverage-window naming](decisions/ADR-6-coverage-window-naming.md) · [ADR-18 — pluggable engine seam](decisions/ADR-18-parquet-pluggable-engine-seam.md) · [ADR-19 — duckdb engine (external)](decisions/ADR-19-duckdb-segment-writer-engine.md) · [ADR-22 — finalized-only source selection](decisions/ADR-22-finalized-only-source-selection.md) |
 | BigQuery | [W — write-ahead](06-consistency-durability.md#durability-classes-adr-5) | [IB-23](14-interface-binding.md#persisted-state-formats) | [CN-31](06-consistency-durability.md#fork-mechanics-per-class) | — |
 | Pub/Sub | [C — compensating append-only](06-consistency-durability.md#durability-classes-adr-5) | [IB-28](14-interface-binding.md#persisted-state-formats) | [CN-35](06-consistency-durability.md#fork-mechanics-per-class) | [ADR-21 — compensating append-only sinks](decisions/ADR-21-compensating-append-only-sinks.md) |
 
@@ -53,7 +53,8 @@ Binding-independent: the contract every sink implements is
 [ADR-4 — coded error taxonomy](decisions/ADR-4-coded-error-taxonomy.md) ·
 [ADR-5 — durability classes](decisions/ADR-5-durability-classes.md) ·
 [ADR-16 — tracked-table exclusivity](decisions/ADR-16-tracked-table-exclusivity.md)
-*(proposed)*.
+*(proposed)* ·
+[ADR-22 — finalized-only source selection](decisions/ADR-22-finalized-only-source-selection.md).
 
 ## Conventions
 

@@ -89,9 +89,9 @@ export type ParquetTable = {
   /** Declared columns. Must be non-empty and include {@link ParquetTable.blockNumberColumn}. */
   schema: ParquetColumns
   /**
-   * Column carrying the block number, used for finalization, file-range naming and recovery.
-   * Must be present in `schema` as a required (non-optional) integer column (`INT64`/`INT32`)
-   * whose value is the block number itself. Defaults to `'blockNumber'`.
+   * Column carrying each row's block number for attribution and recovery. Must be present in
+   * `schema` as a required (non-optional) integer column (`INT64`/`INT32`) whose value is the block
+   * number itself. Defaults to `'blockNumber'`.
    */
   blockNumberColumn?: string
 }
@@ -116,12 +116,9 @@ const SUPPORTED_TYPES = new Set<string>([
   'JSON',
 ] satisfies ParquetLeafType[])
 
-// The block column's value is compared directly against the portal's finalized block NUMBER
-// (`Number(row[col]) <= finalized.number`) to decide when a row may leave the finalization buffer,
-// so it must hold the block number itself. TIMESTAMP (and its TIMESTAMP_MILLIS alias) is
-// int64-backed but carries epoch-ms, and DATE is int32-backed but carries days-since-epoch —
-// comparing either against a block number silently never (or always) finalizes, so both are
-// excluded, as is everything non-numeric.
+// The block column must hold the block number itself. TIMESTAMP is int64-backed but carries
+// epoch-ms, and DATE is int32-backed but carries days-since-epoch; neither can identify the block a
+// row belongs to, so both are excluded, as is everything non-numeric.
 const INTEGER_BLOCK_TYPES = new Set<ParquetColumnType>(['INT64', 'INT32'])
 
 /** The block-number column name for a table, applying the default. */
@@ -198,9 +195,9 @@ export function validateTable(table: ParquetTable): void {
     throw new ParquetTargetError(
       PARQUET_ERROR_CODES.BLOCK_COLUMN_OPTIONAL,
       `parquetTarget: table '${table.table}' block-number column '${blockColumn}' is declared optional, ` +
-        `but it must carry a block number on every row — finalization, file-range naming and crash recovery ` +
-        `all key off it. A null block coerces to 0 (written as an immutable block-0 row) and a missing one to ` +
-        `NaN (buffered forever, silently lost). Remove 'optional: true' from this column.`,
+        `but it must carry a block number on every row — file-range naming and crash recovery key off it. ` +
+        `Null or missing values cannot be attributed to a block and are rejected before append. Remove ` +
+        `'optional: true' from this column.`,
     )
   }
 }

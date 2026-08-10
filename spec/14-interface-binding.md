@@ -9,9 +9,11 @@ The only normative doc naming concrete surfaces. Bands: 1–19 portal wire proto
 `GET metadata?expand[]=metadata` (dataset info: `real_time`, `start_block`, kind) ·
 `GET head` / `GET finalized-head` → `{hash, number}` ·
 `GET timestamps/{seconds}/block` → `{block_number}` ·
-`POST stream` / `POST finalized-stream` (the data stream; finalized-only mode uses the
-latter pair). The base URL MAY embed basic credentials (`user:pass@`), forwarded as an
-`Authorization: Basic` header; requests carry a client `User-Agent`.
+`POST stream` / `POST finalized-stream` (the data stream). Full mode uses `GET head` +
+`POST stream`; finalized-only mode uses `GET finalized-head` +
+`POST finalized-stream` (IB-11). The base URL MAY embed basic credentials
+(`user:pass@`), forwarded as an `Authorization: Basic` header; requests carry a client
+`User-Agent`.
 
 **IB-2 — Stream request.** JSON body:
 `{ type, fields, fromBlock, toBlock?, parentBlockHash?, ...requests }` where `type` is
@@ -63,6 +65,18 @@ selected keys present, unselected absent, absent collections decode as `[]`.
 **IB-10 — Network tags (closed set).** `evm` · `solana` · `substrate` · `bitcoin` ·
 `tron` · `hyperliquidFills` (exact casing; the last is deliberately camel-case).
 
+**IB-11 — Finalized-only route selection.** A target may declare that it accepts only
+finalized-stream delivery (the TypeScript reference binding names the capability
+`requiresFinalizedStream`; other language APIs may differ). Before resolving symbolic
+ranges, the pipe constructs one effective finalized portal view and uses it for
+`GET finalized-head`, transformer startup context, cache access, and
+`POST finalized-stream`. A cache receives `finalized: true` and the effective portal
+view itself is pinned to finalized operations, so an older cache that ignores the
+flag remains safe when it uses the supplied client. The target receives the effective
+mode, not merely the configured one. Overriding configured full mode emits one warning;
+already-finalized mode is quiet. A target without the capability keeps the configured
+mode. Decision: ADR-22.
+
 ## Persisted state formats
 
 Cross-implementation contract: any conforming implementation MUST read and write these
@@ -111,7 +125,8 @@ start ahead of what the cursor allows is clamped with a warning, not refused. Co
 INT64/INT32/UTF8/BYTE_ARRAY/BOOLEAN/DOUBLE/
 TIMESTAMP(millis)/DATE/JSON/LIST/STRUCT; DECIMAL deliberately unsupported; block
 column INT64/INT32 required non-null. Compression: SNAPPY (default), GZIP, BROTLI,
-UNCOMPRESSED.
+UNCOMPRESSED. The target declares IB-11 finalized-only delivery, appends every delivered
+row directly, and exposes no fork-resolution operation (CN-32).
 
 **IB-23 — BigQuery binding (class W).** Sync/WAL table `<dataset>.sync`:
 `id, op ('commit'|'rollback'), current (cursor JSON), finalized (cursor JSON),
@@ -249,7 +264,7 @@ consumers MUST NOT read it as a block number.
 | Band | Area | Codes in use |
 |---|---|---|
 | E0xxx | pipe configuration | E0001 blank/default pipe id *(currently dead — GAP-4)*, E0002 invalid range/date, E0003 unusable instruction discriminator set (mixed widths across the decoder, shared discriminator, or an instruction with none or several) |
-| E1xxx | fork handling | E1001 sink lacks fork support, E1002 empty canonical chain, E1003 ancestor unresolvable, E1004 portal contract violation (canonical below cursor) |
+| E1xxx | fork handling | E1001 sink lacks fork support, E1002 empty canonical chain, E1003 ancestor unresolvable, E1004 portal contract violation (canonical below cursor), E1005 fork reported on the finalized-only route |
 | E20xx | ClickHouse binding | E2001–E2007 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler) |
 | E21xx | Postgres binding | E2101–E2106 (client, config, advisory lock, untracked table, missing PK, FK cycle) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
@@ -267,7 +282,8 @@ registry; CI SHOULD enforce it *(no such check exists — GAP-13)*.
 
 ## Input-side binding (simulator obligations)
 
-The CT portal simulator MUST implement: IB-1 routes; NDJSON framing with adversarial
+The CT portal simulator MUST implement: IB-1 routes, including IB-11 mode selection;
+NDJSON framing with adversarial
 chunk splits; 200/204/empty-body/409 semantics; head headers per batch; retry-after
 pacing; scripted fork signals with canonical chains; scripted head regressions.
 Responses MUST be derived from the request anchor (IB-3) against a held chain, never

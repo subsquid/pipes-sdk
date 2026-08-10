@@ -15,10 +15,10 @@ export interface ParquetTableWriter {
 /**
  * A pluggable segment-writer engine for `parquetTarget`.
  *
- * The target owns everything around the writer — staging, finalization buffering, rotation
- * triggers, coverage tracking, temp-file naming, publication (fsync → collision check → atomic
- * rename → dir fsync), checkpointing, crash recovery, fork handling and metrics. An engine owns
- * exactly one thing: writing finalized rows into a Parquet file at the temp path it is given.
+ * The target owns everything around the writer — staging, rotation triggers, coverage tracking,
+ * temp-file naming, publication (fsync → collision check → atomic rename → dir fsync),
+ * checkpointing, crash recovery and metrics. The source supplies finalized blocks. An engine owns
+ * exactly one thing: writing those rows into a Parquet file at the temp path it is given.
  * It never names, renames, fsyncs or deletes files, and it never sees a block number or
  * coverage window — published files are named for the window the pipe processed, which only
  * the target knows — so naming, durability and recovery semantics cannot vary per engine. The

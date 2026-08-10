@@ -32,9 +32,10 @@ the reference implementation. All targets ⚠ provisional pending ADR-14.
 ## Resource-bound requirements
 
 **PF-1 — Derivable memory ceiling.** [MUST] Peak memory ≤ assembly bound
-(P-STREAM-MAX-BYTES + one chunk) + hold-back (finality depth × row size) + sink buffer
-(class-configured: P-PQ-ROW-GROUP-ROWS, P-BQ-APPEND-MAX-BYTES, one batch for T/A) +
-constant overhead. No hidden unbounded term.
+(P-STREAM-MAX-BYTES + one chunk) + sink buffer (class-configured:
+P-PQ-ROW-GROUP-ROWS, P-BQ-APPEND-MAX-BYTES, one batch for T/A) + constant overhead.
+Finalized-only delivery waits upstream and adds no finality-depth-dependent in-process
+term. No hidden unbounded term.
 
 **PF-2 — End-to-end backpressure.** [MUST] = WP-12; under a saturated sink, portal
 consumption throttles to sink throughput with bounded buffering.

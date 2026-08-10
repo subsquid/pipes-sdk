@@ -31,6 +31,17 @@ export type ReadOptions = {
 }
 
 export type Target<In> = {
+  /**
+   * Set by a target that commits only finalized data. The source then reads `/finalized-stream`
+   * whatever the pipe's portal config says, and warns when it had to override it.
+   *
+   * A hot stream ends once its range has been delivered — finality there is a response header,
+   * not a completion condition — so a bounded range whose end sits above the finalized head would
+   * leave such a target holding an uncommitted tail and still report success. On
+   * `/finalized-stream` every delivered block is final, which is the guarantee these targets
+   * actually need, and no fork can arrive.
+   */
+  requiresFinalizedStream?: boolean
   write: (writer: {
     /**
      * Globally unique, stable identifier for this pipe (the source `id`). Targets use it as
