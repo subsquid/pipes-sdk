@@ -43,6 +43,21 @@ absence is warned, not repaired: an accepted deviation, ADR-15.)*
 finalized rows are emitted to author code. Exists as the executable minimal model of
 the hold-back contract.
 
+**CN-17 — Class C (compensating append-only).** [MUST] For a medium that can neither
+rewrite nor delete what it published (message buses). Output is a changelog of keyed
+operations, not rows. Per batch, in **one local transaction**: assign each operation the
+next producer sequence, enqueue it in a publish outbox, record it in a rollback manifest
+(operation, row id, partition, filter attributes, and — for revisable rows — its encoded
+value), append the block ledger, advance the cursor, fold newly-finalized revisable rows
+into their baselines, and prune what finality has put out of a fork's reach. Only then
+does the outbox go to the wire; confirmed rows leave the outbox in a second transaction.
+Crash window: between the commit and the confirmation — recovery republishes the outbox
+byte- and sequence-identically. The cursor can therefore never run ahead of the wire: a
+crash leaves *unpublished* operations, never *unrecorded published* ones. Fork: CN-35.
+Delivery: at-least-once end to end, converging **iff** consumers apply operations
+idempotently and by version (RP-24). *(Numbered outside the 10–14 run: the class was
+added after the band's commit-model entries, and ids are stable — ADR-21.)*
+
 ## Commit model
 
 **CN-15 — Total order per pipe.** [MUST] Commits for one cursor key form a total order;
@@ -51,15 +66,15 @@ There is no commit "version" separate from the cursor: cursor order **is** commi
 
 **CN-16 — Single commit point.** [MUST] Each class has exactly one point after which a
 batch is durable (T: transaction commit; W: commit record; K: state-record rename; A:
-cursor append). Before it, recovery discards the batch; after it, recovery preserves it
-entirely.
+cursor append; C: the local outbox transaction). Before it, recovery discards the batch;
+after it, recovery preserves it entirely.
 
 ## Visibility & isolation
 
 **CN-20 — Atomic visibility (T).** [MUST] Readers of the store never observe a batch's
 rows without its cursor or vice versa.
 
-**CN-21 — Visibility (W/A).** [MUST] Readers may observe data rows before the
+**CN-21 — Visibility (W/A/C).** [MUST] Readers may observe data rows before the
 corresponding cursor record (the crash window is reader-visible); after recovery
 completes, visible data and cursor agree. Consumers requiring exactness read ≤ the
 committed cursor.
@@ -100,6 +115,21 @@ deletion to the repair hook (`fork`, ancestor). The storage-level mechanism MUST
 idempotent under duplicated application and MUST NOT corrupt tables that share the
 store (engine-capability guards at startup).
 
+**CN-35 — C.** Fork resolves the ancestor from own-key rollback records, then repairs
+each affected row by **publishing**, never by deleting. One rule per row id: drop the
+orphaned revision suffix and publish whatever state remains at the ancestor — the
+surviving revision, else the finalized baseline, else the route-declared inverse (a
+`delete` by default). Each compensation takes the partition's **next** sequence, never a
+reused or rewound one, and carries the id and filter attributes of the operations it
+repairs, so a filtered consumer receives the repair for its own slice. A write-once row
+that also exists at or below the ancestor is still canonical there and MUST NOT be
+compensated. Compensations enter the same outbox and go out before anything later on
+their partition, and before the source re-streams the canonical blocks. On the finality
+dead-end (WP-44), the entire rollbackable manifest is compensated back to the finalized
+baselines before the sink returns ⊥ — fail-closed, not a convergence claim: if the fork
+invalidated the persisted floor, local data cannot repair it and consumers need a
+rebuild *(GAP-6)*.
+
 **CN-34 — Ancestor persistence.** [MUST] After any class's fork completes, persisted
 state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process crashes
 immediately after (fork completion is itself a commit point). *(The append-lagged
@@ -139,6 +169,14 @@ of IB-20…IB-26 only; any conforming implementation recovers state written by a
 (G1). Clock independence: no recovery or ordering decision may depend on wall-clock
 comparability across writers *(two bindings order cursor rows by wall-clock timestamp —
 GAP-10)*.
+
+**CN-46 — Recovery (C).** [MUST] A class-C sink's resume is: open state → drain the
+outbox → stream from the recovered cursor. No data repair runs and none is possible: the
+commit point precedes the wire, so recovery has nothing published-but-unrecorded to
+clean up, and every outbox row it republishes is byte- and sequence-identical to what a
+first attempt would have sent. A cold start (no state at the configured path) MUST be
+made observable — the sequencer is the state, and its loss is indistinguishable in-band
+from a first run (ADR-21, GAP-38).
 
 ## Subsystem non-interference
 

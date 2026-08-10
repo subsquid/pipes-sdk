@@ -20,6 +20,7 @@
     "@clickhouse/client": "^1.12.1",
     "@google-cloud/bigquery": "8.3.0",
     "@google-cloud/bigquery-storage": "5.1.0",
+    "@google-cloud/pubsub": "6.0.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.212.0",
     "@opentelemetry/sdk-node": "^0.212.0",
     "@subsquid/borsh": "0.3.0",
