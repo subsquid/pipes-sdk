@@ -7,7 +7,7 @@ import { PipeError, SdkErrorName } from '~/core/errors.js'
  * downstream code can pattern-match on `instanceof BigQueryTargetError` and react
  * (alerting, retries, etc.) without scraping `.message`. Code bands: E0xxx = source,
  * E1xxx = fork handling, E2xxx = targets (E20xx ClickHouse, E21xx Postgres, E22xx
- * BigQuery, E23xx Parquet).
+ * BigQuery, E23xx Parquet, E24xx PubSub).
  */
 export class BigQueryTargetError extends PipeError {
   constructor(code: string, message: string | string[]) {

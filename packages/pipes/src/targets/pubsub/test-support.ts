@@ -10,7 +10,7 @@ import type { DrainResult, Publisher } from './publisher.js'
 import type { OutboxRow } from './pubsub-state.js'
 
 /**
- * Shared scaffolding for the Pub/Sub target suites: a publisher that records what would go on
+ * Shared scaffolding for the PubSub target suites: a publisher that records what would go on
  * the wire, a keyed block decoder, and a synthetic batch context for the crash-matrix tests
  * that drive `target.write()` without a portal.
  *

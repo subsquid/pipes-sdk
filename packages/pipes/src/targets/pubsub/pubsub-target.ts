@@ -231,7 +231,7 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
 
         logger.info({
           message:
-            `publishing ${routes.length} route(s) to Pub/Sub — profile "${delivery}", namespace "${namespace}", ` +
+            `publishing ${routes.length} route(s) to PubSub — profile "${delivery}", namespace "${namespace}", ` +
             `state "${'path' in options.state ? options.state.path : 'custom'}"`,
           topics: routes.map((r) => `${r.stream} → ${r.topic} (${r.mode})`),
         })
@@ -240,7 +240,7 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
           // A cold start on an already-live namespace means a lost sequencer: the producer will
           // hand out `_seq`s consumers already hold, and nothing on the wire says so (GAP-38).
           logger.warn(
-            `Pub/Sub state at "${'path' in options.state ? options.state.path : 'custom'}" started EMPTY under ` +
+            `PubSub state at "${'path' in options.state ? options.state.path : 'custom'}" started EMPTY under ` +
               `namespace "${namespace}". On a first run this is expected. On an existing feed it means the ` +
               `sequencer was lost — no consumer can detect that for itself. Recover with a fresh namespace and ` +
               `a re-bootstrap, not with a restart.`,
@@ -412,7 +412,7 @@ class WriteContext {
       this.#metrics.publishDuration.observe(elapsed)
       this.#metrics.publishedBytes.inc(result.bytes)
 
-      // Per-partition throughput at or near Pub/Sub's per-key cap: the ordered profile's
+      // Per-partition throughput at or near PubSub's per-key cap: the ordered profile's
       // headroom requirement is a deployment invariant (IB-28), so make its erosion visible.
       if (this.#options.delivery === 'ordered' && elapsed > 0) {
         for (const partition of partitionRows(wire)) {
@@ -491,7 +491,7 @@ class WriteContext {
     const skipped = Object.keys(data).filter((stream) => !configured.has(stream))
     if (!skipped.length) return
 
-    logger.warn(`no Pub/Sub route configured for stream(s): ${skipped.join(', ')} — they are not published`)
+    logger.warn(`no PubSub route configured for stream(s): ${skipped.join(', ')} — they are not published`)
   }
 
   async #map(data: any, ctx: BatchContext): Promise<{ operations: PendingOperation[]; meta: Record<string, string> }> {
@@ -574,7 +574,7 @@ class WriteContext {
     if (draft.orderingKey !== undefined && delivery === 'lww') {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ORDERING_KEY_NOT_SUPPORTED, [
         `Route "${resolved.stream}" set an ordering key, but the pipe runs the "lww" profile, which uses ` +
-          'no Pub/Sub ordering keys at all.',
+          'no PubSub ordering keys at all.',
         'Switch to `publish.delivery: "ordered"` to partition a topic, or drop the key.',
       ])
     }
@@ -596,7 +596,7 @@ class WriteContext {
     })
 
     // Every limit the service enforces is checked HERE, before the operation becomes durable.
-    // A message Pub/Sub will reject is not a lost message but a stuck one: it sits at the head
+    // A message PubSub will reject is not a lost message but a stuck one: it sits at the head
     // of its partition's outbox and fails identically on every restart.
     assertWireLimits(
       {
@@ -751,7 +751,7 @@ async function bindWireConfig(state: PubsubState, config: { namespace: string; u
   if (stored === current) return
 
   throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH, [
-    'The Pub/Sub state was written with a different namespace or `publish.uidAttribute` setting.',
+    'The PubSub state was written with a different namespace or `publish.uidAttribute` setting.',
     'Those settings determine the published identity envelope, so changing them while reusing an outbox ' +
       'could mutate an unconfirmed operation during recovery. Use the original settings, or start a new feed ' +
       'with fresh state and a fresh namespace.',
@@ -810,7 +810,7 @@ function registerPubsubMetrics(metrics: Metrics): PubsubMetrics {
     saturation: metrics.counter({
       name: 'sqd_pubsub_publish_saturation_seconds',
       help:
-        'Ordered profile: seconds spent publishing a partition at ≥80% of Pub/Sub’s 1 MB/s ' +
+        'Ordered profile: seconds spent publishing a partition at ≥80% of PubSub’s 1 MB/s ' +
         'per-ordering-key cap. Growing values mean the headroom requirement is eroding.',
     }),
   }

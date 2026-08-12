@@ -24,7 +24,7 @@ export type RouteMode = 'event' | 'materialized'
  */
 export type PendingOperation = {
   topic: string
-  /** Empty under `lww`, where Pub/Sub ordering keys are not used at all. */
+  /** Empty under `lww`, where PubSub ordering keys are not used at all. */
   orderingKey: string
   mode: RouteMode
   op: PubsubOp
@@ -171,7 +171,7 @@ function isLockError(e: unknown): boolean {
 
 function lockedError(path: string, cause: unknown): PubsubTargetError {
   return new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_LOCKED, [
-    `Another process holds the Pub/Sub state file "${path}".`,
+    `Another process holds the PubSub state file "${path}".`,
     'Exactly one producer may own a state file: it is the authoritative sequencer for every id it ' +
       'publishes, and a second writer would hand consumers sequence numbers they have already seen.',
     cause instanceof Error ? cause.message : String(cause),
@@ -213,7 +213,7 @@ export class SqlitePubsubState implements PubsubState {
       if (isLockError(e)) throw lockedError(this.#options.path, e)
 
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_UNAVAILABLE, [
-        `Cannot open the Pub/Sub state file at "${this.#options.path}": ${e instanceof Error ? e.message : String(e)}`,
+        `Cannot open the PubSub state file at "${this.#options.path}": ${e instanceof Error ? e.message : String(e)}`,
         'The state is the producer’s sequencer — it must live on a persistent volume, not ephemeral container storage.',
       ])
     }
@@ -235,7 +235,7 @@ export class SqlitePubsubState implements PubsubState {
       const version = this.getMetaSync('schema_version')
       if (version && version !== STATE_SCHEMA_VERSION) {
         throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION, [
-          `The Pub/Sub state at "${this.#options.path}" was written with schema version ${version}, ` +
+          `The PubSub state at "${this.#options.path}" was written with schema version ${version}, ` +
             `this build speaks ${STATE_SCHEMA_VERSION}.`,
         ])
       }
@@ -269,7 +269,7 @@ export class SqlitePubsubState implements PubsubState {
     const storedKey = this.getMetaSync(META_CURSOR_KEY)
     if (storedKey !== undefined && storedKey !== this.#key.value) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_IDENTITY_MISMATCH, [
-        `The Pub/Sub state at "${this.#options.path}" belongs to producer "${storedKey}", but this pipe ` +
+        `The PubSub state at "${this.#options.path}" belongs to producer "${storedKey}", but this pipe ` +
           `binds "${this.#key.value}".`,
         'One state file per producer: its outbox, manifest and sequence counters are producer-wide, so ' +
           'adopting this one would publish another producer’s pending operations under this pipe’s identity.',
@@ -279,7 +279,7 @@ export class SqlitePubsubState implements PubsubState {
     const storedDelivery = this.getMetaSync(META_DELIVERY)
     if (storedDelivery !== undefined && storedDelivery !== this.#options.delivery) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_PROFILE_MISMATCH, [
-        `The Pub/Sub state at "${this.#options.path}" was written under the "${storedDelivery}" delivery ` +
+        `The PubSub state at "${this.#options.path}" was written under the "${storedDelivery}" delivery ` +
           `profile; this pipe runs "${this.#options.delivery}".`,
         'The profiles scope `_seq` differently — one producer-wide counter versus one dense counter per ' +
           'partition — so continuing would re-issue sequence numbers consumers already hold. Changing ' +

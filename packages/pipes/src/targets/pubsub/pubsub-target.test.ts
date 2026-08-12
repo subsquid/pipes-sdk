@@ -583,7 +583,7 @@ describe('pubsubTarget', () => {
     it('refuses an oversized id before it can reach the durable outbox', async () => {
       const publisher = new FakePublisher()
 
-      // Pub/Sub rejects an oversized `_id` at publish time; committed first, the row would sit
+      // PubSub rejects an oversized `_id` at publish time; committed first, the row would sit
       // at the head of its partition and fail identically on every restart.
       await expect(
         runPipe({

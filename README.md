@@ -73,7 +73,7 @@ the stream `id`, and rolls back cleanly on chain reorgs.
 | PostgreSQL (Drizzle) | `@subsquid/pipes/targets/drizzle/node-postgres` | [08.drizzle](docs/examples/evm/08.drizzle.example.ts) |
 | Parquet | `@subsquid/pipes/targets/parquet` | [17.parquet](docs/examples/evm/17.parquet.example.ts) |
 | BigQuery | `@subsquid/pipes/targets/bigquery` | [16.bigquery](docs/examples/evm/16.bigquery.example.ts) |
-| Google Pub/Sub | `@subsquid/pipes/targets/pubsub` | [18.pubsub](docs/examples/evm/18.pubsub.example.ts) |
+| Google PubSub | `@subsquid/pipes/targets/pubsub` | [18.pubsub](docs/examples/evm/18.pubsub.example.ts) |
 
 ```ts
 import { createClient } from '@clickhouse/client'

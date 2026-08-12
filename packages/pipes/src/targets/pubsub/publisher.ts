@@ -34,7 +34,7 @@ export type DrainResult = {
 
 /**
  * The client seam. The target speaks only this interface, so the whole write/fork protocol is
- * testable without a Pub/Sub endpoint, and a different transport stays a drop-in.
+ * testable without a PubSub endpoint, and a different transport stays a drop-in.
  */
 export interface Publisher {
   /** Called once at start: validate (default), create (dev), or skip topic administration. */

@@ -1,7 +1,7 @@
 /**
- * Google Pub/Sub target — publish a live changelog of ERC20 transfers.
+ * Google PubSub target — publish a live changelog of ERC20 transfers.
  *
- * Unlike the database targets, Pub/Sub is write-only: a published message cannot be read back,
+ * Unlike the database targets, PubSub is write-only: a published message cannot be read back,
  * updated, or deleted. So the target publishes a **changelog** of two operations on keyed rows —
  * `upsert` and `delete` — and repairs chain forks by publishing compensating operations rather
  * than by rewriting anything.
@@ -13,7 +13,7 @@
  *   - **Filters that keep working through a fork.** A compensation inherits the user attributes of
  *     the operation it repairs, so an ordinary subscription filter (`attributes.token = "0x…"`)
  *     receives the repair for its own slice with no special casing. Never filter on `_op`.
- *   - **Order-free consumption.** The default `lww` profile uses no Pub/Sub ordering keys and has
+ *   - **Order-free consumption.** The default `lww` profile uses no PubSub ordering keys and has
  *     no throughput cap. Each message carries `_seq`, a per-row version: a consumer applies an
  *     operation only when its `_seq` beats the one it holds for that `_id`. Delivery order stops
  *     mattering, and several producers can share one topic as long as ids do not overlap.
@@ -44,7 +44,7 @@
  * Prerequisites:
  *   - `@google-cloud/pubsub` is an optional peer dependency — install it: `npm i @google-cloud/pubsub`.
  *   - The topic must exist (the default `topicSetup: 'validate'` fails fast otherwise), and the
- *     subscription must exist BEFORE the first publish — Pub/Sub retains messages per
+ *     subscription must exist BEFORE the first publish — PubSub retains messages per
  *     subscription, so anything published earlier is simply gone.
  *
  * To run:

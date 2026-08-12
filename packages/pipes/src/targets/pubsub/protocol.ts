@@ -7,7 +7,7 @@ import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 export const WIRE_VERSION = '1'
 
 /**
- * Pub/Sub hard limits, checked before an operation is committed rather than at publish time
+ * PubSub hard limits, checked before an operation is committed rather than at publish time
  * (IB-28): a message the service will reject must never reach the durable outbox, where it
  * would block that partition on every restart.
  */
@@ -232,7 +232,7 @@ export type WireOperation = {
   /** Absent on `heartbeat` — a heartbeat is not a row. */
   id?: string
   seq: number
-  /** Empty string under `lww`, where Pub/Sub ordering keys are not used at all. */
+  /** Empty string under `lww`, where PubSub ordering keys are not used at all. */
   orderingKey: string
   attributes: Record<string, string>
   payload: Uint8Array
@@ -278,7 +278,7 @@ export function uidValue(
 
 /**
  * Everything the service checks that the user-attribute pass does not: the envelope's own
- * values and the ordering key. Run BEFORE the batch commits — Pub/Sub rejects an oversized
+ * values and the ordering key. Run BEFORE the batch commits — PubSub rejects an oversized
  * `_id` or ordering key at publish time, and by then the operation is durable, so its
  * partition would fail identically on every restart with no way to make progress.
  */
@@ -293,7 +293,7 @@ export function assertWireLimits(
     if (bytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
         `The row id produced by ${where} is ${bytes} bytes; it is published as the \`_id\` attribute, ` +
-          `and Pub/Sub allows ${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
+          `and PubSub allows ${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
         'Shorten the id — it is an identity, not a payload.',
       ])
     }
@@ -303,7 +303,7 @@ export function assertWireLimits(
     const bytes = utf8Length(message.orderingKey)
     if (bytes > PUBSUB_LIMITS.maxOrderingKeyBytes) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
-        `The ordering key produced by ${where} is ${bytes} bytes; Pub/Sub allows ${PUBSUB_LIMITS.maxOrderingKeyBytes}.`,
+        `The ordering key produced by ${where} is ${bytes} bytes; PubSub allows ${PUBSUB_LIMITS.maxOrderingKeyBytes}.`,
       ])
     }
   }
@@ -315,7 +315,7 @@ export function assertWireLimits(
     )
     if (bytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
-        `The \`_uid\` attribute for ${where} would be up to ${bytes} bytes; Pub/Sub allows ` +
+        `The \`_uid\` attribute for ${where} would be up to ${bytes} bytes; PubSub allows ` +
           `${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
         'Shorten the namespace, the topic name, or the ordering key — `_uid` identifies all three.',
       ])
@@ -324,7 +324,7 @@ export function assertWireLimits(
 }
 
 /**
- * Reject user attributes that collide with the protocol's namespace or blow Pub/Sub's
+ * Reject user attributes that collide with the protocol's namespace or blow PubSub's
  * per-message budget, with a coded error naming the attribute — the client's own reject is
  * a generic INVALID_ARGUMENT far from the route that caused it.
  */
@@ -341,7 +341,7 @@ export function validateUserAttributes(
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
       `Route "${context.route}" produced ${names.length} user attributes for topic "${context.topic}", ` +
         `but only ${budget} fit beside the ${context.envelopeSize}-attribute envelope ` +
-        `(Pub/Sub allows ${PUBSUB_LIMITS.maxAttributes} per message).`,
+        `(PubSub allows ${PUBSUB_LIMITS.maxAttributes} per message).`,
     ])
   }
 
@@ -364,14 +364,14 @@ export function validateUserAttributes(
     if (keyBytes > PUBSUB_LIMITS.maxAttributeKeyBytes) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
         `Attribute key "${name.slice(0, 32)}…" on route "${context.route}" is ${keyBytes} bytes; ` +
-          `Pub/Sub allows ${PUBSUB_LIMITS.maxAttributeKeyBytes}.`,
+          `PubSub allows ${PUBSUB_LIMITS.maxAttributeKeyBytes}.`,
       ])
     }
 
     const value = attributes[name]
     if (typeof value !== 'string') {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
-        `Attribute "${name}" on route "${context.route}" is ${typeof value}; Pub/Sub attributes are strings. ` +
+        `Attribute "${name}" on route "${context.route}" is ${typeof value}; PubSub attributes are strings. ` +
           'Format the value in `map` — filters compare strings, not numbers.',
       ])
     }
@@ -380,7 +380,7 @@ export function validateUserAttributes(
     if (valueBytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
         `Attribute "${name}" on route "${context.route}" carries a ${valueBytes}-byte value; ` +
-          `Pub/Sub allows ${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
+          `PubSub allows ${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
       ])
     }
   }
@@ -421,7 +421,7 @@ function serializedMessageBytes(message: {
 }
 
 /**
- * Bound both Pub/Sub size limits before commit: the data field and the complete single-message
+ * Bound both PubSub size limits before commit: the data field and the complete single-message
  * PublishRequest, including the wire envelope and protobuf framing. The Node client keeps
  * multi-message batches below the service request limit separately.
  */
@@ -433,7 +433,7 @@ export function assertPublishRequestSize(
   if (operation.payload.byteLength > PUBSUB_LIMITS.maxMessageBytes) {
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.MESSAGE_TOO_LARGE, [
       `Route "${context.route}" produced a ${operation.payload.byteLength}-byte payload for topic ` +
-        `"${operation.topic}"; Pub/Sub allows ${PUBSUB_LIMITS.maxMessageBytes} bytes in the data field.`,
+        `"${operation.topic}"; PubSub allows ${PUBSUB_LIMITS.maxMessageBytes} bytes in the data field.`,
       'Split the row, or compress it with a custom `encode`.',
     ])
   }
@@ -447,7 +447,7 @@ export function assertPublishRequestSize(
 
   throw new PubsubTargetError(PUBSUB_ERROR_CODES.MESSAGE_TOO_LARGE, [
     `Route "${context.route}" could produce a ${requestBytes}-byte single-message publish request for topic ` +
-      `"${operation.topic}"; Pub/Sub allows ${PUBSUB_LIMITS.maxPublishRequestBytes} bytes in the complete request.`,
+      `"${operation.topic}"; PubSub allows ${PUBSUB_LIMITS.maxPublishRequestBytes} bytes in the complete request.`,
     'Split the row, shorten its attributes, or compress it with a custom `encode`.',
   ])
 }

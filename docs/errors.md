@@ -37,7 +37,7 @@ are stable. Codes are grouped by where they originate:
 | `E21xx` | Postgres (Drizzle) target   |
 | `E22xx` | BigQuery target             |
 | `E23xx` | Parquet target              |
-| `E24xx` | Google Pub/Sub target       |
+| `E24xx` | Google PubSub target       |
 
 ---
 
@@ -526,9 +526,9 @@ the footer) to the temp path it was given before resolving `finish()`. The built
 
 ---
 
-## Google Pub/Sub target
+## Google PubSub target
 
-Pub/Sub is append-only: a published message cannot be read back, updated, or deleted. Most of the
+PubSub is append-only: a published message cannot be read back, updated, or deleted. Most of the
 codes below fire *before* anything is published, because after that there is nothing to take back.
 
 ### E2401 · Topic does not exist
@@ -549,16 +549,16 @@ business names like `id` and `op`.
 
 ### E2403 · Attribute budget exceeded
 
-The message exceeds Pub/Sub's per-message attribute limits: 100 attributes (96 for the user, or 95
+The message exceeds PubSub's per-message attribute limits: 100 attributes (96 for the user, or 95
 with `publish.uidAttribute`), 256 bytes per key, 1024 bytes per value. Non-string values are
-refused here too — Pub/Sub attributes are strings, and filters compare them as strings.
+refused here too — PubSub attributes are strings, and filters compare them as strings.
 
 **Fix** — publish the value in the payload instead, or shorten it. Filter attributes should stay
 short and low-cardinality.
 
 ### E2404 · Message too large
 
-The encoded data exceeds Pub/Sub's 10 MB message limit, or the data plus attributes, ordering
+The encoded data exceeds PubSub's 10 MB message limit, or the data plus attributes, ordering
 key, topic resource name, and protobuf framing exceeds the 10 MB publish-request limit.
 
 **Fix** — split the row, shorten its attributes, or compress it with a route-level `encode`.
@@ -624,7 +624,7 @@ The state file was written by a different schema version of the target.
 ### E2412 · Ordering key under the `lww` profile
 
 A route set a per-draft `orderingKey`, but the pipe runs the default `lww` profile, which uses no
-Pub/Sub ordering keys at all.
+PubSub ordering keys at all.
 
 **Fix** — switch to `publish.delivery: 'ordered'` to partition a topic, or drop the key.
 
@@ -707,7 +707,7 @@ file, re-bootstrapped consumers.
 
 ### E2421 · State wire configuration changed
 
-The `namespace` or `publish.uidAttribute` setting changed while reusing Pub/Sub state. Those
+The `namespace` or `publish.uidAttribute` setting changed while reusing PubSub state. Those
 settings determine the published identity envelope. Continuing could rebuild an unconfirmed
 outbox row with different attributes during crash recovery.
 

@@ -1,13 +1,13 @@
 import { PipeError, SdkErrorName } from '~/core/errors.js'
 
 /**
- * Common error wrapper for everything thrown by the Pub/Sub target.
+ * Common error wrapper for everything thrown by the PubSub target.
  *
  * All target-originated errors extend this class and carry an `E24xx` code so downstream
  * code can pattern-match on `instanceof PubsubTargetError` and react (alerting, retries,
  * etc.) without scraping `.message`. Code bands: E0xxx = source, E1xxx = fork handling,
  * E2xxx = targets (E20xx ClickHouse, E21xx Postgres, E22xx BigQuery, E23xx Parquet,
- * E24xx Pub/Sub).
+ * E24xx PubSub).
  */
 export class PubsubTargetError extends PipeError {
   constructor(code: string, message: string | string[]) {
@@ -15,15 +15,15 @@ export class PubsubTargetError extends PipeError {
   }
 }
 
-// E24xx — Pub/Sub target codes
+// E24xx — PubSub target codes
 export const PUBSUB_ERROR_CODES = {
   /** A configured route names a topic that does not exist (`topicSetup: 'validate'`). */
   TOPIC_NOT_FOUND: 'E2401',
   /** A user attribute uses a reserved name (`_`-prefixed envelope space, or `goog…`). */
   RESERVED_ATTRIBUTE: 'E2402',
-  /** The message exceeds Pub/Sub's per-message attribute count / key / value budget. */
+  /** The message exceeds PubSub's per-message attribute count / key / value budget. */
   ATTRIBUTE_BUDGET: 'E2403',
-  /** The encoded data or complete publish request exceeds Pub/Sub's 10 MB limit. */
+  /** The encoded data or complete publish request exceeds PubSub's 10 MB limit. */
   MESSAGE_TOO_LARGE: 'E2404',
   /** The canonical codec met a value it cannot represent (5.4's reject rows). */
   CODEC_UNSUPPORTED_VALUE: 'E2405',
