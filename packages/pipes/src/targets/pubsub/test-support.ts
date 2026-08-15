@@ -6,8 +6,7 @@ import type { BatchContext, BlockCursor } from '~/core/index.js'
 import { evmQuery } from '~/evm/evm-query-builder.js'
 import { mockMetricsServer, testLogger } from '~/testing/index.js'
 
-import type { DrainResult, Publisher } from './publisher.js'
-import type { OutboxRow } from './pubsub-state.js'
+import type { DrainResult, PublishMessage, Publisher } from './publisher.js'
 
 /**
  * Shared scaffolding for the PubSub target suites: a publisher that records what would go on
@@ -28,14 +27,14 @@ export class FakePublisher implements Publisher {
   readonly published: PublishedMessage[] = []
   readonly setupCalls: string[][] = []
   /** Return an error to fail that publish; the row (and everything behind it) stays queued. */
-  failOn?: (row: OutboxRow, index: number) => Error | undefined
+  failOn?: (row: PublishMessage, index: number) => Error | undefined
   closed = false
 
   async setup(topics: string[]): Promise<void> {
     this.setupCalls.push(topics)
   }
 
-  async drain(rows: (OutboxRow & { attributes: Record<string, string> })[]): Promise<DrainResult> {
+  async drain(rows: PublishMessage[]): Promise<DrainResult> {
     const confirmed: number[] = []
     let bytes = 0
 
@@ -65,12 +64,16 @@ export class FakePublisher implements Publisher {
   operations(topic?: string): { op: string; id?: string; payload: string; seq: number }[] {
     return this.published
       .filter((message) => !topic || message.topic === topic)
-      .map((message) => ({
-        op: message.attributes['_op'],
-        id: message.attributes['_id'],
-        payload: message.payload,
-        seq: Number(message.attributes['_seq']),
-      }))
+      .map((message) => {
+        const payload = JSON.parse(message.payload)
+
+        return {
+          op: payload._CHANGE_TYPE === 'UPSERT' ? 'upsert' : 'delete',
+          id: payload._id,
+          payload: message.payload,
+          seq: Number.parseInt(payload._CHANGE_SEQUENCE_NUMBER, 16),
+        }
+      })
   }
 }
 

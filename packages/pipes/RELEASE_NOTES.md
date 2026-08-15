@@ -336,6 +336,30 @@ Consequences for custom targets and caches:
 - Reorg-safety comes from the dataset's own finality. For a dataset that never finalizes anything,
   files are not reorg-safe.
 
+### 15. Google Pub/Sub now publishes BigQuery CDC rows
+
+The Pub/Sub target replaces its custom `_op` / `_id` / `_seq` / `_v` attribute envelope with a
+BigQuery CDC JSON body containing `_id`, `_CHANGE_TYPE`, and `_CHANGE_SEQUENCE_NUMBER`. Delete
+messages retain the row columns so business and composite primary keys reach BigQuery. Pub/Sub
+attributes are now limited to user attributes plus the optional `_uid`.
+
+This is an API and state compatibility break:
+
+- `publish.delivery` is replaced by `publish.messageOrdering`; `heartbeat` is removed.
+- `MessageDraft.data` and `RollbackInverse.data` accept plain objects only.
+- `TopicRoute.encode` receives the complete `BigQueryCdcMessage`.
+- `WIRE_VERSION`, `ENVELOPE_ATTRIBUTES`, and `DeliveryProfile` are no longer exported; E2420 is
+  retired.
+- A `Date` encodes as an RFC 3339 string rather than unix seconds, so it lands in a `TIMESTAMP`
+  column instead of 1970. A BigQuery subscription reads a JSON number in a `TIMESTAMP` column as
+  microseconds since the epoch.
+- State schema v2 has no in-place migration. Drain the old outbox, then use fresh state, a fresh
+  namespace, and a re-bootstrapped destination. See `MIGRATION.md` for the full procedure.
+
+`docs/pubsub-bigquery.md` is the setup guide for the receiving end: the destination column type each
+encoded value requires, the table DDL, the subscription flags, the IAM grants for a subscription
+that lives in a different project than the topic, and the limits that come with the design.
+
 ---
 
 ## New features

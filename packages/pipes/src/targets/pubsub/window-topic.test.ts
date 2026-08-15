@@ -9,6 +9,8 @@ import { WindowRow, windowTopic } from './window-topic.js'
 
 type Candles = { candles: WindowRow<{ volume: number }>[] }
 
+const body = (message: FakePublisher['published'][number]) => JSON.parse(message.payload)
+
 afterEach(() => {
   cleanupTempState()
 })
@@ -72,13 +74,12 @@ describe('windowTopic', () => {
       }),
     })
 
-    expect(publisher.published.map((m) => m.attributes['_id'])).toEqual([
+    expect(publisher.published.map((message) => body(message)._id)).toEqual([
       'uniswap:candles:0xpool:1700000000',
       'uniswap:candles:0xpool:1700000000',
     ])
-    // Same row, two versions: last write wins by `_seq`, no consumer-side revision arithmetic.
-    expect(publisher.published.map((m) => m.attributes['_seq'])).toEqual(['1', '2'])
-    expect(publisher.published.map((m) => m.attributes['_op'])).toEqual(['upsert', 'upsert'])
+    expect(publisher.published.map((message) => body(message)._CHANGE_SEQUENCE_NUMBER)).toEqual(['1', '2'])
+    expect(publisher.published.map((message) => body(message)._CHANGE_TYPE)).toEqual(['UPSERT', 'UPSERT'])
   })
 
   it('carries the timeframe as a filter attribute alongside the route’s own', async () => {
@@ -99,8 +100,13 @@ describe('windowTopic', () => {
       route: windowTopic<{ volume: number }>({ topic: 'candles-5m' }),
     })
 
-    expect(publisher.published.map((m) => m.attributes['_op'])).toEqual(['upsert', 'delete'])
-    expect(publisher.published[1].payload).toBe('')
+    expect(publisher.published.map((message) => body(message)._CHANGE_TYPE)).toEqual(['UPSERT', 'DELETE'])
+    expect(body(publisher.published[1])).toMatchObject({
+      group: '0xpool',
+      timeframe: '5m',
+      windowStart: 1_700_000_000,
+      values: { volume: 12 },
+    })
   })
 
   it('publishes the neutral value instead when the route is declared delete-free', async () => {
@@ -113,7 +119,7 @@ describe('windowTopic', () => {
       }),
     })
 
-    expect(publisher.published.map((m) => m.attributes['_op'])).toEqual(['upsert', 'upsert'])
+    expect(publisher.published.map((message) => body(message)._CHANGE_TYPE)).toEqual(['UPSERT', 'UPSERT'])
     expect(JSON.parse(publisher.published[1].payload)).toMatchObject({ empty: true, values: { volume: 0 } })
   })
 

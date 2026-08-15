@@ -1,9 +1,11 @@
 export { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 export {
-  ENVELOPE_ATTRIBUTES,
+  type BigQueryCdcMessage,
+  CDC_FIELDS,
+  type CdcEncoder,
+  PROTOCOL_ATTRIBUTES,
   PUBSUB_LIMITS,
   type PubsubOp,
-  WIRE_VERSION,
   canonicalJson,
 } from './protocol.js'
 export {
@@ -15,11 +17,11 @@ export {
 } from './publisher.js'
 export {
   type CommitInput,
-  type DeliveryProfile,
   type OutboxRow,
   type PendingOperation,
   type PubsubState,
   type RouteMode,
+  type RowIdSource,
   SqlitePubsubState,
 } from './pubsub-state.js'
 export {

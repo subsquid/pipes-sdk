@@ -143,34 +143,40 @@ remains. Orphan guard: tracked data without sync rows → coded refusal *(probed
 table-wide rather than per key, so a first run into a table a co-resident pipe populates
 is refused — GAP-20)*.
 
-**IB-28 — Google Pub/Sub binding (class C).** Combined local state, one SQLite file per
-pipe (`synchronous = FULL`, exclusive locking mode as the single-writer lock): `meta(key,
-value)` (schema version, cursor key, go-live block, producer sequence under the
-version-apply profile, wire configuration, heartbeat cadence), `cursor(id, latest, finalized, updated_at)`,
-`outbox(row_id AUTOINCREMENT, topic, op, id, ordering_key, seq, attributes, payload,
-block_number)`, `partition_seq(topic, ordering_key, next_seq)`, `ledger_blocks(number,
-hash, timestamp)` — the rollback chain for ancestor resolution — `manifest(topic,
-ordering_key, seq, block_number, mode, op, id, attributes, payload)`,
-`materialized_baseline(topic, ordering_key, id, …)`, `rollback_inverse(topic,
-ordering_key, id, op, payload)`. Wire envelope: four message attributes — `_op`
-(`upsert` | `delete` | `heartbeat`), `_id`, `_seq`, `_v` — plus an optional `_uid`
-(canonical JSON tuple `[namespace, topic, orderingKey, seq]`, with `seq` a decimal string) for
-pipelines demanding a globally unique record id;
-the leading underscore is the protocol's namespace and `goog…` is GCP's, everything else
-is the author's. Payloads are opaque bytes; object payloads use a normative canonical
-JSON encoding (bigint → decimal string, byte views → lowercase `0x` hex, `Date` → unix
-seconds, keys sorted by UTF-16 code unit, unrepresentable values refused — RP-24).
-Two delivery profiles: **version-apply** (default — no Pub/Sub ordering keys, one
-producer-wide sequence acting as a per-row version, uncapped throughput, several
-producers per topic with disjoint id namespaces) and **ordered** (one ordering key per
-topic or per shard, dense per-partition sequence, consumer `+1` cursor with gap
-detection, 1 MB/s per partition, exactly one producer per partition; requires the
-subscription to enable message ordering and the topic to publish from a single region).
-Route modes: `event` (write-once ids) and `materialized` (revisable ids, with immutable
-topic, ordering key and attributes across revisions). Go-live block (`publishFrom`,
-default: the head at first start, then persisted) gates publishing and recording, so a
-pipe may read deeper history than it publishes. Topic administration is validate-only by
-default. Codes E24xx.
+**IB-28 — Google Pub/Sub binding (class C).** Combined local state schema v2, one SQLite
+file per pipe (`synchronous = FULL`, exclusive locking mode as the single-writer lock):
+`meta(key, value)` (schema version, cursor key, go-live block, producer-wide sequence,
+wire configuration, and materialized-route id sources), `cursor(id, latest, finalized,
+updated_at)`, `outbox(row_id AUTOINCREMENT, route, topic, op, id, ordering_key, seq,
+attributes, payload, block_number)`, `ledger_blocks(number, hash, timestamp)` — the
+rollback chain for ancestor resolution — `manifest(route, topic, ordering_key, seq,
+block_number, mode, op, id, attributes, payload)`, `materialized_baseline(route, topic,
+ordering_key, id, op, attributes, payload, block_number)`, `materialized_identity(id,
+route, topic, ordering_key, attributes)`, and `rollback_inverse(route, topic,
+ordering_key, id, op, payload)`. Schema v1 is refused rather than migrated in place.
+
+Each payload is a plain-object BigQuery CDC row containing the author's columns plus
+target-owned `_id`, `_CHANGE_TYPE` (`UPSERT` | `DELETE`), and
+`_CHANGE_SEQUENCE_NUMBER` (the producer-wide integer sequence in uppercase hexadecimal,
+because BigQuery compares matching primary-key changes as unsigned hexadecimal values; see
+[BigQuery CDC custom ordering](https://cloud.google.com/bigquery/docs/change-data-capture#manage_custom_ordering)).
+`_id` resolves in order from `data._id`, `MessageDraft.id`, the route's `deriveId`, or the
+block-derived fallback. `DELETE` retains the supplied row columns so every destination
+primary-key column is present. The default encoder is normative canonical JSON (bigint →
+decimal string, byte views → lowercase `0x` hex, `Date` → RFC 3339, keys sorted by
+UTF-16 code unit, unrepresentable values refused — RP-24); a route may encode the complete
+CDC row itself; the destination column types the encoding implies are normative for a
+BigQuery subscription and are tabulated in `docs/pubsub-bigquery.md`. User attributes remain
+attributes; the only protocol attribute is optional `_uid`, a canonical JSON tuple
+`[namespace, topic, orderingKey, seq]` with decimal `seq`.
+
+`publish.messageOrdering` is false by default. When enabled, the topic name is the default
+ordering key and a draft may override it; the subscription must also enable ordered
+delivery. Route modes are `event` (write-once ids) and `materialized` (revisable ids). A
+materialized route uses one id source, and each id keeps its route, topic, ordering key,
+and attributes across revisions. Go-live block (`publishFrom`, default: the head at first
+start, then persisted) gates publishing and recording, so a pipe may read deeper history
+than it publishes. Topic administration is validate-only by default. Codes E24xx.
 
 **IB-24 — Lock declarations.** Postgres: per-batch advisory transaction lock on the
 cursor key — dual instance fails coded. ClickHouse, BigQuery, Parquet: **no lock**
@@ -269,7 +275,7 @@ consumers MUST NOT read it as a block number.
 | E21xx | Postgres binding | E2101–E2106 (client, config, advisory lock, untracked table, missing PK, FK cycle) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
 | E23xx | Parquet binding | E2301–E2317 and E2320 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused). E2318–E2319 retired, unassigned |
-| E24xx | Pub/Sub binding | E2401–E2421 (topic/attribute/request guards E2401–E2404, checked pre-commit; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, and state identity/wire binding E2419–E2421; row-identity guards E2412–E2413, E2418; route configuration E2414–E2416) |
+| E24xx | Pub/Sub binding | E2401–E2424, with E2420 retired (topic/attribute/request guards E2401–E2404, checked pre-commit and again after recovery encoding; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, state identity/wire binding E2419/E2421, and sequence exhaustion E2424; row-identity guards E2412–E2413, E2418, E2422; route configuration E2414–E2416, E2423) |
 
 **IB-51 — Transport errors.** Non-coded, typed: HTTP error (with response), request
 timeout, body-stall timeout. Retryability: request timeouts and connection-class errors

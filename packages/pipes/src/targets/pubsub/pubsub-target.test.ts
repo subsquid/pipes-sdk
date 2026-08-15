@@ -5,6 +5,7 @@ import { MockPortal, mockMetricsServer, mockPortal, testLogger } from '~/testing
 
 import { PUBSUB_ERROR_CODES } from './errors.js'
 import { PUBSUB_LIMITS } from './protocol.js'
+import { SqlitePubsubState } from './pubsub-state.js'
 import { pubsubTarget } from './pubsub-target.js'
 import {
   FakePublisher,
@@ -17,6 +18,8 @@ import {
 import { windowTopic } from './window-topic.js'
 
 type Blocks = { blocks: { number: number; hash: string; timestamp: number }[] }
+
+const body = (message: FakePublisher['published'][number]) => JSON.parse(message.payload)
 
 let portal: MockPortal | undefined
 
@@ -114,7 +117,7 @@ async function runPipe({
 }
 
 describe('pubsubTarget', () => {
-  it('publishes one operation per draft, with the envelope and the user attributes', async () => {
+  it('publishes one CDC row per draft and keeps the filter attributes', async () => {
     const publisher = new FakePublisher()
 
     await runPipe({
@@ -128,16 +131,37 @@ describe('pubsubTarget', () => {
     expect(publisher.published[0]).toEqual({
       topic: 'blocks',
       orderingKey: '',
-      attributes: {
-        chain: 'mock',
-        _op: 'upsert',
-        _seq: '1',
-        _id: 'test-pipe:blocks:1:0x1:0',
-        _v: '1',
-      },
-      payload: '{"number":1}',
+      attributes: { chain: 'mock' },
+      payload:
+        '{"_CHANGE_SEQUENCE_NUMBER":"1","_CHANGE_TYPE":"UPSERT",' + '"_id":"test-pipe:blocks:1:0x1:0","number":1}',
     })
-    expect(publisher.published[1].attributes['_seq']).toBe('2')
+    expect(body(publisher.published[1])._CHANGE_SEQUENCE_NUMBER).toBe('2')
+  })
+
+  it('passes the complete CDC row to a route encoder', async () => {
+    const publisher = new FakePublisher()
+
+    await runPipe({
+      publisher,
+      statePath: tempStatePath(),
+      responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+      to: 1,
+      targetOptions: {
+        topics: {
+          blocks: {
+            ...blocksRoute(),
+            encode: (message) => JSON.stringify({ record: message }),
+          },
+        },
+      },
+    })
+
+    expect(body(publisher.published[0]).record).toMatchObject({
+      number: 1,
+      _id: 'test-pipe:blocks:1:0x1:0',
+      _CHANGE_TYPE: 'UPSERT',
+      _CHANGE_SEQUENCE_NUMBER: '1',
+    })
   })
 
   it('validates topics before accepting any data', async () => {
@@ -164,7 +188,7 @@ describe('pubsubTarget', () => {
       targetOptions: { namespace: 'eth-stables' },
     })
 
-    expect(publisher.published[0].attributes['_id']).toBe('eth-stables:blocks:1:0x1:0')
+    expect(body(publisher.published[0])._id).toBe('eth-stables:blocks:1:0x1:0')
   })
 
   it('uses an explicit draft id verbatim', async () => {
@@ -185,7 +209,7 @@ describe('pubsubTarget', () => {
       },
     })
 
-    expect(publisher.published[0].attributes['_id']).toBe('custom-1')
+    expect(body(publisher.published[0])._id).toBe('custom-1')
   })
 
   it('adds _uid only when the option asks for it', async () => {
@@ -223,7 +247,7 @@ describe('pubsubTarget', () => {
     ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.RESERVED_ATTRIBUTE })
   })
 
-  it('rejects a per-draft ordering key under the lww profile', async () => {
+  it('rejects a per-draft ordering key when message ordering is disabled', async () => {
     const publisher = new FakePublisher()
 
     await expect(
@@ -244,7 +268,7 @@ describe('pubsubTarget', () => {
     ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ORDERING_KEY_NOT_SUPPORTED })
   })
 
-  it('gives every topic a constant ordering key under the ordered profile', async () => {
+  it('gives every topic a constant key when message ordering is enabled', async () => {
     const publisher = new FakePublisher()
 
     await runPipe({
@@ -252,10 +276,10 @@ describe('pubsubTarget', () => {
       statePath: tempStatePath(),
       responses: [{ statusCode: 200, data: portalBlocks([1, 2]), head: { finalized: { number: 2, hash: '0x2' } } }],
       to: 2,
-      targetOptions: { publish: { delivery: 'ordered' } },
+      targetOptions: { publish: { messageOrdering: true } },
     })
 
-    expect(publisher.published.map((m) => [m.orderingKey, m.attributes['_seq']])).toEqual([
+    expect(publisher.published.map((m) => [m.orderingKey, body(m)._CHANGE_SEQUENCE_NUMBER])).toEqual([
       ['blocks', '1'],
       ['blocks', '2'],
     ])
@@ -299,9 +323,9 @@ describe('pubsubTarget', () => {
       }),
     )
 
-    expect(resumed.published.map((m) => m.attributes['_id'])).toEqual(['test-pipe:blocks:3:0x3:0'])
+    expect(resumed.published.map((message) => body(message)._id)).toEqual(['test-pipe:blocks:3:0x3:0'])
     // The sequence is the producer's, not the run's: it continues where the last run stopped.
-    expect(resumed.published[0].attributes['_seq']).toBe('3')
+    expect(body(resumed.published[0])._CHANGE_SEQUENCE_NUMBER).toBe('3')
   })
 
   describe('publishFrom', () => {
@@ -318,7 +342,7 @@ describe('pubsubTarget', () => {
         targetOptions: { publishFrom: 3 },
       })
 
-      expect(publisher.published.map((m) => m.payload)).toEqual(['{"number":3}', '{"number":4}'])
+      expect(publisher.published.map((message) => body(message).number)).toEqual([3, 4])
     })
 
     it('resolves "latest" once and keeps the same go-live block across restarts', async () => {
@@ -340,7 +364,7 @@ describe('pubsubTarget', () => {
       })
 
       // Go-live resolved to the head (2), so block 1 was below it.
-      expect(publisher.published.map((m) => m.payload)).toEqual(['{"number":2}'])
+      expect(publisher.published.map((message) => body(message).number)).toEqual([2])
       await portal?.close()
 
       const resumed = new FakePublisher()
@@ -367,81 +391,7 @@ describe('pubsubTarget', () => {
       )
 
       // A re-resolved 'latest' would have skipped block 3; the persisted go-live keeps it.
-      expect(resumed.published.map((m) => m.payload)).toEqual(['{"number":3}', '{"number":4}'])
-    })
-  })
-
-  describe('heartbeats', () => {
-    it('publishes one heartbeat per topic on a block-count cadence', async () => {
-      const publisher = new FakePublisher()
-
-      // Driven batch by batch: how the portal chunks a response is its business, and the
-      // cadence is defined on blocks, not on batches.
-      await driveBatches({
-        statePath: tempStatePath(),
-        publisher,
-        blocks: [1, 2, 3, 4],
-        finalized: 0,
-        targetOptions: { heartbeat: { everyBlocks: 2 } },
-      })
-
-      const heartbeats = publisher.published.filter((m) => m.attributes['_op'] === 'heartbeat')
-      expect(heartbeats).toHaveLength(2)
-      expect(heartbeats[0].attributes['_id']).toBeUndefined()
-      expect(JSON.parse(heartbeats[0].payload)).toEqual({ block: 2, namespace: 'test-pipe', opsSinceLast: 2 })
-      expect(JSON.parse(heartbeats[1].payload)).toEqual({ block: 4, namespace: 'test-pipe', opsSinceLast: 2 })
-    })
-
-    it('counts only its own topic’s operations', async () => {
-      const publisher = new FakePublisher()
-
-      const target = pubsubTarget<Blocks & { others: Blocks['blocks'] }>({
-        pubsub: {} as never,
-        publisher,
-        state: { path: tempStatePath() },
-        publishFrom: 0,
-        heartbeat: { everyBlocks: 2 },
-        topics: {
-          blocks: blocksRoute('blocks'),
-          // Three operations per batch against the other topic's one.
-          others: {
-            topic: 'others',
-            map: ({ data }) =>
-              data.flatMap((header) =>
-                [0, 1, 2].map((n) => ({ data: { n }, block: header, id: `${header.number}-${n}` })),
-              ),
-          },
-        },
-      })
-
-      async function* read() {
-        for (const number of [1, 2]) {
-          const header = { number, hash: `0x${number}`, timestamp: number }
-          yield {
-            data: { blocks: [header], others: [header] },
-            ctx: makeBatchContext({ current: header, finalized: { number: 0, hash: '0x0' } }),
-          }
-        }
-      }
-
-      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
-
-      const heartbeats = publisher.published.filter((m) => m.attributes['_op'] === 'heartbeat')
-      const counts = Object.fromEntries(heartbeats.map((m) => [m.topic, JSON.parse(m.payload).opsSinceLast]))
-      expect(counts).toEqual({ blocks: 2, others: 6 })
-    })
-
-    it('stays off by default', async () => {
-      const publisher = new FakePublisher()
-
-      await runPipe({
-        publisher,
-        statePath: tempStatePath(),
-        responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
-        to: 1,
-      })
-
-      expect(publisher.published.every((m) => m.attributes['_op'] === 'upsert')).toBe(true)
+      expect(resumed.published.map((message) => body(message).number)).toEqual([3, 4])
     })
   })
 
@@ -472,7 +422,7 @@ describe('pubsubTarget', () => {
         targetOptions: { assumeNoForks: true },
       })
 
-      expect(publisher.published.map((m) => m.attributes['_op'])).toEqual(['upsert'])
+      expect(publisher.operations().map((operation) => operation.op)).toEqual(['upsert'])
     })
 
     it('refuses to resolve a fork under assumeNoForks — the data has already left', async () => {
@@ -580,11 +530,56 @@ describe('pubsubTarget', () => {
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.DUPLICATE_DRAFT_ID })
     })
 
-    it('refuses an oversized id before it can reach the durable outbox', async () => {
+    it('uses data._id as the row identity', async () => {
       const publisher = new FakePublisher()
 
-      // PubSub rejects an oversized `_id` at publish time; committed first, the row would sit
-      // at the head of its partition and fail identically on every restart.
+      await runPipe({
+        publisher,
+        statePath: tempStatePath(),
+        responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
+        to: 1,
+        targetOptions: {
+          topics: {
+            blocks: {
+              topic: 'blocks',
+              map: ({ data }) =>
+                data.map((header) => ({ data: { ...header, _id: 'owned' }, block: header, id: 'fallback' })),
+            },
+          },
+        },
+      })
+
+      expect(body(publisher.published[0])._id).toBe('owned')
+    })
+
+    it('refuses a materialized route that switches id sources between revisions', async () => {
+      await expect(
+        driveBatches({
+          publisher: new FakePublisher(),
+          statePath: tempStatePath(),
+          blocks: [1, 2],
+          finalized: 0,
+          targetOptions: {
+            topics: {
+              blocks: {
+                topic: 'blocks',
+                mode: 'materialized',
+                map: ({ data }) =>
+                  data.map((header) => ({
+                    data: header.number === 1 ? { _id: 'row', number: header.number } : { number: header.number },
+                    block: header,
+                    id: 'row',
+                  })),
+              },
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED })
+    })
+
+    it('refuses a non-string data._id', async () => {
+      const publisher = new FakePublisher()
+
       await expect(
         runPipe({
           publisher,
@@ -595,12 +590,12 @@ describe('pubsubTarget', () => {
             topics: {
               blocks: {
                 topic: 'blocks',
-                map: ({ data }) => data.map((header) => ({ data: header, block: header, id: 'x'.repeat(1025) })),
+                map: ({ data }) => data.map((header) => ({ data: { ...header, _id: 42 }, block: header })),
               },
             },
           },
         }),
-      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET })
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.INVALID_CDC_ROW })
 
       expect(publisher.published).toHaveLength(0)
     })
@@ -613,7 +608,7 @@ describe('pubsubTarget', () => {
           responses: [{ statusCode: 200, data: portalBlocks([1]), head: { finalized: { number: 1, hash: '0x1' } } }],
           to: 1,
           targetOptions: {
-            publish: { delivery: 'ordered' },
+            publish: { messageOrdering: true },
             topics: {
               blocks: {
                 topic: 'blocks',
@@ -651,7 +646,7 @@ describe('pubsubTarget', () => {
                 topic: 'blocks',
                 mode: 'materialized',
                 map: ({ data }) => data.map((header) => ({ data: header, block: header, id: 'row' })),
-                rollbackWhenMissing: () => ({ op: 'upsert', data: 'x'.repeat(11 * 1024 * 1024) }),
+                rollbackWhenMissing: () => ({ op: 'upsert', data: { value: 'x'.repeat(11 * 1024 * 1024) } }),
               },
             },
           },
@@ -674,7 +669,7 @@ describe('pubsubTarget', () => {
                 topic: 'blocks',
                 map: ({ data }) =>
                   data.map((header) => ({
-                    data: new Uint8Array(PUBSUB_LIMITS.maxMessageBytes),
+                    data: { value: 'x'.repeat(PUBSUB_LIMITS.maxMessageBytes) },
                     block: header,
                     id: 'row',
                   })),
@@ -695,6 +690,26 @@ describe('pubsubTarget', () => {
   })
 
   describe('startup failures', () => {
+    it('requires an outbox route to remain configured during recovery', async () => {
+      const statePath = tempStatePath()
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+
+      await expect(driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 0 })).rejects.toThrow(
+        'network down',
+      )
+
+      await expect(
+        driveBatches({
+          statePath,
+          publisher: new FakePublisher(),
+          blocks: [],
+          finalized: 0,
+          targetOptions: { topics: {} },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED })
+    })
+
     it('releases the state lock when topic validation fails', async () => {
       const statePath = tempStatePath()
       const failing = new FakePublisher()
@@ -741,7 +756,7 @@ describe('pubsubTarget', () => {
       const retry = new FakePublisher()
       await driveBatches({ statePath, publisher: retry, blocks: [], finalized: 0 })
 
-      expect(retry.published.map((m) => m.payload)).toEqual(['{"number":2}'])
+      expect(retry.published.map((message) => body(message).number)).toEqual([2])
     })
   })
 
@@ -750,21 +765,127 @@ describe('pubsubTarget', () => {
       const statePath = tempStatePath()
 
       const failing = new FakePublisher()
-      const decode = (row: { payload: Uint8Array }) => new TextDecoder().decode(row.payload)
-      failing.failOn = (row) => (decode(row) === '{"number":2}' ? new Error('publish timed out') : undefined)
+      const decode = (row: { payload: Uint8Array }) => JSON.parse(new TextDecoder().decode(row.payload))
+      failing.failOn = (row) => (decode(row).number === 2 ? new Error('publish timed out') : undefined)
 
       await expect(driveBatches({ statePath, publisher: failing, blocks: [1, 2], finalized: 0 })).rejects.toThrow(
         'publish timed out',
       )
-      expect(failing.published.map((m) => m.payload)).toEqual(['{"number":1}'])
+      expect(failing.published.map((message) => body(message).number)).toEqual([1])
 
       const restarted = new FakePublisher()
       await driveBatches({ statePath, publisher: restarted, blocks: [], finalized: 0 })
 
       // The row that never confirmed comes back byte- and seq-identical, so a consumer drops it.
       expect(restarted.published).toHaveLength(1)
-      expect(restarted.published[0].payload).toBe('{"number":2}')
-      expect(restarted.published[0].attributes['_seq']).toBe('2')
+      expect(body(restarted.published[0])).toMatchObject({ number: 2, _CHANGE_SEQUENCE_NUMBER: '2' })
+    })
+
+    it('recovers an outbox row through its route custom encoder', async () => {
+      const statePath = tempStatePath()
+      const encode = (message: object) => JSON.stringify({ record: message })
+      const topics = { blocks: { ...blocksRoute(), encode } }
+
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+      await expect(
+        driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 0, targetOptions: { topics } }),
+      ).rejects.toThrow('network down')
+
+      const restarted = new FakePublisher()
+      await driveBatches({ statePath, publisher: restarted, blocks: [], finalized: 0, targetOptions: { topics } })
+
+      expect(body(restarted.published[0]).record).toMatchObject({
+        number: 1,
+        _CHANGE_TYPE: 'UPSERT',
+        _CHANGE_SEQUENCE_NUMBER: '1',
+      })
+    })
+
+    it.each([
+      ['adding', undefined, (message: object) => JSON.stringify({ record: message })],
+      ['removing', (message: object) => JSON.stringify({ record: message }), undefined],
+    ])('refuses %s a route encoder while that route has a pending outbox row', async (_name, first, second) => {
+      const statePath = tempStatePath()
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+
+      await expect(
+        driveBatches({
+          statePath,
+          publisher: failing,
+          blocks: [1],
+          finalized: 0,
+          targetOptions: { topics: { blocks: { ...blocksRoute(), encode: first } } },
+        }),
+      ).rejects.toThrow('network down')
+
+      await expect(
+        driveBatches({
+          statePath,
+          publisher: new FakePublisher(),
+          blocks: [],
+          finalized: 0,
+          targetOptions: { topics: { blocks: { ...blocksRoute(), encode: second } } },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH })
+    })
+
+    it('refuses ambiguous legacy encoder metadata while the outbox is pending', async () => {
+      const statePath = tempStatePath()
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+
+      await expect(driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 0 })).rejects.toThrow(
+        'network down',
+      )
+
+      const state = new SqlitePubsubState({ path: statePath })
+      await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
+      await state.setMeta('wire_config', JSON.stringify(['test-pipe', false, false]))
+      await state.close()
+
+      await expect(
+        driveBatches({ statePath, publisher: new FakePublisher(), blocks: [], finalized: 0 }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH })
+    })
+
+    it('rechecks a custom encoder output size during recovery', async () => {
+      const statePath = tempStatePath()
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+
+      await expect(
+        driveBatches({
+          statePath,
+          publisher: failing,
+          blocks: [1],
+          finalized: 0,
+          targetOptions: {
+            topics: { blocks: { ...blocksRoute(), encode: (message) => JSON.stringify({ record: message }) } },
+          },
+        }),
+      ).rejects.toThrow('network down')
+
+      const restarted = new FakePublisher()
+      await expect(
+        driveBatches({
+          statePath,
+          publisher: restarted,
+          blocks: [],
+          finalized: 0,
+          targetOptions: {
+            topics: {
+              blocks: {
+                ...blocksRoute(),
+                encode: () => 'x'.repeat(PUBSUB_LIMITS.maxMessageBytes + 1),
+              },
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.MESSAGE_TOO_LARGE })
+
+      expect(restarted.published).toHaveLength(0)
     })
 
     it('refuses a uidAttribute change before recovery can mutate the envelope', async () => {
@@ -817,7 +938,7 @@ describe('pubsubTarget', () => {
       const restarted = new FakePublisher()
       await driveBatches({ statePath, publisher: restarted, blocks: [], finalized: 0 })
 
-      expect(restarted.published.map((m) => m.payload)).toEqual(['{"number":1}'])
+      expect(restarted.published.map((message) => body(message).number)).toEqual([1])
     })
   })
 })

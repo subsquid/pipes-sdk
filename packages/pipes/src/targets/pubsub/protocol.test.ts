@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { buildEnvelope, canonicalJson, encodePayload, uidValue, validateUserAttributes } from './protocol.js'
+import {
+  buildAttributes,
+  buildCdcMessage,
+  canonicalCdcMessageBytes,
+  canonicalJson,
+  changeSequenceNumber,
+  encodeCdcMessage,
+  encodeRow,
+  readRowId,
+  uidValue,
+  validateUserAttributes,
+} from './protocol.js'
 
 function codeOf(fn: () => unknown): string {
   try {
@@ -32,7 +43,8 @@ describe('canonicalJson', () => {
     ['empty Uint8Array', new Uint8Array([]), '"0x"'],
     ['other ArrayBufferView', new Uint16Array([0x0102]), '"0x0201"'],
     ['ArrayBuffer', new Uint8Array([1, 255]).buffer, '"0x01ff"'],
-    ['Date truncates to unix seconds', new Date(1_700_000_000_999), '1700000000'],
+    ['Date is RFC 3339 and keeps milliseconds', new Date(1_700_000_000_999), '"2023-11-14T22:13:20.999Z"'],
+    ['Date before the epoch', new Date(-1), '"1969-12-31T23:59:59.999Z"'],
     ['array preserves order', [3, 1, 2], '[3,1,2]'],
     ['nested object sorts keys', { b: 1, a: { d: 2, c: 3 } }, '{"a":{"c":3,"d":2},"b":1}'],
     ['null-prototype object', Object.assign(Object.create(null), { z: 1, a: 2 }), '{"a":2,"z":1}'],
@@ -98,7 +110,7 @@ describe('canonicalJson', () => {
     }
 
     expect(canonicalJson(row)).toBe(
-      '{"block":{"hash":"0xab34","number":31842007,"timestamp":1700000000},' +
+      '{"block":{"hash":"0xab34","number":31842007,"timestamp":"2023-11-14T22:13:20.000Z"},' +
         '"from":"0x0000000000000000000000000000000000000001",' +
         '"raw":"0x000f",' +
         '"to":"0x0000000000000000000000000000000000000002",' +
@@ -107,22 +119,87 @@ describe('canonicalJson', () => {
   })
 })
 
-describe('encodePayload', () => {
-  it('passes strings and bytes through untouched', () => {
-    expect(encodePayload('raw')).toEqual(new TextEncoder().encode('raw'))
-    expect(encodePayload(new Uint8Array([1, 2]))).toEqual(new Uint8Array([1, 2]))
+describe('BigQuery CDC encoding', () => {
+  it('stores a plain row in canonical form', () => {
+    expect(encodeRow({ b: 1, a: 2n })).toEqual(new TextEncoder().encode('{"a":"2","b":1}'))
   })
 
-  it('routes objects through the canonical codec by default', () => {
-    expect(encodePayload({ b: 1, a: 2n })).toEqual(new TextEncoder().encode('{"a":"2","b":1}'))
+  it('stores a user-supplied id separately from the row payload', () => {
+    expect(encodeRow({ _id: 'row-1', value: 2 })).toEqual(new TextEncoder().encode('{"value":2}'))
   })
 
-  it('lets a route override the wire format', () => {
-    expect(encodePayload({ a: 1 }, () => new Uint8Array([7]))).toEqual(new Uint8Array([7]))
+  it('rejects invalid ids, non-object rows, and target-owned CDC fields', () => {
+    expect(codeOf(() => encodeRow({ _id: 42 }))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => encodeRow({ _id: '' }))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => encodeRow(null))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => encodeRow(undefined))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => readRowId(null))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => readRowId(undefined))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => encodeRow([]))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+    expect(codeOf(() => encodeRow({ _CHANGE_TYPE: 'UPSERT' }))).toBe(PUBSUB_ERROR_CODES.INVALID_CDC_ROW)
+  })
+
+  it('flattens the row and adds the BigQuery CDC fields', () => {
+    expect(buildCdcMessage({ op: 'upsert', id: 'row-1', seq: 43981, payload: encodeRow({ value: 2n }) })).toEqual({
+      value: '2',
+      _id: 'row-1',
+      _CHANGE_TYPE: 'UPSERT',
+      _CHANGE_SEQUENCE_NUMBER: 'ABCD',
+    })
+  })
+
+  it('publishes a delete with the row columns needed to identify composite primary keys', () => {
+    expect(
+      buildCdcMessage({
+        op: 'delete',
+        id: 'row-1',
+        seq: 2,
+        payload: encodeRow({ account: '0x01', asset: 'USDC' }),
+      }),
+    ).toEqual({
+      account: '0x01',
+      asset: 'USDC',
+      _id: 'row-1',
+      _CHANGE_TYPE: 'DELETE',
+      _CHANGE_SEQUENCE_NUMBER: '2',
+    })
+  })
+
+  it('passes the complete CDC message to a custom encoder', () => {
+    let received: object | undefined
+    const encoded = encodeCdcMessage(
+      { op: 'upsert', id: 'row-1', seq: 1, payload: encodeRow({ value: 2 }) },
+      (message) => {
+        received = message
+        return new Uint8Array([7])
+      },
+    )
+
+    expect(encoded).toEqual(new Uint8Array([7]))
+    expect(received).toMatchObject({ value: 2, _id: 'row-1', _CHANGE_TYPE: 'UPSERT' })
+  })
+
+  it('formats the sequence as uppercase hexadecimal', () => {
+    expect(changeSequenceNumber(43981)).toBe('ABCD')
+  })
+
+  it('uses a dedicated error for sequence exhaustion and names the route', () => {
+    expect(
+      codeOf(() => changeSequenceNumber('9007199254740992', { route: 'transfers', topic: 'evm.base.transfers' })),
+    ).toBe(PUBSUB_ERROR_CODES.SEQUENCE_EXHAUSTED)
+    expect(() => changeSequenceNumber('9007199254740992', { route: 'transfers', topic: 'evm.base.transfers' })).toThrow(
+      'route "transfers" (topic "evm.base.transfers")',
+    )
+  })
+
+  it('computes the canonical wire size without decoding the stored row', () => {
+    const operation = { op: 'delete' as const, id: 'строка-1', seq: 2, payload: encodeRow({ key: 'значение' }) }
+
+    expect(canonicalCdcMessageBytes(operation)).toBe(encodeCdcMessage(operation).byteLength)
   })
 })
 
-describe('buildEnvelope', () => {
+describe('buildAttributes', () => {
   const operation = {
     topic: 'evm.base.transfers',
     op: 'upsert' as const,
@@ -133,25 +210,12 @@ describe('buildEnvelope', () => {
     payload: new Uint8Array(),
   }
 
-  it('carries four attributes plus the user’s', () => {
-    expect(buildEnvelope(operation, { namespace: 'pipe' })).toEqual({
-      token: '0x42',
-      _op: 'upsert',
-      _seq: '1041',
-      _id: 'pipe:transfers:1:0xab:0',
-      _v: '1',
-    })
-  })
-
-  it('omits _id on a heartbeat — a heartbeat is not a row', () => {
-    const attributes = buildEnvelope({ ...operation, op: 'heartbeat', id: undefined }, { namespace: 'pipe' })
-
-    expect(attributes['_id']).toBeUndefined()
-    expect(attributes['_op']).toBe('heartbeat')
+  it('keeps only business filter attributes by default', () => {
+    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ token: '0x42' })
   })
 
   it('fully qualifies _uid when it is enabled', () => {
-    const attributes = buildEnvelope(
+    const attributes = buildAttributes(
       { ...operation, orderingKey: 'shard-1' },
       { namespace: 'pipe', uidAttribute: true },
     )
@@ -168,14 +232,14 @@ describe('buildEnvelope', () => {
 })
 
 describe('validateUserAttributes', () => {
-  const context = { topic: 'evm.base.transfers', route: 'transfers', envelopeSize: 4 }
+  const context = { topic: 'evm.base.transfers', route: 'transfers', protocolAttributes: 1 }
 
   it('accepts unprefixed business names, including id and op', () => {
     expect(() => validateUserAttributes({ id: 'x', op: 'y', token: 'z' }, context)).not.toThrow()
   })
 
   it('rejects the reserved underscore namespace', () => {
-    expect(codeOf(() => validateUserAttributes({ _seq: '1' }, context))).toBe(PUBSUB_ERROR_CODES.RESERVED_ATTRIBUTE)
+    expect(codeOf(() => validateUserAttributes({ _uid: '1' }, context))).toBe(PUBSUB_ERROR_CODES.RESERVED_ATTRIBUTE)
   })
 
   it('rejects GCP-reserved names', () => {
@@ -184,11 +248,11 @@ describe('validateUserAttributes', () => {
     )
   })
 
-  it('rejects more user attributes than fit beside the envelope', () => {
-    const many = Object.fromEntries(Array.from({ length: 97 }, (_, i) => [`a${i}`, '1']))
+  it('rejects more user attributes than fit beside protocol attributes', () => {
+    const many = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`a${i}`, '1']))
 
     expect(codeOf(() => validateUserAttributes(many, context))).toBe(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET)
-    expect(() => validateUserAttributes(many, { ...context, envelopeSize: 3 })).not.toThrow()
+    expect(() => validateUserAttributes(many, { ...context, protocolAttributes: 0 })).not.toThrow()
   })
 
   it('rejects oversized keys and values', () => {

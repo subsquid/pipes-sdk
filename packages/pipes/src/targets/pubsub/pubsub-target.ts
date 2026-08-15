@@ -15,11 +15,16 @@ import {
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 import {
+  CdcEncoder,
+  MAX_SEQUENCE_VALUE,
   PubsubOp,
   assertPublishRequestSize,
   assertWireLimits,
-  buildEnvelope,
-  encodePayload,
+  buildAttributes,
+  canonicalCdcMessageBytes,
+  encodeCdcMessage,
+  encodeRow,
+  readRowId,
   validateUserAttributes,
 } from './protocol.js'
 import {
@@ -30,14 +35,15 @@ import {
   partitionRows,
   resolvePubsubClient,
 } from './publisher.js'
-import { DeliveryProfile, PendingOperation, PubsubState, RouteMode, SqlitePubsubState } from './pubsub-state.js'
+import { OutboxRow, PendingOperation, PubsubState, RouteMode, RowIdSource, SqlitePubsubState } from './pubsub-state.js'
 
 export type MessageDraft = {
   /**
-   * `Uint8Array | string` are sent as-is; plain objects are encoded with the canonical codec
-   * (RP-24) — decoded ABI values contain `bigint`, on which plain `JSON.stringify` throws.
+   * The table row. It must be a plain object. Set `_id` to a stable string to own the row
+   * identity; otherwise the target derives one. The target adds the remaining BigQuery CDC
+   * fields before publishing. The canonical codec supports values such as `bigint` and bytes.
    */
-  data: Uint8Array | string | object
+  data: object
   /** The block this operation belongs to — drives fork compensation. Required. */
   block: { number: number; hash?: string; timestamp?: number }
   /**
@@ -46,31 +52,33 @@ export type MessageDraft = {
    */
   op?: 'upsert' | 'delete'
   /**
-   * Stable row identity, published as the `_id` attribute; a `delete` or a materialized-row
-   * restore reuses it verbatim.
+   * Fallback stable row identity when `data._id` is nullish. A `delete` or a materialized-row
+   * restore reuses the resolved id verbatim. When both are set, `data._id` takes precedence.
    * Default: `${namespace}:${stream}:${block.number}:${block.hash}:<seq-in-block>`.
    */
   id?: string
   /**
    * User attributes for subscription filtering; copied onto the compensating operation. For a
    * materialized id these must be stable across every revision. Names starting with `_` are
-   * reserved for the envelope, `goog…` by GCP.
+   * reserved by the target, `goog…` by GCP.
    */
   attributes?: Record<string, string>
   /**
-   * Ordered profile only (rejected at init under `lww`). Overrides the topic's constant
+   * Available only when `publish.messageOrdering` is enabled. Overrides the topic's default
    * ordering key. A materialized id must never move between keys.
    */
   orderingKey?: string
 }
 
-export type RollbackInverse = { op: 'delete' } | { op: 'upsert'; data: Uint8Array | string | object }
+export type RollbackInverse = { op: 'delete' } | { op: 'upsert'; data: object }
 
 export type TopicRoute<Data> = {
   topic: string
   /**
    * `event` (default): every id is write-once on a chain branch; a fork orphans it outright.
-   * `materialized`: ids may be updated; a fork restores the surviving revision.
+   * `materialized`: ids may be updated; a fork restores the surviving revision. Every draft in
+   * one materialized route must use the same id source (`data._id`, `MessageDraft.id`,
+   * `deriveId`, or the generated fallback).
    */
   mode?: RouteMode
   /**
@@ -79,10 +87,14 @@ export type TopicRoute<Data> = {
    * recognizable.
    */
   map: (batch: { data: Data; ctx: BatchContext }) => MessageDraft[]
-  /** Payload encoder for object drafts. Defaults to the canonical codec (RP-24). Must be pure. */
-  encode?: (data: object) => Uint8Array | string
   /**
-   * Identity for drafts that leave `id` unset, when the block-derived default does not fit.
+   * Encoder for the complete CDC row. Defaults to canonical JSON. Must be pure and remain
+   * unchanged while this route has pending operations in the state.
+   */
+  encode?: CdcEncoder
+  /**
+   * Identity for drafts that leave both `data._id` and `id` unset, when the block-derived default
+   * does not fit.
    * A materialized row lives longer than the block that last touched it, so its id has to come
    * from the row itself — that is what `windowTopic` uses. Must be pure and stable across
    * revisions.
@@ -115,11 +127,11 @@ export type PubsubTargetOptions<T> = {
   settings?: { id?: string }
   publish?: {
     /**
-     * `lww` (default) — no ordering keys, no throughput cap; consumers apply per-id by `_seq`
-     * version. `ordered` — one ordering key per topic, dense seq, strict cursor contract with
-     * gap detection; caps each partition at 1 MB/s. See IB-28.
+     * Enable PubSub ordered publishing. Each topic uses its own name as the default ordering key;
+     * a route may override it per draft. The subscription must also have message ordering enabled
+     * to deliver messages in order. Disabled by default.
      */
-    delivery?: DeliveryProfile
+    messageOrdering?: boolean
     /**
      * Publish a `_uid` attribute — a globally unique record id for pipelines that demand one
      * (e.g. Dataflow's `idAttribute`). Costs one attribute per message.
@@ -140,12 +152,6 @@ export type PubsubTargetOptions<T> = {
    * resolved to the head at first start and persisted, so restarts keep the same go-live block.
    */
   publishFrom?: number | 'latest'
-  /**
-   * Publish one `heartbeat` operation per topic every N blocks. A liveness/freshness signal for
-   * monitoring — NOT a completeness proof: delivery is unordered and filtered subscriptions
-   * typically never receive heartbeats. Off by default.
-   */
-  heartbeat?: { everyBlocks: number }
   /**
    * Producer namespace, baked into every GENERATED id. Defaults to the pipe id. Pin it
    * explicitly to decouple feed identity from pipe naming — with the default, renaming the pipe
@@ -171,11 +177,14 @@ type ResolvedRoute = {
   stream: string
   topic: string
   mode: RouteMode
+  encoderKind: EncoderKind
   route: TopicRoute<any>
 }
 
+type EncoderKind = 'canonical' | 'custom'
+
 export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
-  const delivery: DeliveryProfile = options.publish?.delivery ?? 'lww'
+  const messageOrdering = options.publish?.messageOrdering ?? false
   const topicSetup: TopicSetup = options.topicSetup ?? 'validate'
 
   const routes: ResolvedRoute[] = Object.entries(options.topics ?? {})
@@ -184,12 +193,13 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
       stream,
       topic: route.topic,
       mode: route.mode ?? 'event',
+      encoderKind: route.encode ? 'custom' : 'canonical',
       route,
     }))
 
   const state: PubsubState =
     'path' in options.state
-      ? new SqlitePubsubState({ path: options.state.path, delivery, id: options.settings?.id })
+      ? new SqlitePubsubState({ path: options.state.path, id: options.settings?.id })
       : options.state
 
   let publisher: Publisher | undefined = options.publisher
@@ -208,7 +218,12 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
       // file, so a failure in topic validation or the recovery drain would otherwise leave it
       // locked for the life of the process and make the retry fail as a second producer.
       try {
-        await bindWireConfig(state, { namespace, uidAttribute })
+        await bindWireConfig(state, {
+          namespace,
+          uidAttribute,
+          messageOrdering,
+          encoders: routes.map(({ stream, encoderKind }) => [stream, encoderKind]),
+        })
         await run()
       } finally {
         await state.close()
@@ -219,7 +234,7 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
         if (!publisher) {
           const client = await resolvePubsubClient(options.pubsub)
           const publisherOptions: PublisherOptions = {
-            delivery,
+            messageOrdering,
             topicSetup,
             batching: options.publish?.batching,
             flowControl: options.publish?.flowControl,
@@ -231,19 +246,20 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
 
         logger.info({
           message:
-            `publishing ${routes.length} route(s) to PubSub — profile "${delivery}", namespace "${namespace}", ` +
+            `publishing ${routes.length} route(s) to PubSub — message ordering ${messageOrdering ? 'enabled' : 'disabled'}, ` +
+            `namespace "${namespace}", ` +
             `state "${'path' in options.state ? options.state.path : 'custom'}"`,
           topics: routes.map((r) => `${r.stream} → ${r.topic} (${r.mode})`),
         })
 
         if (coldStart) {
-          // A cold start on an already-live namespace means a lost sequencer: the producer will
-          // hand out `_seq`s consumers already hold, and nothing on the wire says so (GAP-38).
+          // A cold start on an already-live namespace means a lost sequencer: the producer can
+          // hand out change sequence numbers consumers already hold.
           logger.warn(
             `PubSub state at "${'path' in options.state ? options.state.path : 'custom'}" started EMPTY under ` +
               `namespace "${namespace}". On a first run this is expected. On an existing feed it means the ` +
-              `sequencer was lost — no consumer can detect that for itself. Recover with a fresh namespace and ` +
-              `a re-bootstrap, not with a restart.`,
+              `sequencer was reset, so destinations can ignore newer changes as stale. Recover with a fresh ` +
+              `namespace and a re-bootstrap, not with a restart.`,
           )
         }
 
@@ -259,10 +275,9 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
           publisher,
           routes,
           namespace,
-          delivery,
+          messageOrdering,
           logger,
           uidAttribute,
-          heartbeat: options.heartbeat,
           assumeNoForks: options.assumeNoForks ?? false,
           finalizedStream: finalizedStream ?? false,
           publishFrom: options.publishFrom ?? 'latest',
@@ -307,10 +322,9 @@ type WriteContextOptions = {
   publisher: Publisher
   routes: ResolvedRoute[]
   namespace: string
-  delivery: DeliveryProfile
+  messageOrdering: boolean
   logger: Logger
   uidAttribute: boolean
-  heartbeat?: { everyBlocks: number }
   assumeNoForks: boolean
   finalizedStream: boolean
   publishFrom: number | 'latest'
@@ -319,6 +333,7 @@ type WriteContextOptions = {
 
 class WriteContext {
   readonly #options: WriteContextOptions
+  readonly #routesByStream: Map<string, ResolvedRoute>
   #metrics?: PubsubMetrics
   #goLive?: number
   #batches = 0
@@ -327,6 +342,7 @@ class WriteContext {
 
   constructor(options: WriteContextOptions) {
     this.#options = options
+    this.#routesByStream = new Map(options.routes.map((route) => [route.stream, route]))
   }
 
   async write({ data, ctx }: { data: any; ctx: BatchContext }): Promise<void> {
@@ -343,14 +359,13 @@ class WriteContext {
       await this.#resolveGoLive(ctx)
       this.#warnSkippedStreams(data, logger)
 
-      const { operations, meta } = await span.measure('map', async () => this.#map(data, ctx))
+      const operations = await span.measure('map', async () => this.#map(data, ctx))
       const forkCapable = this.#rollbackable(ctx)
 
       await span.measure('state tx', () =>
         state.commit({
           operations,
           forkCapable,
-          meta,
           // Under `assumeNoForks` (or on the finalized stream) no fork can arrive, so the
           // ledger would only be write amplification.
           ledger: forkCapable ? ctx.stream.state.rollbackChain : [],
@@ -388,10 +403,7 @@ class WriteContext {
     const rows = await state.pending()
     if (!rows.length) return
 
-    const wire = rows.map((row) => ({
-      ...row,
-      attributes: buildEnvelope(row, { namespace, uidAttribute }),
-    }))
+    const wire = rows.map((row) => this.#wireMessage(row, { namespace, uidAttribute }))
 
     if (fork) {
       this.#metrics?.compensations.observe(rows.length)
@@ -412,9 +424,8 @@ class WriteContext {
       this.#metrics.publishDuration.observe(elapsed)
       this.#metrics.publishedBytes.inc(result.bytes)
 
-      // Per-partition throughput at or near PubSub's per-key cap: the ordered profile's
-      // headroom requirement is a deployment invariant (IB-28), so make its erosion visible.
-      if (this.#options.delivery === 'ordered' && elapsed > 0) {
+      // Per-key throughput at or near PubSub's ordering-key cap.
+      if (this.#options.messageOrdering && elapsed > 0) {
         for (const partition of partitionRows(wire)) {
           const bytes = partition.reduce((sum, row) => sum + row.payload.byteLength, 0)
           if (bytes / elapsed >= 0.8 * CAP_BYTES_PER_SECOND) {
@@ -494,11 +505,8 @@ class WriteContext {
     logger.warn(`no PubSub route configured for stream(s): ${skipped.join(', ')} — they are not published`)
   }
 
-  async #map(data: any, ctx: BatchContext): Promise<{ operations: PendingOperation[]; meta: Record<string, string> }> {
+  #map(data: any, ctx: BatchContext): PendingOperation[] {
     const operations: PendingOperation[] = []
-    // Per topic, not per batch: a heartbeat reports what its own topic published since the
-    // last one, so a busy topic cannot inflate a quiet one's count.
-    const opsByTopic = new Map<string, number>()
     const finalizedNumber = ctx.stream.head.finalized?.number
     const goLive = this.#goLive ?? 0
 
@@ -523,7 +531,7 @@ class WriteContext {
         const operation = this.#toOperation({ draft, resolved, index, finalizedNumber, ctx })
 
         // Only on event routes: a materialized id may legitimately be revised several times in
-        // one batch (a window preview followed by its close), and `_seq` orders those.
+        // one batch (a window preview followed by its close).
         const identity = JSON.stringify([operation.orderingKey, operation.id])
         if (resolved.mode === 'event') {
           if (seenIds.has(identity)) {
@@ -537,13 +545,10 @@ class WriteContext {
         }
 
         operations.push(operation)
-        opsByTopic.set(operation.topic, (opsByTopic.get(operation.topic) ?? 0) + 1)
       }
     }
 
-    const { heartbeats, meta } = await this.#heartbeats(ctx, opsByTopic)
-
-    return { operations: [...operations, ...heartbeats], meta }
+    return operations
   }
 
   #assertDraftBlock(draft: MessageDraft, resolved: ResolvedRoute): void {
@@ -568,31 +573,25 @@ class WriteContext {
     finalizedNumber?: number
     ctx: BatchContext
   }): PendingOperation {
-    const { namespace, delivery, uidAttribute } = this.#options
+    const { namespace, messageOrdering, uidAttribute } = this.#options
     const op: PubsubOp = draft.op ?? 'upsert'
 
-    if (draft.orderingKey !== undefined && delivery === 'lww') {
+    if (draft.orderingKey !== undefined && !messageOrdering) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ORDERING_KEY_NOT_SUPPORTED, [
-        `Route "${resolved.stream}" set an ordering key, but the pipe runs the "lww" profile, which uses ` +
-          'no PubSub ordering keys at all.',
-        'Switch to `publish.delivery: "ordered"` to partition a topic, or drop the key.',
+        `Route "${resolved.stream}" set an ordering key while PubSub message ordering is disabled.`,
+        'Set `publish.messageOrdering: true`, or drop the key.',
       ])
     }
 
-    // One constant key per topic under `ordered` — the whole topic is a single ordered
-    // partition unless the route shards it explicitly.
-    const orderingKey = delivery === 'ordered' ? (draft.orderingKey ?? resolved.topic) : ''
+    const orderingKey = messageOrdering ? (draft.orderingKey ?? resolved.topic) : ''
 
-    const id =
-      draft.id ??
-      resolved.route.deriveId?.(draft, { namespace, stream: resolved.stream, index }) ??
-      this.#deriveId({ draft, resolved, index, namespace })
+    const { id, idSource } = this.#resolveId({ draft, resolved, index, namespace })
     const attributes = draft.attributes ?? {}
 
     validateUserAttributes(attributes, {
       topic: resolved.topic,
       route: resolved.stream,
-      envelopeSize: 4 + (uidAttribute ? 1 : 0),
+      protocolAttributes: uidAttribute ? 1 : 0,
     })
 
     // Every limit the service enforces is checked HERE, before the operation becomes durable.
@@ -600,19 +599,13 @@ class WriteContext {
     // of its partition's outbox and fails identically on every restart.
     assertWireLimits(
       {
-        id,
         orderingKey,
         uidNamespace: uidAttribute ? namespace : undefined,
       },
       { topic: resolved.topic, route: resolved.stream },
     )
 
-    const payload = op === 'delete' ? new Uint8Array() : encodePayload(draft.data, resolved.route.encode)
-    assertPublishRequestSize(
-      { topic: resolved.topic, orderingKey, op, id, attributes, payload },
-      { namespace, uidAttribute },
-      { route: resolved.stream },
-    )
+    const payload = encodeRow(draft.data)
 
     const rollbackable = this.#rollbackable(ctx) && draft.block.number > (finalizedNumber ?? -1)
     const inverse =
@@ -620,28 +613,73 @@ class WriteContext {
         ? this.#encodeInverse({ draft: { ...draft, id }, resolved })
         : undefined
 
-    if (inverse) {
-      // The inverse is published verbatim at fork time, when there is no draft left to
-      // re-encode and nowhere to report a rejection to — so it is bounded now.
-      assertPublishRequestSize(
-        { topic: resolved.topic, orderingKey, op: inverse.op, id, attributes, payload: inverse.payload },
-        { namespace, uidAttribute },
-        { route: `${resolved.stream} (rollbackWhenMissing)` },
-      )
-    }
-
-    return {
+    const operation: PendingOperation = {
+      route: resolved.stream,
       topic: resolved.topic,
       orderingKey,
       mode: resolved.mode,
       op,
       id,
+      idSource,
       attributes,
       payload,
       blockNumber: draft.block.number,
       rollbackable,
       inverse,
     }
+
+    this.#assertOperationSize(operation, resolved.route.encode, resolved.stream)
+    if (inverse) {
+      this.#assertOperationSize(
+        { ...operation, op: inverse.op, payload: inverse.payload },
+        resolved.route.encode,
+        `${resolved.stream} (rollbackWhenMissing)`,
+      )
+    }
+
+    return operation
+  }
+
+  #resolveId({
+    draft,
+    resolved,
+    index,
+    namespace,
+  }: {
+    draft: MessageDraft
+    resolved: ResolvedRoute
+    index: number
+    namespace: string
+  }): { id: string; idSource: RowIdSource } {
+    const rowId = readRowId(draft.data)
+    if (rowId !== undefined) {
+      return { id: rowId, idSource: 'row' }
+    }
+
+    if (draft.id !== undefined && draft.id !== null) {
+      return { id: this.#assertResolvedId(draft.id, 'draft', resolved), idSource: 'draft' }
+    }
+
+    const derived = resolved.route.deriveId?.(draft, { namespace, stream: resolved.stream, index })
+    if (derived !== undefined && derived !== null) {
+      return { id: this.#assertResolvedId(derived, 'derived', resolved), idSource: 'derived' }
+    }
+
+    return {
+      id: this.#deriveId({ draft, resolved, index, namespace }),
+      idSource: 'generated',
+    }
+  }
+
+  #assertResolvedId(id: unknown, source: RowIdSource, resolved: ResolvedRoute): string {
+    if (typeof id === 'string' && id.length > 0) {
+      return id
+    }
+
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.INVALID_CDC_ROW, [
+      `Route "${resolved.stream}" resolved ${source} id to ` +
+        `${typeof id === 'string' ? 'an empty string' : typeof id}; a row id must be a non-empty string.`,
+    ])
   }
 
   #deriveId({
@@ -659,7 +697,7 @@ class WriteContext {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.MISSING_BLOCK_HASH, [
         `Route "${resolved.stream}" relies on generated ids, but block ${draft.block.number} carries no hash.`,
         'Bare block numbers repeat after a fork, so a hash-less id would alias an orphaned row with a ' +
-          'canonical one. Supply an explicit `id` in `map`.',
+          'canonical one. Supply an explicit `data._id` or `id` in `map`.',
       ])
     }
 
@@ -676,71 +714,67 @@ class WriteContext {
     const inverse = resolved.route.rollbackWhenMissing!(draft)
 
     if (inverse.op === 'delete') {
-      return { op: 'delete', payload: new Uint8Array() }
+      return { op: 'delete', payload: encodeRow(draft.data) }
     }
 
-    return { op: 'upsert', payload: encodePayload(inverse.data, resolved.route.encode) }
+    return { op: 'upsert', payload: encodeRow(inverse.data) }
   }
 
-  /**
-   * Block-count cadence, bucketed so the stamped block is the bucket boundary rather than
-   * whichever block a batch happened to end on.
-   */
-  async #heartbeats(
-    ctx: BatchContext,
-    opsByTopic: Map<string, number>,
-  ): Promise<{ heartbeats: PendingOperation[]; meta: Record<string, string> }> {
-    const cadence = this.#options.heartbeat?.everyBlocks
-    const heartbeats: PendingOperation[] = []
-    // Returned rather than written here: the cadence must advance in the same transaction that
-    // enqueues the heartbeat, or a failed commit consumes a beat that was never published.
-    const meta: Record<string, string> = {}
-
-    if (!cadence || cadence <= 0) return { heartbeats, meta }
-
-    const { state, namespace, delivery, uidAttribute } = this.#options
-    const current = ctx.stream.state.current.number
-    if (current < (this.#goLive ?? 0)) return { heartbeats, meta }
-
-    const bucket = Math.floor(current / cadence)
-    const topics = [...new Set(this.#options.routes.map((r) => r.topic))]
-
-    for (const topic of topics) {
-      const stored = await state.getMeta(`hb_bucket:${topic}`)
-      const pending = Number((await state.getMeta(`hb_ops:${topic}`)) ?? '0') + (opsByTopic.get(topic) ?? 0)
-
-      // The first batch only anchors the cadence: emitting there would stamp whatever bucket
-      // the pipe happened to start in, which says nothing about liveness.
-      if (stored === undefined || bucket <= Number(stored)) {
-        meta[`hb_bucket:${topic}`] = stored ?? String(bucket)
-        meta[`hb_ops:${topic}`] = String(pending)
-        continue
-      }
-
-      const heartbeat: PendingOperation = {
-        topic,
-        orderingKey: delivery === 'ordered' ? topic : '',
-        mode: 'event',
-        op: 'heartbeat',
-        attributes: {},
-        payload: encodePayload({ namespace, block: bucket * cadence, opsSinceLast: pending }),
-        blockNumber: current,
-        // A heartbeat is not a row: it has nothing to compensate and never enters the manifest.
-        rollbackable: false,
-      }
-      assertPublishRequestSize(heartbeat, { namespace, uidAttribute }, { route: `${topic} (heartbeat)` })
-      heartbeats.push(heartbeat)
-
-      meta[`hb_bucket:${topic}`] = String(bucket)
-      meta[`hb_ops:${topic}`] = '0'
+  #wireMessage(row: OutboxRow, options: { namespace: string; uidAttribute: boolean }) {
+    const route = this.#routesByStream.get(row.route)
+    if (!route) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED, [
+        `The durable PubSub outbox contains an operation for route "${row.route}", but that route is not configured.`,
+        'Restore the route configuration before recovering this state.',
+      ])
     }
 
-    return { heartbeats, meta }
+    const wire = this.#wireMessageWithEncoder(row, route.route.encode, options)
+    assertPublishRequestSize({ ...wire, payloadBytes: wire.payload.byteLength }, { route: route.stream })
+
+    return wire
+  }
+
+  #assertOperationSize(operation: PendingOperation, encode: CdcEncoder | undefined, route: string): void {
+    const preview = { ...operation, rowId: 0, seq: MAX_SEQUENCE_VALUE }
+    const options = {
+      namespace: this.#options.namespace,
+      uidAttribute: this.#options.uidAttribute,
+    }
+    const attributes = buildAttributes(preview, options)
+    // A custom encoder can change the document arbitrarily, so it must run before commit.
+    // The canonical path can derive the exact size from the already encoded row instead.
+    const payloadBytes = encode ? encodeCdcMessage(preview, encode).byteLength : canonicalCdcMessageBytes(preview)
+
+    assertPublishRequestSize(
+      { topic: preview.topic, orderingKey: preview.orderingKey, attributes, payloadBytes },
+      { route },
+    )
+  }
+
+  #wireMessageWithEncoder(
+    row: OutboxRow,
+    encode: CdcEncoder | undefined,
+    options: { namespace: string; uidAttribute: boolean },
+  ) {
+    const payload = encodeCdcMessage(row, encode)
+    const attributes = buildAttributes(row, options)
+
+    return { rowId: row.rowId, topic: row.topic, orderingKey: row.orderingKey, attributes, payload }
   }
 }
 
-async function bindWireConfig(state: PubsubState, config: { namespace: string; uidAttribute: boolean }): Promise<void> {
-  const current = JSON.stringify([config.namespace, config.uidAttribute])
+async function bindWireConfig(
+  state: PubsubState,
+  config: {
+    namespace: string
+    uidAttribute: boolean
+    messageOrdering: boolean
+    encoders: [stream: string, kind: EncoderKind][]
+  },
+): Promise<void> {
+  const encoders = [...config.encoders].sort(([left], [right]) => left.localeCompare(right))
+  const current = JSON.stringify([config.namespace, config.uidAttribute, config.messageOrdering, encoders])
   const stored = await state.getMeta(META_WIRE_CONFIG)
 
   if (stored === undefined) {
@@ -748,11 +782,38 @@ async function bindWireConfig(state: PubsubState, config: { namespace: string; u
     return
   }
 
-  if (stored === current) return
+  if (stored === current) {
+    return
+  }
+
+  const previous = JSON.parse(stored) as [string, boolean, boolean, [string, EncoderKind][]?]
+  const sameCore =
+    previous[0] === config.namespace && previous[1] === config.uidAttribute && previous[2] === config.messageOrdering
+
+  if (sameCore) {
+    const previousEncoders = new Map(previous[3] ?? [])
+    const pendingRoutes = new Set((await state.pending()).map((row) => row.route))
+    const changedPendingRoute = encoders.find(
+      ([stream, kind]) =>
+        pendingRoutes.has(stream) && (!previousEncoders.has(stream) || previousEncoders.get(stream) !== kind),
+    )
+
+    if (!changedPendingRoute) {
+      await state.setMeta(META_WIRE_CONFIG, current)
+      return
+    }
+
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH, [
+      `The encoder configuration for route "${changedPendingRoute[0]}" cannot be proven unchanged while ` +
+        'its outbox still contains unconfirmed operations.',
+      'Restore the previous encoder until the outbox drains, or start a new feed with fresh state and namespace.',
+    ])
+  }
 
   throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH, [
-    'The PubSub state was written with a different namespace or `publish.uidAttribute` setting.',
-    'Those settings determine the published identity envelope, so changing them while reusing an outbox ' +
+    'The PubSub state was written with a different namespace, `publish.uidAttribute`, or ' +
+      '`publish.messageOrdering` setting.',
+    'Those settings determine published metadata, so changing them while reusing an outbox ' +
       'could mutate an unconfirmed operation during recovery. Use the original settings, or start a new feed ' +
       'with fresh state and a fresh namespace.',
   ])
@@ -804,13 +865,13 @@ function registerPubsubMetrics(metrics: Metrics): PubsubMetrics {
       name: 'sqd_pubsub_cold_start',
       help:
         'ALERT ON THIS: 1 when the run started with no state at the configured path. On an ' +
-        'already-live namespace that means a lost sequencer, which no consumer can detect for itself.',
+        'already-live namespace that means the change sequence was reset.',
       labelNames: ['id'] as const,
     }),
     saturation: metrics.counter({
       name: 'sqd_pubsub_publish_saturation_seconds',
       help:
-        'Ordered profile: seconds spent publishing a partition at ≥80% of PubSub’s 1 MB/s ' +
+        'Message ordering: seconds spent publishing a partition at ≥80% of PubSub’s 1 MB/s ' +
         'per-ordering-key cap. Growing values mean the headroom requirement is eroding.',
     }),
   }

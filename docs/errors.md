@@ -541,16 +541,17 @@ A configured route names a topic that is missing from the project. The default `
 
 ### E2402 · Reserved attribute name
 
-A user attribute collides with a reserved namespace: names starting with `_` belong to the wire
-envelope (`_op`, `_seq`, `_id`, `_v`, `_uid`), names starting with `goog` to Google Cloud.
+A user attribute collides with a reserved namespace: names starting with `_` belong to the target
+(`_uid`), names starting with `goog` to Google Cloud. The CDC fields `_id`, `_CHANGE_TYPE`, and
+`_CHANGE_SEQUENCE_NUMBER` belong in the message body and are added by the target.
 
 **Fix** — rename the attribute. Every unprefixed name is free, deliberately including common
 business names like `id` and `op`.
 
 ### E2403 · Attribute budget exceeded
 
-The message exceeds PubSub's per-message attribute limits: 100 attributes (96 for the user, or 95
-with `publish.uidAttribute`), 256 bytes per key, 1024 bytes per value. Non-string values are
+The message exceeds PubSub's per-message attribute limits: 100 attributes (all 100 for the user,
+or 99 with `publish.uidAttribute`), 256 bytes per key, 1024 bytes per value. Non-string values are
 refused here too — PubSub attributes are strings, and filters compare them as strings.
 
 **Fix** — publish the value in the payload instead, or shorten it. Filter attributes should stay
@@ -561,7 +562,7 @@ short and low-cardinality.
 The encoded data exceeds PubSub's 10 MB message limit, or the data plus attributes, ordering
 key, topic resource name, and protobuf framing exceeds the 10 MB publish-request limit.
 
-**Fix** — split the row, shorten its attributes, or compress it with a route-level `encode`.
+**Fix** — split the row, shorten its attributes, or use a smaller route-level encoding.
 
 ### E2405 · Canonical codec cannot encode this value
 
@@ -574,13 +575,13 @@ guarantee, and a silent coercion (an unsafe integer rounding, an `undefined` bec
 break it invisibly.
 
 **Fix** — pass a `bigint` or a string for large integers, a number for sub-second timestamps, and a
-plain object/array for structures. A route-level `encode` takes over the wire format entirely.
+plain object/array for structures. A route-level `encode` receives the complete CDC row.
 
 ### E2406 · Canonical codec met a cycle
 
 The payload references itself.
 
-**Fix** — break the cycle, or supply a custom `encode`.
+**Fix** — break the cycle.
 
 ### E2407 · Dataset reports no finalized head
 
@@ -604,36 +605,41 @@ A fork-capable dataset delivered a block without a hash, and the route relies on
 Bare block numbers repeat after a fork, so the generated id would alias an orphaned row with a
 canonical one.
 
-**Fix** — supply an explicit `id` in the route's `map`.
+**Fix** — supply a string `_id` in `MessageDraft.data`, set `MessageDraft.id`, or include block
+hashes in the source data.
 
 ### E2410 · State file is locked
 
 Another process holds the state file. Exactly one producer may own one: it is the authoritative
-sequencer for every id it publishes, and a second writer would hand consumers `_seq` values they
-already hold.
+sequencer for every id it publishes, and a second writer would hand consumers change sequence
+numbers they already hold.
 
 **Fix** — run one instance per state path.
 
 ### E2411 · State schema version mismatch
 
-The state file was written by a different schema version of the target.
+The state file was written by a different schema version of the target. State schemas are not
+migrated in place.
 
-**Fix** — upgrade or downgrade the SDK to match, or start a fresh state under a fresh `namespace`
-(a new state file is a new sequencer — see the cold-start warning in the target's logs).
+**Fix** — run the SDK version that owns the state, or start a fresh state and re-bootstrap the
+destination. A new state file is a new sequencer; see the cold-start warning in the target's logs.
 
-### E2412 · Ordering key under the `lww` profile
+### E2412 · Ordering key while message ordering is disabled
 
-A route set a per-draft `orderingKey`, but the pipe runs the default `lww` profile, which uses no
-PubSub ordering keys at all.
+A route set a per-draft `orderingKey`, but `publish.messageOrdering` is disabled.
 
-**Fix** — switch to `publish.delivery: 'ordered'` to partition a topic, or drop the key.
+**Fix** — set `publish.messageOrdering: true`, or drop the key. With ordering enabled, the topic
+name is the default key and a draft can override it to create a separate ordered partition.
 
 ### E2413 · Materialized id moved
 
-A materialized id changed its topic, ordering key, or filter attributes between revisions. A
-subscription filter selected on the old attributes would stop receiving the row mid-life.
+A materialized route changed how it resolves ids between `data._id`, `MessageDraft.id`, its
+`deriveId` callback, and the generated fallback; or an existing id changed its topic, ordering key,
+or filter attributes between revisions. Either change can leave an old row behind or make a
+subscription filter stop receiving the row mid-life.
 
-**Fix** — keep a materialized row's identity and attributes stable for its whole lifetime.
+**Fix** — use one id source throughout a materialized route, and keep each row's resolved identity
+and attributes stable for its whole lifetime.
 
 ### E2414 · Delete-free window route without an empty value
 
@@ -665,17 +671,6 @@ volume — not ephemeral container storage.
 
 **Fix** — check the path and its permissions, and mount it on durable storage.
 
-### E2413 · Materialized row changed its identity
-
-A row declared `mode: 'materialized'` changed its topic, ordering key, or filter attributes
-between revisions. A subscription filtered on the old attributes never receives a revision
-carrying the new ones, so it keeps the stale materialized value. When forks are possible, a
-repair also uses the identity the row was **first** published with.
-
-**Fix** — keep a materialized row's topic, ordering key and attributes stable for its whole
-lifetime, or give the new shape a new id. (Attribute *order* is irrelevant; only the set of
-names and values matters.)
-
 ### E2418 · Two drafts with the same id in one batch
 
 An `event` route produced two operations sharing an id in one batch. On an event route every id is
@@ -695,21 +690,38 @@ under this pipe's identity.
 `settings.id` to the key the file was written under if this pipe really is that producer
 renamed.
 
-### E2420 · State file was written under the other delivery profile
-
-`publish.delivery` changed between runs against the same state. The two profiles scope `_seq`
-differently — one producer-wide counter versus one dense counter per partition — so continuing
-would re-issue sequence numbers consumers already hold, and a conforming consumer would discard
-the new operations as duplicates.
-
-**Fix** — changing profile is a new feed, not a config tweak: fresh `namespace`, fresh state
-file, re-bootstrapped consumers.
-
 ### E2421 · State wire configuration changed
 
-The `namespace` or `publish.uidAttribute` setting changed while reusing PubSub state. Those
-settings determine the published identity envelope. Continuing could rebuild an unconfirmed
-outbox row with different attributes during crash recovery.
+The `namespace`, `publish.uidAttribute`, or `publish.messageOrdering` setting changed while reusing
+PubSub state. Those settings determine published metadata and ordering keys. Continuing could
+rebuild an unconfirmed outbox row differently during crash recovery. The same error is raised when
+a route switches between the canonical and a custom encoder while that route still has pending
+outbox rows.
 
-**Fix** — restore the settings used to create the state, or treat the change as a new feed with
-fresh state and a fresh namespace.
+**Fix** — restore the settings and encoder kind used to create the pending rows, drain the outbox,
+and then change the encoder; or treat the change as a new feed with fresh state and a fresh
+namespace.
+
+### E2422 · Invalid BigQuery CDC row
+
+A draft's `data` is not a plain object, its `_id` is not a non-empty string, or it owns
+`_CHANGE_TYPE` or `_CHANGE_SEQUENCE_NUMBER`. The target must add the change fields to produce a
+valid CDC message.
+
+**Fix** — wrap primitive, array, or binary values in an object field; use a non-empty string `_id`
+(or omit it to let the target derive one); and remove the target-owned change fields from the row.
+
+### E2423 · Route missing during recovery
+
+The durable outbox contains an operation for a route that is no longer configured. The route is
+needed to encode the final CDC message during recovery.
+
+**Fix** — restore the route configuration, drain the state, and only then remove the route.
+
+### E2424 · Change sequence exhausted
+
+The producer-wide BigQuery CDC sequence reached the largest integer the state can increment without
+precision loss, or a sequence outside that supported range reached the encoder. Reusing a sequence
+would make later changes look stale to BigQuery.
+
+**Fix** — start a new feed with fresh state and a fresh namespace, then re-bootstrap its destination.

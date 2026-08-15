@@ -65,9 +65,9 @@ exactly-once holds at the *sink*, not at the bus).
 **Failures degrade to silence rather than to noise.** A lost sequencer publishes
 low versions under ids consumers already hold at higher ones; every affected row
 silently freezes, and nothing on the wire distinguishes that from health. A durable
-producer epoch as a fifth envelope field would close it in-band (version compared as
-`(epoch, seq)`); it was declined to keep the envelope minimal and the consumer contract
-a single scalar comparison. The exposure is handled operationally instead — a cold-start
+producer epoch carried with every operation would close it in-band (version compared as
+`(epoch, seq)`); it was declined to keep the published metadata minimal and the consumer
+contract a single scalar comparison. The exposure is handled operationally instead — a cold-start
 warning, an alertable gauge, and a runbook (GAP-38) — and remains an additive change if
 it ever bites.
 
