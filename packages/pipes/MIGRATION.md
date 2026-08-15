@@ -524,6 +524,52 @@ schema: {
 
 ---
 
+## 18. Migrate Google Pub/Sub output to BigQuery CDC
+
+The Pub/Sub target now publishes BigQuery CDC JSON rows instead of the previous custom attribute
+envelope. Update the producer and every consumer as one protocol migration.
+
+Configuration changes:
+
+| Before | After |
+|---|---|
+| `publish: { delivery: 'lww' }` | omit `messageOrdering`, or set `messageOrdering: false` |
+| `publish: { delivery: 'ordered' }` | `publish: { messageOrdering: true }` |
+| `heartbeat: { everyBlocks: ... }` | removed; use destination-side freshness monitoring |
+
+Drafts and encoders also change:
+
+- `MessageDraft.data` and `RollbackInverse.data` must be plain objects. Wrap strings or binary data
+  in an object field.
+- Put a non-empty string `_id` in `data` to define the BigQuery row key, or continue using
+  `MessageDraft.id`. The target removes the input `_id` before storing the row and restores it in
+  the final CDC message.
+- `TopicRoute.encode` now receives the complete `BigQueryCdcMessage`, including `_id`,
+  `_CHANGE_TYPE`, and `_CHANGE_SEQUENCE_NUMBER`, rather than only the route payload.
+- A `delete` draft must carry the row columns containing the destination's primary key. The target
+  publishes those columns alongside the CDC metadata; this also applies to fork compensation.
+- Pub/Sub attributes now contain only user attributes and the optional `_uid`. The public
+  `WIRE_VERSION`, `ENVELOPE_ATTRIBUTES`, and `DeliveryProfile` exports are removed, and E2420 is
+  retired.
+- The canonical encoder writes a `Date` as an RFC 3339 string (`"2023-11-14T22:13:20.999Z"`)
+  instead of unix seconds. A BigQuery subscription reads a JSON *number* in a `TIMESTAMP` column as
+  microseconds since the epoch, so the previous encoding landed every timestamp in 1970. If a
+  destination column was declared `INT64` to receive the old value, redeclare it as `TIMESTAMP`.
+  Milliseconds now survive the round trip.
+
+The other encoder outputs are unchanged but constrain the destination column type: a `bigint`
+becomes a decimal string, which BigQuery accepts into `NUMERIC` or `BIGNUMERIC` only when the value
+fits, and into `STRING` across the full range, but rejects into `INT64`; byte views become `0x` hex
+strings, which belong in `STRING`, not `BYTES`. `docs/pubsub-bigquery.md` tabulates the full mapping
+and the DDL it implies.
+
+State schema v2 is not migrated in place. A v1 state file fails at startup with E2411. Before
+upgrading, let the old producer drain its outbox. Then start the CDC feed with a fresh state path and
+a fresh namespace, and re-bootstrap the destination so its rows and sequence history belong to the
+new feed. Reusing the old namespace or destination state can make new CDC changes appear stale.
+
+---
+
 ## Quick checklist
 
 - [ ] `evmPortalSource` → `evmPortalStream`
@@ -553,4 +599,6 @@ schema: {
 - [ ] ClickHouse rollbacks: nothing to do for CollapsingMergeTree tables (optionally call `store.ensureRollbackIndex` in `onStart` on large tables); non-collapsing tables now roll back via `DELETE` (needs ClickHouse ≥ 23.3) and their MVs keep rolled-back data
 - [ ] Parquet schemas: `TIMESTAMP_MILLIS` → `TIMESTAMP` (alias removed; files unchanged)
 - [ ] Prometheus dashboards: `sqd_current_block` → `sqd_processed_block`, `sqd_last_block` → `sqd_end_block`
+- [ ] Pub/Sub: migrate delivery configuration and consumers to BigQuery CDC rows; use fresh v2 state, a fresh namespace, and a re-bootstrapped destination
+- [ ] Pub/Sub destination tables: `Date` columns are now RFC 3339 `TIMESTAMP`, not `INT64` unix seconds
 - [ ] Upgrade `@subsquid/pipes-ui` together with the SDK

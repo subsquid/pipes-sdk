@@ -3,21 +3,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { testLogger } from '~/testing/index.js'
 
+import type { PublishMessage } from './publisher.js'
 import { GooglePubsubPublisher, partitionRows } from './publisher.js'
-import type { OutboxRow } from './pubsub-state.js'
 
-type WireRow = OutboxRow & { attributes: Record<string, string> }
+type WireRow = PublishMessage
 
 function row(overrides: Partial<WireRow> = {}): WireRow {
   return {
     rowId: 1,
     topic: 'blocks',
-    op: 'upsert',
-    id: 'row-1',
     orderingKey: '',
-    seq: 1,
     attributes: {},
-    payload: new TextEncoder().encode('{}'),
+    payload: new TextEncoder().encode('{"_id":"row-1"}'),
     ...overrides,
   }
 }
@@ -34,7 +31,7 @@ function fakeClient(outcome: (id: string) => Promise<string>) {
       if (existing) return existing
 
       const topic = {
-        publishMessage: ({ attributes }: { attributes: Record<string, string> }) => outcome(attributes['_id']),
+        publishMessage: ({ data }: { data: Uint8Array }) => outcome(JSON.parse(new TextDecoder().decode(data))._id),
         resumePublishing: (key: string) => resumed.push(key),
         flush: async () => undefined,
         exists: async () => [true],
@@ -70,18 +67,18 @@ describe('partitionRows', () => {
 })
 
 describe('GooglePubsubPublisher', () => {
-  it('confirms only the prefix that published, so a gap is republished not dropped', async () => {
+  it('confirms only the prefix before a failed publish', async () => {
     const { client } = fakeClient(async (id) => {
       if (id === 'b') throw new Error('publish failed')
 
       return 'message-id'
     })
-    const publisher = new GooglePubsubPublisher(client, { delivery: 'lww', topicSetup: 'none' })
+    const publisher = new GooglePubsubPublisher(client, { messageOrdering: false, topicSetup: 'none' })
 
     const result = await publisher.drain([
-      row({ rowId: 1, id: 'a', attributes: { _id: 'a' } }),
-      row({ rowId: 2, id: 'b', attributes: { _id: 'b' } }),
-      row({ rowId: 3, id: 'c', attributes: { _id: 'c' } }),
+      row({ rowId: 1, payload: new TextEncoder().encode('{"_id":"a"}') }),
+      row({ rowId: 2, payload: new TextEncoder().encode('{"_id":"b"}') }),
+      row({ rowId: 3, payload: new TextEncoder().encode('{"_id":"c"}') }),
     ])
 
     expect(result.confirmed).toEqual([1])
@@ -94,11 +91,11 @@ describe('GooglePubsubPublisher', () => {
     const { client } = fakeClient(async (id) => {
       throw new Error(`publish failed: ${id}`)
     })
-    const publisher = new GooglePubsubPublisher(client, { delivery: 'lww', topicSetup: 'none' })
+    const publisher = new GooglePubsubPublisher(client, { messageOrdering: false, topicSetup: 'none' })
 
     const result = await publisher.drain([
-      row({ rowId: 1, id: 'a', attributes: { _id: 'a' } }),
-      row({ rowId: 2, id: 'b', attributes: { _id: 'b' } }),
+      row({ rowId: 1, payload: new TextEncoder().encode('{"_id":"a"}') }),
+      row({ rowId: 2, payload: new TextEncoder().encode('{"_id":"b"}') }),
     ])
 
     expect(result.confirmed).toEqual([])
@@ -114,9 +111,9 @@ describe('GooglePubsubPublisher', () => {
     const { client, resumed } = fakeClient(async () => {
       throw new Error('publish failed')
     })
-    const publisher = new GooglePubsubPublisher(client, { delivery: 'ordered', topicSetup: 'none' })
+    const publisher = new GooglePubsubPublisher(client, { messageOrdering: true, topicSetup: 'none' })
 
-    await publisher.drain([row({ orderingKey: 'blocks', attributes: { _id: 'a' } })])
+    await publisher.drain([row({ orderingKey: 'blocks' })])
 
     expect(resumed).toEqual(['blocks'])
   })
@@ -127,11 +124,11 @@ describe('GooglePubsubPublisher', () => {
 
       return 'message-id'
     })
-    const publisher = new GooglePubsubPublisher(client, { delivery: 'ordered', topicSetup: 'none' })
+    const publisher = new GooglePubsubPublisher(client, { messageOrdering: true, topicSetup: 'none' })
 
     const result = await publisher.drain([
-      row({ rowId: 1, orderingKey: 'pool-a', attributes: { _id: 'a' } }),
-      row({ rowId: 2, orderingKey: 'pool-b', attributes: { _id: 'b' } }),
+      row({ rowId: 1, orderingKey: 'pool-a', payload: new TextEncoder().encode('{"_id":"a"}') }),
+      row({ rowId: 2, orderingKey: 'pool-b', payload: new TextEncoder().encode('{"_id":"b"}') }),
     ])
 
     expect(result.confirmed).toEqual([2])
@@ -144,7 +141,7 @@ describe('GooglePubsubPublisher', () => {
       close: async () => undefined,
     } as unknown as PubSub
 
-    const publisher = new GooglePubsubPublisher(client, { delivery: 'lww', topicSetup: 'validate' })
+    const publisher = new GooglePubsubPublisher(client, { messageOrdering: false, topicSetup: 'validate' })
 
     await expect(publisher.setup(['missing'], testLogger())).rejects.toMatchObject({ code: 'E2401' })
   })

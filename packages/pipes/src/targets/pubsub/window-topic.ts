@@ -1,4 +1,5 @@
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
+import { CdcEncoder } from './protocol.js'
 import { MessageDraft, TopicRoute } from './pubsub-target.js'
 
 /**
@@ -29,8 +30,11 @@ export type WindowTopicOptions<Out> = {
    * revision and every fork compensation of a window id carries the same attributes.
    */
   attributes?: (row: WindowRow<Out>) => Record<string, string>
-  /** Payload encoder. Defaults to the canonical codec (RP-24). */
-  encode?: (data: object) => Uint8Array | string
+  /**
+   * Encoder for the complete CDC row. Defaults to canonical JSON. Keep it unchanged while the
+   * route has pending operations in the PubSub state.
+   */
+  encode?: CdcEncoder
   /**
    * What an emptied window publishes: `delete` (default) removes the row, `upsert` keeps the
    * topic delete-free by publishing a neutral value.
@@ -41,14 +45,13 @@ export type WindowTopicOptions<Out> = {
    * also the route's fork inverse, and only the route knows what an empty candle looks like.
    */
   emptyValues?: (window: WindowBounds) => Out
-  /** Ordered profile only: shard the topic per series. A window id must never move keys. */
+  /** With message ordering enabled, shard the topic per series. A window id must never move keys. */
   orderingKey?: (row: WindowRow<Out>) => string
 }
 
 /**
  * Builds a `TopicRoute` for an aggregator window stream: every re-emission of a window is an
- * `upsert` on the same id, so "last write wins by `_seq`" replaces any consumer-side revision
- * arithmetic.
+ * `upsert` on the same id, so BigQuery CDC replaces the previous revision.
  */
 export function windowTopic<Out>(options: WindowTopicOptions<Out>): TopicRoute<WindowRow<Out>[]> {
   const emptyWindows = options.emptyWindows ?? 'delete'

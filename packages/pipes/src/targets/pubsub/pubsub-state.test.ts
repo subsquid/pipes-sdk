@@ -8,7 +8,7 @@ import { BlockCursor } from '~/core/index.js'
 import { testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { CommitInput, DeliveryProfile, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
+import { CommitInput, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
 
 const encoder = new TextEncoder()
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -32,8 +32,8 @@ function statePath(): string {
   return join(dir, 'state.sqlite')
 }
 
-async function openState(path: string, delivery: DeliveryProfile = 'lww') {
-  const state = new SqlitePubsubState({ path, delivery })
+async function openState(path: string) {
+  const state = new SqlitePubsubState({ path })
   const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
   opened.push(state)
 
@@ -51,11 +51,13 @@ function block(number: number, suffix = 'a'): BlockCursor {
 
 function operation(overrides: Partial<PendingOperation> & { id?: string } = {}): PendingOperation {
   return {
+    route: 'transfers',
     topic: 'transfers',
     orderingKey: '',
     mode: 'event',
     op: 'upsert',
     id: 'row-1',
+    idSource: 'draft',
     attributes: { token: '0x42' },
     payload: encoder.encode('{"a":1}'),
     blockNumber: 100,
@@ -95,29 +97,8 @@ describe('SqlitePubsubState', () => {
     expect(cursor).toHaveProperty('finalized', null)
   })
 
-  it('assigns one producer-wide sequence under lww', async () => {
-    const { state } = await openState(statePath(), 'lww')
-
-    await commit(state, {
-      operations: [
-        operation({ id: 'a', topic: 'one' }),
-        operation({ id: 'b', topic: 'two' }),
-        operation({ id: 'c', topic: 'one' }),
-      ],
-      ledger: [],
-      cursor: block(100),
-      finalized: null,
-    })
-
-    expect((await state.pending()).map((row) => [row.topic, row.seq])).toEqual([
-      ['one', 1],
-      ['two', 2],
-      ['one', 3],
-    ])
-  })
-
-  it('assigns a dense per-partition sequence under ordered', async () => {
-    const { state } = await openState(statePath(), 'ordered')
+  it('assigns one producer-wide sequence across topics and ordering keys', async () => {
+    const { state } = await openState(statePath())
 
     await commit(state, {
       operations: [
@@ -132,8 +113,8 @@ describe('SqlitePubsubState', () => {
 
     expect((await state.pending()).map((row) => [row.topic, row.seq])).toEqual([
       ['one', 1],
-      ['two', 1],
-      ['one', 2],
+      ['two', 2],
+      ['one', 3],
     ])
   })
 
@@ -154,6 +135,38 @@ describe('SqlitePubsubState', () => {
     })
 
     expect((await second.state.pending()).map((row) => row.seq)).toEqual([2])
+  })
+
+  it('refuses to repeat the sequence after Number.MAX_SAFE_INTEGER', async () => {
+    const { state } = await openState(statePath())
+    await state.setMeta('sequence', String(Number.MAX_SAFE_INTEGER))
+
+    await expect(
+      commit(state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null }),
+    ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.SEQUENCE_EXHAUSTED })
+
+    expect(await state.pending()).toHaveLength(0)
+    expect(await state.getMeta('sequence')).toBe(String(Number.MAX_SAFE_INTEGER))
+  })
+
+  it('keeps one id source for every materialized route', async () => {
+    const { state } = await openState(statePath())
+
+    await commit(state, {
+      operations: [operation({ id: 'row-1', idSource: 'row', mode: 'materialized' })],
+      ledger: [],
+      cursor: block(100),
+      finalized: null,
+    })
+
+    await expect(
+      commit(state, {
+        operations: [operation({ id: 'row-1', idSource: 'draft', mode: 'materialized', blockNumber: 101 })],
+        ledger: [],
+        cursor: block(101),
+        finalized: null,
+      }),
+    ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED })
   })
 
   it('keeps unconfirmed outbox rows for the restart drain', async () => {
@@ -184,7 +197,7 @@ describe('SqlitePubsubState', () => {
   it('refuses a state file that belongs to another producer', async () => {
     const path = statePath()
 
-    const first = new SqlitePubsubState({ path, delivery: 'lww' })
+    const first = new SqlitePubsubState({ path })
     await first.open({ cursorKey: 'pipe-a', logger: testLogger() })
     await first.commit({
       operations: [operation()],
@@ -197,58 +210,43 @@ describe('SqlitePubsubState', () => {
 
     // The outbox, the manifest and the counters are producer-wide — only the cursor row is
     // keyed — so adopting this file would publish pipe-a's pending operations as pipe-b.
-    const second = new SqlitePubsubState({ path, delivery: 'lww' })
+    const second = new SqlitePubsubState({ path })
     await expect(second.open({ cursorKey: 'pipe-b', logger: testLogger() })).rejects.toMatchObject({
       code: PUBSUB_ERROR_CODES.STATE_IDENTITY_MISMATCH,
-    })
-  })
-
-  it('refuses a state file written under the other delivery profile', async () => {
-    const path = statePath()
-
-    const first = await openState(path, 'lww')
-    await first.state.commit({
-      operations: [operation()],
-      ledger: [],
-      cursor: block(100),
-      finalized: null,
-      forkCapable: true,
-    })
-    await first.state.close()
-
-    // The profiles scope `_seq` differently, so continuing would re-issue sequence 1.
-    await expect(openState(path, 'ordered')).rejects.toMatchObject({
-      code: PUBSUB_ERROR_CODES.STATE_PROFILE_MISMATCH,
     })
   })
 
   it('releases the lock when open refuses, so a corrected retry can proceed', async () => {
     const path = statePath()
 
-    const first = await openState(path, 'lww')
-    await first.state.close()
+    const first = new SqlitePubsubState({ path })
+    await first.open({ cursorKey: 'pipe-a', logger: testLogger() })
+    await first.close()
 
-    await expect(openState(path, 'ordered')).rejects.toMatchObject({
-      code: PUBSUB_ERROR_CODES.STATE_PROFILE_MISMATCH,
+    const wrong = new SqlitePubsubState({ path })
+    await expect(wrong.open({ cursorKey: 'pipe-b', logger: testLogger() })).rejects.toMatchObject({
+      code: PUBSUB_ERROR_CODES.STATE_IDENTITY_MISMATCH,
     })
 
     // A refusal must not leave the file locked — the retry is a first producer, not a second.
-    const retry = await openState(path, 'lww')
-    expect(retry.coldStart).toBe(false)
+    const retry = new SqlitePubsubState({ path })
+    const result = await retry.open({ cursorKey: 'pipe-a', logger: testLogger() })
+    opened.push(retry)
+    expect(result.coldStart).toBe(false)
   })
 
-  it('refuses a state file written by another schema version', async () => {
+  it('refuses the previous schema instead of migrating it in place', async () => {
     const path = statePath()
     const first = await openState(path)
-    await first.state.setMeta('schema_version', '99')
+    await first.state.setMeta('schema_version', '1')
     await first.state.close()
 
     await expect(openState(path)).rejects.toBeInstanceOf(PubsubTargetError)
   })
 
   describe('fork compensation', () => {
-    async function seed(delivery: DeliveryProfile = 'lww') {
-      const { state } = await openState(statePath(), delivery)
+    async function seed() {
+      const { state } = await openState(statePath())
 
       return state
     }
@@ -270,6 +268,7 @@ describe('SqlitePubsubState', () => {
       const pending = await state.pending()
       expect(pending).toHaveLength(1)
       expect(pending[0]).toMatchObject({ op: 'delete', id: 'evt-1', attributes: { token: '0x42' }, seq: 2 })
+      expect(text(pending[0].payload)).toBe('{"a":1}')
     })
 
     it('leaves an event alone when it also exists below the fork point', async () => {
@@ -447,7 +446,7 @@ describe('SqlitePubsubState', () => {
     })
 
     it('keeps ids whose separator-joined identity would collide apart', async () => {
-      const state = await seed('ordered')
+      const state = await seed()
 
       // ("pool a", "b") and ("pool", "a b") join to the same string under a space separator;
       // grouped together, the fork would publish one compensation where two are owed.
@@ -474,7 +473,7 @@ describe('SqlitePubsubState', () => {
     })
 
     it('never rewinds the sequence across a fork', async () => {
-      const state = await seed('ordered')
+      const state = await seed()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', orderingKey: 'k', blockNumber: 101 })],
@@ -499,7 +498,7 @@ describe('SqlitePubsubState', () => {
     })
 
     it('lands a compensation on the same partition as the operation it repairs', async () => {
-      const state = await seed('ordered')
+      const state = await seed()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', orderingKey: 'pool-a', blockNumber: 101 })],
@@ -550,20 +549,6 @@ describe('SqlitePubsubState', () => {
       ])
       expect((await state.stats()).manifest).toBe(0)
     })
-  })
-
-  it('applies batch bookkeeping inside the batch transaction', async () => {
-    const { state } = await openState(statePath())
-
-    await commit(state, {
-      operations: [operation()],
-      ledger: [],
-      cursor: block(100),
-      finalized: null,
-      meta: { 'hb_bucket:t': '7' },
-    })
-
-    expect(await state.getMeta('hb_bucket:t')).toBe('7')
   })
 
   describe('materialized identity', () => {
@@ -621,7 +606,7 @@ describe('SqlitePubsubState', () => {
     })
 
     it('refuses a revision that moves the row to another partition or topic', async () => {
-      const first = await openState(statePath(), 'ordered')
+      const first = await openState(statePath())
       await revise(first.state, { orderingKey: 'pool-a' })
       await expect(revise(first.state, { orderingKey: 'pool-b' })).rejects.toMatchObject({
         code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,

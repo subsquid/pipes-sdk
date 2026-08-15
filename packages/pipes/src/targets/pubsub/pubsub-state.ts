@@ -10,26 +10,28 @@ import {
 import { SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { PubsubOp } from './protocol.js'
+import { MAX_SEQUENCE_VALUE, PubsubOp } from './protocol.js'
 
-export const STATE_SCHEMA_VERSION = '1'
-
-export type DeliveryProfile = 'lww' | 'ordered'
+export const STATE_SCHEMA_VERSION = '2'
 
 export type RouteMode = 'event' | 'materialized'
+export type RowIdSource = 'row' | 'draft' | 'derived' | 'generated'
 
 /**
  * One wire operation on its way out: everything the state needs to sequence it, publish it,
  * and — when it sits above the finalized watermark — compensate it after a fork.
  */
 export type PendingOperation = {
+  /** Route name selects the encoder after recovery. */
+  route: string
   topic: string
-  /** Empty under `lww`, where PubSub ordering keys are not used at all. */
+  /** Empty when PubSub message ordering is disabled. */
   orderingKey: string
   mode: RouteMode
   op: PubsubOp
-  /** Absent on `heartbeat` — a heartbeat is not a row and is never rollbackable. */
-  id?: string
+  id: string
+  /** How the target resolved `id`; fixed per materialized route. */
+  idSource: RowIdSource
   attributes: Record<string, string>
   payload: Uint8Array
   blockNumber: number
@@ -47,9 +49,10 @@ export type PendingOperation = {
 
 export type OutboxRow = {
   rowId: number
+  route: string
   topic: string
   op: PubsubOp
-  id?: string
+  id: string
   orderingKey: string
   seq: number
   attributes: Record<string, string>
@@ -67,12 +70,6 @@ export type CommitInput = {
    * `assumeNoForks`, where manifests and baselines would only be write amplification.
    */
   forkCapable: boolean
-  /**
-   * Bookkeeping that must advance with the batch, not beside it (heartbeat cadence). Applied
-   * inside the same transaction, so a failed commit cannot leave the cadence advanced for a
-   * heartbeat that was never enqueued.
-   */
-  meta?: Record<string, string>
 }
 
 /**
@@ -84,7 +81,7 @@ export type CommitInput = {
  * requirement, not the storage engine.
  */
 export interface PubsubState {
-  /** Opens the backing store, migrates it, and reports whether it started empty (CN-46). */
+  /** Opens the backing store, validates its schema, and reports whether it started empty (CN-46). */
   open(ctx: { cursorKey: string; logger: Logger }): Promise<{ coldStart: boolean }>
   getCursor(): Promise<TargetState | undefined>
   getMeta(key: string): Promise<string | undefined>
@@ -108,15 +105,17 @@ type MetaRow = { value: string }
 type CursorRow = { latest: string; finalized: string | null }
 type OutboxDbRow = {
   row_id: number
+  route: string
   topic: string
   op: string
-  id: string | null
+  id: string
   ordering_key: string
   seq: number
   attributes: string
   payload: Uint8Array | Buffer | null
 }
 type ManifestDbRow = {
+  route: string
   topic: string
   ordering_key: string
   seq: number
@@ -128,9 +127,9 @@ type ManifestDbRow = {
   payload: Uint8Array | Buffer | null
 }
 
-const META_LWW_SEQ = 'lww_seq'
+const META_SEQUENCE = 'sequence'
 const META_CURSOR_KEY = 'cursor_key'
-const META_DELIVERY = 'delivery'
+const META_MATERIALIZED_ID_SOURCE = 'materialized_id_source:'
 
 /**
  * An unambiguous key for a composite identity. A separator-joined string is not one:
@@ -180,7 +179,6 @@ function lockedError(path: string, cause: unknown): PubsubTargetError {
 
 export type SqlitePubsubStateOptions = {
   path: string
-  delivery: DeliveryProfile
   /** Cursor key override; defaults to the pipe id once `open` binds it (ADR-2). */
   id?: string
 }
@@ -230,7 +228,7 @@ export class SqlitePubsubState implements PubsubState {
       db.exec('PRAGMA synchronous = FULL;')
 
       this.#lock()
-      this.#migrate()
+      this.#initializeSchema()
 
       const version = this.getMetaSync('schema_version')
       if (version && version !== STATE_SCHEMA_VERSION) {
@@ -243,9 +241,8 @@ export class SqlitePubsubState implements PubsubState {
       const coldStart = !version
       if (coldStart) {
         this.setMetaSync('schema_version', STATE_SCHEMA_VERSION)
-        this.setMetaSync(META_LWW_SEQ, '0')
+        this.setMetaSync(META_SEQUENCE, '0')
         this.setMetaSync(META_CURSOR_KEY, this.#key.value)
-        this.setMetaSync(META_DELIVERY, this.#options.delivery)
       } else {
         this.#assertSameProducer()
       }
@@ -260,10 +257,8 @@ export class SqlitePubsubState implements PubsubState {
 
   /**
    * A state file is one producer's sequencer, not a shared cache. The outbox, the manifest
-   * and the counters are producer-wide — only the cursor row is keyed — so opening another
-   * pipe's file would report a clean warm start while inheriting its unpublished operations,
-   * and switching profile would re-issue sequence numbers under the other scoping. Both are
-   * refused before anything is drained.
+   * and the counter are producer-wide — only the cursor row is keyed — so opening another
+   * pipe's file would report a clean warm start while inheriting its unpublished operations.
    */
   #assertSameProducer(): void {
     const storedKey = this.getMetaSync(META_CURSOR_KEY)
@@ -276,20 +271,8 @@ export class SqlitePubsubState implements PubsubState {
       ])
     }
 
-    const storedDelivery = this.getMetaSync(META_DELIVERY)
-    if (storedDelivery !== undefined && storedDelivery !== this.#options.delivery) {
-      throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_PROFILE_MISMATCH, [
-        `The PubSub state at "${this.#options.path}" was written under the "${storedDelivery}" delivery ` +
-          `profile; this pipe runs "${this.#options.delivery}".`,
-        'The profiles scope `_seq` differently — one producer-wide counter versus one dense counter per ' +
-          'partition — so continuing would re-issue sequence numbers consumers already hold. Changing ' +
-          'profile is a new feed: fresh namespace, fresh state, re-bootstrapped consumers.',
-      ])
-    }
-
     // Written on first open of a file that predates these keys, so the checks bind from now on.
     if (storedKey === undefined) this.setMetaSync(META_CURSOR_KEY, this.#key.value)
-    if (storedDelivery === undefined) this.setMetaSync(META_DELIVERY, this.#options.delivery)
   }
 
   /**
@@ -308,7 +291,7 @@ export class SqlitePubsubState implements PubsubState {
     }
   }
 
-  #migrate(): void {
+  #initializeSchema(): void {
     const db = this.#db!
 
     db.exec('BEGIN')
@@ -324,6 +307,7 @@ export class SqlitePubsubState implements PubsubState {
       db.exec(`
         CREATE TABLE IF NOT EXISTS outbox (
           row_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+          route         TEXT,
           topic         TEXT,
           op            TEXT,
           id            TEXT,
@@ -334,13 +318,6 @@ export class SqlitePubsubState implements PubsubState {
           block_number  INTEGER
         )`)
       db.exec(`
-        CREATE TABLE IF NOT EXISTS partition_seq (
-          topic         TEXT,
-          ordering_key  TEXT,
-          next_seq      INTEGER,
-          PRIMARY KEY (topic, ordering_key)
-        )`)
-      db.exec(`
         CREATE TABLE IF NOT EXISTS ledger_blocks (
           number     INTEGER PRIMARY KEY,
           hash       TEXT,
@@ -348,6 +325,7 @@ export class SqlitePubsubState implements PubsubState {
         )`)
       db.exec(`
         CREATE TABLE IF NOT EXISTS manifest (
+          route          TEXT,
           topic         TEXT,
           ordering_key  TEXT,
           seq           INTEGER,
@@ -365,6 +343,7 @@ export class SqlitePubsubState implements PubsubState {
       db.exec(`CREATE INDEX IF NOT EXISTS manifest_id_idx ON manifest (id, seq)`)
       db.exec(`
         CREATE TABLE IF NOT EXISTS materialized_baseline (
+          route          TEXT,
           topic         TEXT,
           ordering_key  TEXT,
           id            TEXT,
@@ -378,12 +357,14 @@ export class SqlitePubsubState implements PubsubState {
       db.exec(`
         CREATE TABLE IF NOT EXISTS materialized_identity (
           id            TEXT PRIMARY KEY,
+          route         TEXT,
           topic         TEXT,
           ordering_key  TEXT,
           attributes    TEXT
         )`)
       db.exec(`
         CREATE TABLE IF NOT EXISTS rollback_inverse (
+          route         TEXT,
           topic         TEXT,
           ordering_key  TEXT,
           id            TEXT,
@@ -443,45 +424,32 @@ export class SqlitePubsubState implements PubsubState {
 
   // ─── sequencing ─────────────────────────────────────────────────────────────
 
-  /**
-   * The next `_seq`: one producer-wide counter under `lww` (a per-id version needs neither
-   * density nor per-topic scoping), the partition's dense counter under `ordered`. Both never
-   * rewind — not across restarts, not across forks — which is what lets a consumer drop a
-   * republished operation instead of re-applying it.
-   */
-  #nextSeq(topic: string, orderingKey: string): number {
-    const db = this.#db!
-
-    if (this.#options.delivery === 'lww') {
-      const next = Number(this.getMetaSync(META_LWW_SEQ) ?? '0') + 1
-      this.setMetaSync(META_LWW_SEQ, String(next))
-
-      return next
+  /** One producer-wide version counter, independent of topics and ordering keys. */
+  #nextSeq(context: { route: string; topic: string }): number {
+    const current = Number(this.getMetaSync(META_SEQUENCE) ?? '0')
+    if (!Number.isSafeInteger(current) || current < 0 || current >= MAX_SEQUENCE_VALUE) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.SEQUENCE_EXHAUSTED, [
+        `The PubSub change sequence cannot advance past ${String(current)} for route "${context.route}" ` +
+          `(topic "${context.topic}").`,
+        'Start a new feed with a fresh namespace and state before publishing more operations.',
+      ])
     }
 
-    const row = db.get<{ next_seq: number }>(
-      'SELECT next_seq FROM partition_seq WHERE topic = ? AND ordering_key = ?',
-      [topic, orderingKey],
-    )
-    const next = (row?.next_seq ?? 0) + 1
-
-    db.exec(
-      `INSERT INTO partition_seq (topic, ordering_key, next_seq) VALUES (?, ?, ?)
-       ON CONFLICT (topic, ordering_key) DO UPDATE SET next_seq = excluded.next_seq`,
-      [topic, orderingKey, next],
-    )
+    const next = current + 1
+    this.setMetaSync(META_SEQUENCE, String(next))
 
     return next
   }
 
   #enqueue(operation: PendingOperation, seq: number): void {
     this.#db!.exec(
-      `INSERT INTO outbox (topic, op, id, ordering_key, seq, attributes, payload, block_number)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO outbox (route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        operation.route,
         operation.topic,
         operation.op,
-        operation.id ?? null,
+        operation.id,
         operation.orderingKey,
         seq,
         stableAttributes(operation.attributes),
@@ -493,18 +461,17 @@ export class SqlitePubsubState implements PubsubState {
 
   // ─── per-batch transaction (CN-17) ──────────────────────────────────────────
 
-  async commit({ operations, ledger, cursor, finalized, forkCapable, meta }: CommitInput): Promise<void> {
+  async commit({ operations, ledger, cursor, finalized, forkCapable }: CommitInput): Promise<void> {
     const db = this.#db!
 
     db.exec('BEGIN IMMEDIATE')
     try {
       for (const operation of operations) {
-        const seq = this.#nextSeq(operation.topic, operation.orderingKey)
+        const seq = this.#nextSeq(operation)
         this.#enqueue(operation, seq)
 
-        if (operation.id === undefined) continue
-
         if (operation.mode === 'materialized') {
+          this.#assertIdentitySourceStable(operation)
           this.#assertIdentityStable(operation)
           if (!forkCapable) this.#updateMaterializedIdentity(operation)
         }
@@ -515,6 +482,7 @@ export class SqlitePubsubState implements PubsubState {
           // becomes a baseline directly.
           if (forkCapable && operation.mode === 'materialized') {
             this.#saveBaseline({
+              route: operation.route,
               topic: operation.topic,
               ordering_key: operation.orderingKey,
               id: operation.id,
@@ -529,9 +497,10 @@ export class SqlitePubsubState implements PubsubState {
         }
 
         db.exec(
-          `INSERT INTO manifest (topic, ordering_key, seq, block_number, mode, op, id, attributes, payload)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO manifest (route, topic, ordering_key, seq, block_number, mode, op, id, attributes, payload)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
+            operation.route,
             operation.topic,
             operation.orderingKey,
             seq,
@@ -540,9 +509,8 @@ export class SqlitePubsubState implements PubsubState {
             operation.op,
             operation.id,
             stableAttributes(operation.attributes),
-            // An orphaned write-once event has nothing to restore, so its bytes are dead weight;
-            // a materialized revision keeps them verbatim so a fork can republish it.
-            operation.mode === 'materialized' ? asBlob(operation.payload) : null,
+            // DELETE compensations must retain the original row's primary-key columns.
+            asBlob(operation.payload),
           ],
         )
 
@@ -550,8 +518,10 @@ export class SqlitePubsubState implements PubsubState {
           // First writer wins: the inverse is pure, so a later revision would only rewrite the
           // same bytes, and the id must keep the identity it was first published under.
           db.exec(
-            `INSERT OR IGNORE INTO rollback_inverse (topic, ordering_key, id, op, payload) VALUES (?, ?, ?, ?, ?)`,
+            `INSERT OR IGNORE INTO rollback_inverse (route, topic, ordering_key, id, op, payload)
+             VALUES (?, ?, ?, ?, ?, ?)`,
             [
+              operation.route,
               operation.topic,
               operation.orderingKey,
               operation.id,
@@ -560,10 +530,6 @@ export class SqlitePubsubState implements PubsubState {
             ],
           )
         }
-      }
-
-      for (const [key, value] of Object.entries(meta ?? {})) {
-        this.setMetaSync(key, value)
       }
 
       for (const block of ledger) {
@@ -588,6 +554,29 @@ export class SqlitePubsubState implements PubsubState {
   }
 
   /**
+   * A route emits one homogeneous materialized row family. Switching between `_id`, draft `id`,
+   * `deriveId`, and generated ids would make one revision unreachable under the next one's key.
+   */
+  #assertIdentitySourceStable(operation: PendingOperation): void {
+    const key = `${META_MATERIALIZED_ID_SOURCE}${operation.route}`
+    const known = this.getMetaSync(key) as RowIdSource | undefined
+
+    if (known === undefined) {
+      this.setMetaSync(key, operation.idSource)
+      return
+    }
+
+    if (known === operation.idSource) {
+      return
+    }
+
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED, [
+      `Materialized route "${operation.route}" changed its id source from "${known}" to "${operation.idSource}".`,
+      'Use one identity source consistently for every revision and row on a materialized route.',
+    ])
+  }
+
+  /**
    * A materialized row outlives the block that last touched it, so its topic, ordering key and
    * filter attributes are fixed for its lifetime. A subscription filtered on the old attributes
    * never receives a revision carrying new ones; if a fork is possible, its repair also uses the
@@ -595,19 +584,19 @@ export class SqlitePubsubState implements PubsubState {
    */
   #assertIdentityStable(operation: PendingOperation): void {
     const db = this.#db!
-    const id = operation.id!
+    const id = operation.id
 
     const known =
-      db.get<{ topic: string; ordering_key: string; attributes: string }>(
-        'SELECT topic, ordering_key, attributes FROM materialized_identity WHERE id = ?',
+      db.get<{ route: string; topic: string; ordering_key: string; attributes: string }>(
+        'SELECT route, topic, ordering_key, attributes FROM materialized_identity WHERE id = ?',
         [id],
       ) ??
-      db.get<{ topic: string; ordering_key: string; attributes: string }>(
-        'SELECT topic, ordering_key, attributes FROM manifest WHERE id = ? ORDER BY seq DESC LIMIT 1',
+      db.get<{ route: string; topic: string; ordering_key: string; attributes: string }>(
+        'SELECT route, topic, ordering_key, attributes FROM manifest WHERE id = ? ORDER BY seq DESC LIMIT 1',
         [id],
       ) ??
-      db.get<{ topic: string; ordering_key: string; attributes: string }>(
-        'SELECT topic, ordering_key, attributes FROM materialized_baseline WHERE id = ? LIMIT 1',
+      db.get<{ route: string; topic: string; ordering_key: string; attributes: string }>(
+        'SELECT route, topic, ordering_key, attributes FROM materialized_baseline WHERE id = ? LIMIT 1',
         [id],
       )
 
@@ -615,6 +604,7 @@ export class SqlitePubsubState implements PubsubState {
 
     const attributes = stableAttributes(operation.attributes)
     if (
+      known.route === operation.route &&
       known.topic === operation.topic &&
       known.ordering_key === operation.orderingKey &&
       known.attributes === attributes
@@ -623,11 +613,13 @@ export class SqlitePubsubState implements PubsubState {
     }
 
     const moved =
-      known.topic !== operation.topic
-        ? `topic "${known.topic}" → "${operation.topic}"`
-        : known.ordering_key !== operation.orderingKey
-          ? `ordering key "${known.ordering_key}" → "${operation.orderingKey}"`
-          : `attributes ${known.attributes} → ${attributes}`
+      known.route !== operation.route
+        ? `route "${known.route}" → "${operation.route}"`
+        : known.topic !== operation.topic
+          ? `topic "${known.topic}" → "${operation.topic}"`
+          : known.ordering_key !== operation.orderingKey
+            ? `ordering key "${known.ordering_key}" → "${operation.orderingKey}"`
+            : `attributes ${known.attributes} → ${attributes}`
 
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED, [
       `Materialized row "${id}" changed its ${moved} between revisions.`,
@@ -643,7 +635,7 @@ export class SqlitePubsubState implements PubsubState {
    */
   #updateMaterializedIdentity(operation: PendingOperation): void {
     const db = this.#db!
-    const id = operation.id!
+    const id = operation.id
 
     if (operation.op === 'delete') {
       db.exec('DELETE FROM materialized_identity WHERE id = ?', [id])
@@ -651,9 +643,9 @@ export class SqlitePubsubState implements PubsubState {
     }
 
     db.exec(
-      `INSERT OR IGNORE INTO materialized_identity (id, topic, ordering_key, attributes)
-       VALUES (?, ?, ?, ?)`,
-      [id, operation.topic, operation.orderingKey, stableAttributes(operation.attributes)],
+      `INSERT OR IGNORE INTO materialized_identity (id, route, topic, ordering_key, attributes)
+       VALUES (?, ?, ?, ?, ?)`,
+      [id, operation.route, operation.topic, operation.orderingKey, stableAttributes(operation.attributes)],
     )
   }
 
@@ -693,6 +685,7 @@ export class SqlitePubsubState implements PubsubState {
 
   /** The last finalized value of a materialized id — what a fork restores when no revision survives. */
   #saveBaseline(row: {
+    route: string
     topic: string
     ordering_key: string
     id: string
@@ -716,13 +709,13 @@ export class SqlitePubsubState implements PubsubState {
     }
 
     db.exec(
-      `INSERT INTO materialized_baseline (topic, ordering_key, id, op, attributes, payload, block_number)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO materialized_baseline (route, topic, ordering_key, id, op, attributes, payload, block_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (topic, ordering_key, id) DO UPDATE SET
-         op = excluded.op, attributes = excluded.attributes,
+         route = excluded.route, op = excluded.op, attributes = excluded.attributes,
          payload = excluded.payload, block_number = excluded.block_number
        WHERE excluded.block_number >= materialized_baseline.block_number`,
-      [row.topic, row.ordering_key, row.id, row.op, row.attributes, row.payload, row.block_number],
+      [row.route, row.topic, row.ordering_key, row.id, row.op, row.attributes, row.payload, row.block_number],
     )
   }
 
@@ -733,9 +726,10 @@ export class SqlitePubsubState implements PubsubState {
 
     return rows.map((row) => ({
       rowId: row.row_id,
+      route: row.route,
       topic: row.topic,
       op: row.op as PubsubOp,
-      id: row.id ?? undefined,
+      id: row.id,
       orderingKey: row.ordering_key,
       seq: row.seq,
       attributes: JSON.parse(row.attributes) as Record<string, string>,
@@ -857,6 +851,7 @@ export class SqlitePubsubState implements PubsubState {
         if (surviving.mode !== 'materialized') continue
 
         this.#enqueueCompensation({
+          route: surviving.route,
           topic: surviving.topic,
           orderingKey: surviving.ordering_key,
           op: surviving.op as PubsubOp,
@@ -870,17 +865,19 @@ export class SqlitePubsubState implements PubsubState {
       }
 
       const baseline = db.get<{
+        route: string
         op: string
         attributes: string
         payload: Uint8Array | Buffer | null
         block_number: number
       }>(
-        'SELECT op, attributes, payload, block_number FROM materialized_baseline WHERE topic = ? AND ordering_key = ? AND id = ?',
+        'SELECT route, op, attributes, payload, block_number FROM materialized_baseline WHERE topic = ? AND ordering_key = ? AND id = ?',
         [newest.topic, newest.ordering_key, newest.id],
       )
 
       if (baseline) {
         this.#enqueueCompensation({
+          route: baseline.route,
           topic: newest.topic,
           orderingKey: newest.ordering_key,
           op: baseline.op as PubsubOp,
@@ -893,20 +890,21 @@ export class SqlitePubsubState implements PubsubState {
         continue
       }
 
-      const inverse = db.get<{ op: string; payload: Uint8Array | Buffer | null }>(
-        'SELECT op, payload FROM rollback_inverse WHERE topic = ? AND ordering_key = ? AND id = ?',
+      const inverse = db.get<{ route: string; op: string; payload: Uint8Array | Buffer | null }>(
+        'SELECT route, op, payload FROM rollback_inverse WHERE topic = ? AND ordering_key = ? AND id = ?',
         [newest.topic, newest.ordering_key, newest.id],
       )
 
       // Attributes come from the orphaned operation itself, so the compensation passes the
       // same subscription filters as the operation it repairs (RP-44).
       this.#enqueueCompensation({
+        route: inverse?.route ?? newest.route,
         topic: newest.topic,
         orderingKey: newest.ordering_key,
         op: (inverse?.op as PubsubOp) ?? 'delete',
         id: newest.id,
         attributes: newest.attributes,
-        payload: inverse ? asBytes(inverse.payload) : new Uint8Array(),
+        payload: inverse ? asBytes(inverse.payload) : asBytes(newest.payload),
         blockNumber: Math.max(floor, 0),
       })
       enqueued++
@@ -916,6 +914,7 @@ export class SqlitePubsubState implements PubsubState {
   }
 
   #enqueueCompensation(compensation: {
+    route: string
     topic: string
     orderingKey: string
     op: PubsubOp
@@ -924,14 +923,15 @@ export class SqlitePubsubState implements PubsubState {
     payload: Uint8Array
     blockNumber: number
   }): void {
-    // Compensations take the partition's next number: never a reused or rewound one, so a
+    // Compensations take the producer's next number: never a reused or rewound one, so a
     // repair always dominates the operation it repairs.
-    const seq = this.#nextSeq(compensation.topic, compensation.orderingKey)
+    const seq = this.#nextSeq(compensation)
 
     this.#db!.exec(
-      `INSERT INTO outbox (topic, op, id, ordering_key, seq, attributes, payload, block_number)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO outbox (route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        compensation.route,
         compensation.topic,
         compensation.op,
         compensation.id,

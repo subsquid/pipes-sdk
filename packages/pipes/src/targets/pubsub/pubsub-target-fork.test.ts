@@ -8,6 +8,8 @@ import { FakePublisher, cleanupTempState, keyedBlockDecoder, portalBlocks, tempS
 
 type Blocks = { blocks: { number: number; hash: string; timestamp: number }[] }
 
+const body = (message: FakePublisher['published'][number]) => JSON.parse(message.payload)
+
 let portal: MockPortal | undefined
 
 afterEach(async () => {
@@ -119,31 +121,38 @@ describe('pubsubTarget — fork compensation', () => {
   it('deletes an orphaned write-once event, with the attributes of the upsert it repairs', async () => {
     const publisher = await run({ responses: shallowFork, route: eventRoute, to: 3 })
 
-    const deletes = publisher.published.filter((m) => m.attributes['_op'] === 'delete')
+    const deletes = publisher.published.filter((message) => body(message)._CHANGE_TYPE === 'DELETE')
     expect(deletes).toHaveLength(1)
-    expect(deletes[0].attributes['_id']).toBe('test-pipe:blocks:2:0x2:0')
+    expect(body(deletes[0])._id).toBe('test-pipe:blocks:2:0x2:0')
     // The compensation passes the same subscription filters as the operation it repairs.
     expect(deletes[0].attributes['chain']).toBe('mock')
-    expect(deletes[0].payload).toBe('')
+    // BigQuery matches DELETE rows by every declared primary-key column, so the source row is retained.
+    expect(body(deletes[0]).number).toBe(2)
   })
 
   it('publishes compensations before the re-streamed canonical blocks', async () => {
     const publisher = await run({ responses: shallowFork, route: eventRoute, to: 3 })
 
-    expect(publisher.published.map((m) => [m.attributes['_op'], m.attributes['_seq'], m.payload])).toEqual([
-      ['upsert', '1', '{"number":1}'],
-      ['upsert', '2', '{"number":2}'],
-      ['delete', '3', ''],
-      ['upsert', '4', '{"number":2}'],
-      ['upsert', '5', '{"number":3}'],
+    expect(
+      publisher.published.map((message) => [
+        body(message)._CHANGE_TYPE.toLowerCase(),
+        body(message)._CHANGE_SEQUENCE_NUMBER,
+        body(message).number,
+      ]),
+    ).toEqual([
+      ['upsert', '1', 1],
+      ['upsert', '2', 2],
+      ['delete', '3', 2],
+      ['upsert', '4', 2],
+      ['upsert', '5', 3],
     ])
   })
 
   it('leaves the finalized prefix alone — it was never rollbackable', async () => {
     const publisher = await run({ responses: shallowFork, route: eventRoute, to: 3 })
 
-    const blockOne = publisher.published.filter((m) => m.attributes['_id']?.includes(':1:'))
-    expect(blockOne.map((m) => m.attributes['_op'])).toEqual(['upsert'])
+    const blockOne = publisher.published.filter((message) => body(message)._id.includes(':1:'))
+    expect(blockOne.map((message) => body(message)._CHANGE_TYPE)).toEqual(['UPSERT'])
   })
 
   it('folds several orphaned revisions of one id into a single compensation', async () => {
@@ -151,14 +160,14 @@ describe('pubsubTarget — fork compensation', () => {
 
     // Revisions at blocks 2 and 3 are both orphaned; the row is repaired once, not once per
     // revision, and the repair sits between the orphaned suffix and the canonical replay.
-    expect(publisher.published.map((m) => m.payload)).toEqual([
-      '{"branch":"0x1"}',
-      '{"branch":"0x2"}',
-      '{"branch":"0x3"}',
-      '{"branch":"0x1"}',
-      '{"branch":"0x2b"}',
-      '{"branch":"0x3b"}',
-      '{"branch":"0x4b"}',
+    expect(publisher.published.map((message) => body(message).branch)).toEqual([
+      '0x1',
+      '0x2',
+      '0x3',
+      '0x1',
+      '0x2b',
+      '0x3b',
+      '0x4b',
     ])
   })
 
@@ -166,10 +175,10 @@ describe('pubsubTarget — fork compensation', () => {
     const publisher = await run({ responses: deepFork, route: materializedRoute(), to: 4 })
 
     const compensation = publisher.published[3]
-    expect(compensation.attributes['_op']).toBe('upsert')
-    expect(compensation.attributes['_id']).toBe('one-row')
+    expect(body(compensation)._CHANGE_TYPE).toBe('UPSERT')
+    expect(body(compensation)._id).toBe('one-row')
     // Block 1's revision was finalized, so it lives on as the baseline and comes back verbatim.
-    expect(compensation.payload).toBe('{"branch":"0x1"}')
+    expect(body(compensation).branch).toBe('0x1')
   })
 
   it('keeps a route with rollbackWhenMissing delete-free through the fork', async () => {
@@ -185,17 +194,17 @@ describe('pubsubTarget — fork compensation', () => {
       },
     })
 
-    expect(publisher.published.some((m) => m.attributes['_op'] === 'delete')).toBe(false)
+    expect(publisher.published.some((message) => body(message)._CHANGE_TYPE === 'DELETE')).toBe(false)
 
     const compensation = publisher.published[2]
-    expect(compensation.attributes['_id']).toBe('row-2')
-    expect(compensation.payload).toBe('{"branch":null}')
+    expect(body(compensation)._id).toBe('row-2')
+    expect(body(compensation).branch).toBeNull()
   })
 
-  it('never rewinds `_seq`, so a compensation always dominates what it repairs', async () => {
+  it('never rewinds the change sequence number', async () => {
     const publisher = await run({ responses: deepFork, route: eventRoute, to: 4 })
 
-    const sequence = publisher.published.map((m) => Number(m.attributes['_seq']))
+    const sequence = publisher.operations().map((operation) => operation.seq)
     expect(sequence).toEqual([...sequence].sort((a, b) => a - b))
     expect(new Set(sequence).size).toBe(sequence.length)
   })

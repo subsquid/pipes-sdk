@@ -3,18 +3,18 @@ import type { BatchPublishOptions, ClientConfig, FlowControlOptions, PubSub, Top
 import { Logger } from '~/core/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { DeliveryProfile, OutboxRow } from './pubsub-state.js'
 
 export type TopicSetup = 'validate' | 'create' | 'none'
 
 export type PublisherOptions = {
-  delivery: DeliveryProfile
+  messageOrdering: boolean
   batching?: BatchPublishOptions
   flowControl?: FlowControlOptions
   topicSetup: TopicSetup
 }
 
 export type PublishMessage = {
+  rowId: number
   topic: string
   orderingKey: string
   attributes: Record<string, string>
@@ -40,7 +40,7 @@ export interface Publisher {
   /** Called once at start: validate (default), create (dev), or skip topic administration. */
   setup(topics: string[], logger: Logger): Promise<void>
   /** Publish the outbox in the given order, partition by partition. */
-  drain(rows: (OutboxRow & { attributes: Record<string, string> })[]): Promise<DrainResult>
+  drain(rows: PublishMessage[]): Promise<DrainResult>
   close(): Promise<void>
 }
 
@@ -49,7 +49,7 @@ const partitionOf = (row: { topic: string; orderingKey: string }) => JSON.string
 
 /**
  * Groups an outbox drain into partitions, preserving each partition's enqueue order.
- * Under `lww` the ordering key is empty, so a topic is one partition — publishing stays
+ * Without message ordering the key is empty, so a topic is one group — publishing stays
  * concurrent across topics and the client keeps batching within each.
  */
 export function partitionRows<T extends { topic: string; orderingKey: string }>(rows: T[]): T[][] {
@@ -106,14 +106,14 @@ export class GooglePubsubPublisher implements Publisher {
     const topic = this.#client.topic(name, {
       batching: this.#options.batching,
       flowControlOptions: this.#options.flowControl,
-      messageOrdering: this.#options.delivery === 'ordered',
+      messageOrdering: this.#options.messageOrdering,
     })
     this.#topics.set(name, topic)
 
     return topic
   }
 
-  async drain(rows: (OutboxRow & { attributes: Record<string, string> })[]): Promise<DrainResult> {
+  async drain(rows: PublishMessage[]): Promise<DrainResult> {
     const confirmed: number[] = []
     let bytes = 0
     let error: unknown
@@ -143,14 +143,13 @@ export class GooglePubsubPublisher implements Publisher {
           ),
         )
 
-        // Only the confirmed PREFIX may leave the outbox: under `ordered` a failed publish
-        // fails everything behind it on the key, and under either profile a row that follows
-        // a gap must be republished rather than dropped.
+        // Only the confirmed prefix may leave the outbox. Ordered delivery requires this;
+        // without ordering it conservatively republishes any success that followed a failure.
         for (let i = 0; i < settled.length; i++) {
           if (!settled[i].ok) {
             // Ordered publishing latches the key on error: without this every later publish
             // on that partition rejects immediately, including our own republish.
-            if (this.#options.delivery === 'ordered' && partition[i].orderingKey) {
+            if (this.#options.messageOrdering && partition[i].orderingKey) {
               this.#topic(partition[i].topic).resumePublishing(partition[i].orderingKey)
             }
 

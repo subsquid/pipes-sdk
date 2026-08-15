@@ -19,7 +19,7 @@ export class PubsubTargetError extends PipeError {
 export const PUBSUB_ERROR_CODES = {
   /** A configured route names a topic that does not exist (`topicSetup: 'validate'`). */
   TOPIC_NOT_FOUND: 'E2401',
-  /** A user attribute uses a reserved name (`_`-prefixed envelope space, or `goog…`). */
+  /** A user attribute uses a reserved name (`_`-prefixed protocol space, or `goog…`). */
   RESERVED_ATTRIBUTE: 'E2402',
   /** The message exceeds PubSub's per-message attribute count / key / value budget. */
   ATTRIBUTE_BUDGET: 'E2403',
@@ -42,18 +42,18 @@ export const PUBSUB_ERROR_CODES = {
   /**
    * A fork-capable dataset delivered a block without a hash and the route derives ids
    * from it. Bare block numbers repeat after a fork, so the id would alias an orphaned
-   * row with a canonical one — supply an explicit `MessageDraft.id`.
+   * row with a canonical one — supply an explicit `data._id` or `MessageDraft.id`.
    */
   MISSING_BLOCK_HASH: 'E2409',
   /** Another process holds the single-writer lock on the state file. */
   STATE_LOCKED: 'E2410',
   /** The state file was written by an incompatible schema version. */
   STATE_SCHEMA_VERSION: 'E2411',
-  /** A per-draft `orderingKey` was supplied under the `lww` profile, which has no keys. */
+  /** A per-draft `orderingKey` was supplied while message ordering is disabled. */
   ORDERING_KEY_NOT_SUPPORTED: 'E2412',
   /**
-   * A materialized id changed its topic, ordering key or filter attributes between
-   * revisions — a subscription filter would stop receiving the row mid-life.
+   * A materialized route changed its id source, or an id changed its topic, ordering
+   * key, or filter attributes between revisions.
    */
   MATERIALIZED_ID_MOVED: 'E2413',
   /** `windowTopic({ emptyWindows: 'upsert' })` declared without the required `emptyValues`. */
@@ -72,12 +72,12 @@ export const PUBSUB_ERROR_CODES = {
    * another producer's file would hand its consumers this pipe's operations.
    */
   STATE_IDENTITY_MISMATCH: 'E2419',
-  /**
-   * The state file was written under the other delivery profile. The two scope `_seq`
-   * differently (one producer-wide counter vs one dense counter per partition), so reusing
-   * the file would re-issue sequence numbers consumers already hold.
-   */
-  STATE_PROFILE_MISMATCH: 'E2420',
-  /** Namespace or `_uid` configuration changed while reusing recovery state. */
+  /** Wire configuration changed incompatibly while reusing recovery state. */
   STATE_WIRE_CONFIG_MISMATCH: 'E2421',
+  /** A row is not an object, has an invalid `_id`, or owns target-generated CDC fields. */
+  INVALID_CDC_ROW: 'E2422',
+  /** Recovery found an outbox row whose route is no longer configured. */
+  ROUTE_NOT_CONFIGURED: 'E2423',
+  /** The producer-wide BigQuery CDC change sequence cannot advance safely. */
+  SEQUENCE_EXHAUSTED: 'E2424',
 } as const

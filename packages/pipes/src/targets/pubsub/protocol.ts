@@ -1,12 +1,6 @@
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 
 /**
- * Wire-protocol version: the envelope plus the canonical codec (RP-24). Bumped only on
- * breaking changes, so a consumer can branch on it before decoding anything.
- */
-export const WIRE_VERSION = '1'
-
-/**
  * PubSub hard limits, checked before an operation is committed rather than at publish time
  * (IB-28): a message the service will reject must never reach the durable outbox, where it
  * would block that partition on every restart.
@@ -20,8 +14,8 @@ export const PUBSUB_LIMITS = {
   maxOrderingKeyBytes: 1024,
 } as const
 
-/** Upper bound on the decimal `_seq` a `_uid` can carry, for the pre-commit length check. */
-const MAX_SEQ_VALUE = '9'.repeat(20)
+/** Largest sequence this implementation can increment without precision loss. */
+export const MAX_SEQUENCE_VALUE = Number.MAX_SAFE_INTEGER
 
 /**
  * A short topic id is expanded by the client to `projects/{project}/topics/{topic}`. Use the
@@ -29,10 +23,40 @@ const MAX_SEQ_VALUE = '9'.repeat(20)
  */
 const MAX_TOPIC_RESOURCE_BYTES = 'projects/'.length + 30 + '/topics/'.length + 255
 
-export type PubsubOp = 'upsert' | 'delete' | 'heartbeat'
+export type PubsubOp = 'upsert' | 'delete'
 
-/** Attribute names the envelope owns. Everything unprefixed belongs to the user. */
-export const ENVELOPE_ATTRIBUTES = ['_seq', '_id', '_op', '_v', '_uid'] as const
+/** The only protocol-owned PubSub attribute; row metadata lives in `data`. */
+export const PROTOCOL_ATTRIBUTES = ['_uid'] as const
+
+export const CDC_FIELDS = {
+  id: '_id',
+  changeType: '_CHANGE_TYPE',
+  changeSequenceNumber: '_CHANGE_SEQUENCE_NUMBER',
+} as const
+
+type BigQueryCdcMetadata = {
+  [CDC_FIELDS.id]: string
+  [CDC_FIELDS.changeType]: 'UPSERT' | 'DELETE'
+  /**
+   * Producer ordering key, encoded as uppercase hexadecimal because BigQuery compares matching
+   * primary-key changes as unsigned hexadecimal numbers.
+   * @see https://cloud.google.com/bigquery/docs/change-data-capture#manage_custom_ordering
+   */
+  [CDC_FIELDS.changeSequenceNumber]: string
+}
+
+export type BigQueryCdcMessage = Record<string, unknown> & BigQueryCdcMetadata
+
+export type CdcEncoder = (message: BigQueryCdcMessage) => Uint8Array | string
+
+type CdcOperation = {
+  route?: string
+  topic?: string
+  op: PubsubOp
+  id: string
+  seq: number | string
+  payload: Uint8Array
+}
 
 // ─── Canonical payload codec (RP-24) ──────────────────────────────────────────
 
@@ -50,14 +74,48 @@ function hex(bytes: Uint8Array): string {
 function reject(code: string, path: string, message: string): never {
   throw new PubsubTargetError(code, [
     `Canonical codec cannot encode the value at ${path}: ${message}`,
-    'Pass a supported value, or set a custom `encode` on the route to take over the wire format.',
+    'Convert it to a supported value before returning the draft.',
   ])
 }
 
-function isPlainObject(value: object): boolean {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object') {
+    return false
+  }
+
   const proto = Object.getPrototypeOf(value)
 
   return proto === Object.prototype || proto === null
+}
+
+function assertPlainRow(data: unknown): asserts data is Record<string, unknown> {
+  if (!isPlainObject(data)) {
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.INVALID_CDC_ROW, [
+      'A PubSub row must be a plain object so the target can add the BigQuery CDC fields.',
+      'Wrap primitive, array, or binary values in an object field before returning the draft.',
+    ])
+  }
+}
+
+function readPlainRowId(data: Record<string, unknown>): string | undefined {
+  if (!Object.hasOwn(data, CDC_FIELDS.id)) {
+    return undefined
+  }
+
+  const value = data[CDC_FIELDS.id]
+  if (value === undefined || value === null) {
+    return undefined
+  }
+
+  if (typeof value !== 'string' || value.length === 0) {
+    const description = typeof value === 'string' ? 'an empty string' : typeof value
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.INVALID_CDC_ROW, [
+      `A PubSub row set "${CDC_FIELDS.id}" to ${description}; a row id must be a non-empty string.`,
+      `Use a non-empty string "${CDC_FIELDS.id}", or omit it to let the target derive one.`,
+    ])
+  }
+
+  return value
 }
 
 function encodeValue(value: unknown, path: string, seen: Set<object>, out: string[]): void {
@@ -115,17 +173,17 @@ function encodeValue(value: unknown, path: string, seen: Set<object>, out: strin
   if (seen.has(object)) {
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.CODEC_CYCLE, [
       `Canonical codec met a cycle at ${path}.`,
-      'Cyclic values cannot be encoded — break the cycle or set a custom `encode` on the route.',
+      'Cyclic values cannot be encoded — break the cycle before returning the draft.',
     ])
   }
 
   if (object instanceof Date) {
-    const ms = object.getTime()
-    if (!Number.isFinite(ms)) {
+    if (!Number.isFinite(object.getTime())) {
       reject(PUBSUB_ERROR_CODES.CODEC_UNSUPPORTED_VALUE, path, 'Invalid Date has no representation')
     }
-    // Unix seconds: sub-second precision is dropped by design — pass a number for anything finer.
-    out.push(String(Math.floor(ms / 1000)))
+    // RFC 3339, not unix seconds: BigQuery reads a JSON number in a TIMESTAMP column as
+    // microseconds, so the former seconds encoding silently landed timestamps near 1970.
+    out.push(JSON.stringify(object.toISOString()))
     return
   }
 
@@ -216,50 +274,114 @@ export function toBytes(value: Uint8Array | string): Uint8Array {
   return typeof value === 'string' ? encoder.encode(value) : value
 }
 
-export function encodePayload(data: Uint8Array | string | object, encode?: (data: object) => Uint8Array | string) {
-  if (typeof data === 'string' || data instanceof Uint8Array) {
-    return toBytes(data)
-  }
+/** Read an optional user-supplied row id before the row is stored without CDC metadata. */
+export function readRowId(data: unknown): string | undefined {
+  assertPlainRow(data)
 
-  return toBytes(encode ? encode(data as object) : canonicalJson(data))
+  return readPlainRowId(data)
 }
 
-// ─── Envelope (RP-24) ─────────────────────────────────────────────────────────
+/**
+ * Store a route row in a transport-neutral canonical form. The durable state keeps these
+ * bytes without CDC metadata so a fork can rebuild an operation with a fresh sequence number.
+ */
+export function encodeRow(data: unknown): Uint8Array {
+  assertPlainRow(data)
+  readPlainRowId(data)
+
+  for (const field of [CDC_FIELDS.changeType, CDC_FIELDS.changeSequenceNumber]) {
+    if (Object.hasOwn(data, field)) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.INVALID_CDC_ROW, [
+        `A PubSub row set reserved field "${field}".`,
+        'The target owns the change type and change sequence number.',
+      ])
+    }
+  }
+
+  const row = { ...data }
+  delete row[CDC_FIELDS.id]
+
+  return toBytes(canonicalJson(row))
+}
+
+const decoder = new TextDecoder()
+
+function decodeRow(data: Uint8Array): Record<string, unknown> {
+  return JSON.parse(decoder.decode(data)) as Record<string, unknown>
+}
+
+export function changeSequenceNumber(seq: number | string, context: { route?: string; topic?: string } = {}): string {
+  const value = BigInt(seq)
+  if (value < 0n || value > BigInt(MAX_SEQUENCE_VALUE)) {
+    const where = context.route && context.topic ? ` for route "${context.route}" (topic "${context.topic}")` : ''
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.SEQUENCE_EXHAUSTED, [
+      `Sequence ${String(seq)}${where} is outside the supported range 0…${MAX_SEQUENCE_VALUE}.`,
+      'Start a new feed with a fresh namespace and state before publishing more operations.',
+    ])
+  }
+
+  // BigQuery compares this CDC ordering key as an unsigned hexadecimal number:
+  // https://cloud.google.com/bigquery/docs/change-data-capture#manage_custom_ordering
+  return value.toString(16).toUpperCase()
+}
+
+function buildCdcMetadata(operation: CdcOperation): BigQueryCdcMetadata {
+  return {
+    [CDC_FIELDS.id]: operation.id,
+    [CDC_FIELDS.changeType]: operation.op === 'upsert' ? 'UPSERT' : 'DELETE',
+    [CDC_FIELDS.changeSequenceNumber]: changeSequenceNumber(operation.seq, operation),
+  }
+}
+
+export function buildCdcMessage(operation: CdcOperation): BigQueryCdcMessage {
+  const row = decodeRow(operation.payload)
+
+  return {
+    ...row,
+    ...buildCdcMetadata(operation),
+  }
+}
+
+/** Exact canonical JSON byte length without decoding and re-encoding the stored row. */
+export function canonicalCdcMessageBytes(operation: CdcOperation): number {
+  const metadataBytes = utf8Length(canonicalJson(buildCdcMetadata(operation)))
+  const separatorBytes = operation.payload.byteLength > 2 ? 1 : 0
+
+  return operation.payload.byteLength + metadataBytes - 2 + separatorBytes
+}
+
+export function encodeCdcMessage(operation: CdcOperation, encode?: CdcEncoder): Uint8Array {
+  const message = buildCdcMessage(operation)
+
+  return toBytes(encode ? encode(message) : canonicalJson(message))
+}
+
+// ─── Wire attributes ──────────────────────────────────────────────────────────
 
 export type WireOperation = {
   topic: string
   op: PubsubOp
-  /** Absent on `heartbeat` — a heartbeat is not a row. */
-  id?: string
+  id: string
   seq: number
-  /** Empty string under `lww`, where PubSub ordering keys are not used at all. */
+  /** Empty when PubSub message ordering is disabled. */
   orderingKey: string
   attributes: Record<string, string>
   payload: Uint8Array
 }
 
 /**
- * Build the published attribute map: the four-attribute envelope plus the user's own.
- * `_uid` is added only when `publish.uidAttribute` is on, since it costs an attribute slot.
+ * Build business filter attributes plus the optional Dataflow deduplication id. Row identity,
+ * operation, and version are fields in the BigQuery CDC payload.
  */
-export function buildEnvelope(
+export function buildAttributes(
   operation: Omit<WireOperation, 'seq'> & { seq: number | string },
   options: { namespace: string; uidAttribute?: boolean },
 ): Record<string, string> {
-  const attributes: Record<string, string> = {
-    ...operation.attributes,
-    _op: operation.op,
-    _seq: String(operation.seq),
-    _v: WIRE_VERSION,
-  }
-
-  if (operation.id !== undefined) {
-    attributes['_id'] = operation.id
-  }
+  const attributes: Record<string, string> = { ...operation.attributes }
 
   if (options.uidAttribute) {
-    // Fully qualified because neither the producer nor the partition is implied by `_seq`
-    // alone: a fan-in topic runs one counter per producer, a sharded topic one per key.
+    // Fully qualified so independently configured producers cannot collide even if they reuse
+    // a sequence number under different topics or keys.
     attributes['_uid'] = uidValue(operation, options.namespace)
   }
 
@@ -277,27 +399,16 @@ export function uidValue(
 }
 
 /**
- * Everything the service checks that the user-attribute pass does not: the envelope's own
- * values and the ordering key. Run BEFORE the batch commits — PubSub rejects an oversized
- * `_id` or ordering key at publish time, and by then the operation is durable, so its
+ * Everything the service checks that the user-attribute pass does not: `_uid` and the ordering
+ * key. Run BEFORE the batch commits — PubSub rejects an oversized value at publish time, and
+ * by then the operation is durable, so its
  * partition would fail identically on every restart with no way to make progress.
  */
 export function assertWireLimits(
-  message: { id?: string; orderingKey: string; uidNamespace?: string },
+  message: { orderingKey: string; uidNamespace?: string },
   context: { topic: string; route: string },
 ): void {
   const where = `route "${context.route}" (topic "${context.topic}")`
-
-  if (message.id !== undefined) {
-    const bytes = utf8Length(message.id)
-    if (bytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
-      throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
-        `The row id produced by ${where} is ${bytes} bytes; it is published as the \`_id\` attribute, ` +
-          `and PubSub allows ${PUBSUB_LIMITS.maxAttributeValueBytes}.`,
-        'Shorten the id — it is an identity, not a payload.',
-      ])
-    }
-  }
 
   if (message.orderingKey) {
     const bytes = utf8Length(message.orderingKey)
@@ -311,7 +422,10 @@ export function assertWireLimits(
   if (message.uidNamespace !== undefined) {
     // The sequence is assigned in the commit transaction, so bound it by its widest decimal form.
     const bytes = utf8Length(
-      uidValue({ topic: context.topic, orderingKey: message.orderingKey, seq: MAX_SEQ_VALUE }, message.uidNamespace),
+      uidValue(
+        { topic: context.topic, orderingKey: message.orderingKey, seq: MAX_SEQUENCE_VALUE },
+        message.uidNamespace,
+      ),
     )
     if (bytes > PUBSUB_LIMITS.maxAttributeValueBytes) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
@@ -330,17 +444,17 @@ export function assertWireLimits(
  */
 export function validateUserAttributes(
   attributes: Record<string, string> | undefined,
-  context: { topic: string; route: string; envelopeSize: number },
+  context: { topic: string; route: string; protocolAttributes: number },
 ): void {
   if (!attributes) return
 
-  const budget = PUBSUB_LIMITS.maxAttributes - context.envelopeSize
+  const budget = PUBSUB_LIMITS.maxAttributes - context.protocolAttributes
   const names = Object.keys(attributes)
 
   if (names.length > budget) {
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.ATTRIBUTE_BUDGET, [
       `Route "${context.route}" produced ${names.length} user attributes for topic "${context.topic}", ` +
-        `but only ${budget} fit beside the ${context.envelopeSize}-attribute envelope ` +
+        `but only ${budget} fit beside ${context.protocolAttributes} protocol attribute(s) ` +
         `(PubSub allows ${PUBSUB_LIMITS.maxAttributes} per message).`,
     ])
   }
@@ -349,7 +463,7 @@ export function validateUserAttributes(
     if (name.startsWith('_')) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.RESERVED_ATTRIBUTE, [
         `Attribute "${name}" on route "${context.route}" starts with "_", which is the protocol's ` +
-          `reserved namespace (${ENVELOPE_ATTRIBUTES.join(', ')}).`,
+          `reserved namespace (${PROTOCOL_ATTRIBUTES.join(', ')}).`,
         'Business names without the underscore — including `id` and `op` — are free to use.',
       ])
     }
@@ -402,11 +516,11 @@ function varintBytes(value: number): number {
 const lengthDelimitedFieldBytes = (valueBytes: number) => 1 + varintBytes(valueBytes) + valueBytes
 
 function serializedMessageBytes(message: {
-  payload: Uint8Array
+  payloadBytes: number
   attributes: Record<string, string>
   orderingKey: string
 }): number {
-  let bytes = lengthDelimitedFieldBytes(message.payload.byteLength)
+  let bytes = lengthDelimitedFieldBytes(message.payloadBytes)
 
   for (const [key, value] of Object.entries(message.attributes)) {
     const entryBytes = lengthDelimitedFieldBytes(utf8Length(key)) + lengthDelimitedFieldBytes(utf8Length(value))
@@ -422,32 +536,30 @@ function serializedMessageBytes(message: {
 
 /**
  * Bound both PubSub size limits before commit: the data field and the complete single-message
- * PublishRequest, including the wire envelope and protobuf framing. The Node client keeps
+ * PublishRequest, including filter attributes and protobuf framing. The Node client keeps
  * multi-message batches below the service request limit separately.
  */
 export function assertPublishRequestSize(
-  operation: Omit<WireOperation, 'seq'>,
-  options: { namespace: string; uidAttribute?: boolean },
+  message: { topic: string; orderingKey: string; attributes: Record<string, string>; payloadBytes: number },
   context: { route: string },
 ): void {
-  if (operation.payload.byteLength > PUBSUB_LIMITS.maxMessageBytes) {
+  if (message.payloadBytes > PUBSUB_LIMITS.maxMessageBytes) {
     throw new PubsubTargetError(PUBSUB_ERROR_CODES.MESSAGE_TOO_LARGE, [
-      `Route "${context.route}" produced a ${operation.payload.byteLength}-byte payload for topic ` +
-        `"${operation.topic}"; PubSub allows ${PUBSUB_LIMITS.maxMessageBytes} bytes in the data field.`,
+      `Route "${context.route}" produced a ${message.payloadBytes}-byte payload for topic ` +
+        `"${message.topic}"; PubSub allows ${PUBSUB_LIMITS.maxMessageBytes} bytes in the data field.`,
       'Split the row, or compress it with a custom `encode`.',
     ])
   }
 
-  const attributes = buildEnvelope({ ...operation, seq: MAX_SEQ_VALUE }, options)
-  const messageBytes = serializedMessageBytes({ ...operation, attributes })
-  const topicBytes = Math.max(utf8Length(operation.topic), MAX_TOPIC_RESOURCE_BYTES)
+  const messageBytes = serializedMessageBytes(message)
+  const topicBytes = Math.max(utf8Length(message.topic), MAX_TOPIC_RESOURCE_BYTES)
   const requestBytes = lengthDelimitedFieldBytes(topicBytes) + lengthDelimitedFieldBytes(messageBytes)
 
   if (requestBytes <= PUBSUB_LIMITS.maxPublishRequestBytes) return
 
   throw new PubsubTargetError(PUBSUB_ERROR_CODES.MESSAGE_TOO_LARGE, [
     `Route "${context.route}" could produce a ${requestBytes}-byte single-message publish request for topic ` +
-      `"${operation.topic}"; PubSub allows ${PUBSUB_LIMITS.maxPublishRequestBytes} bytes in the complete request.`,
+      `"${message.topic}"; PubSub allows ${PUBSUB_LIMITS.maxPublishRequestBytes} bytes in the complete request.`,
     'Split the row, shorten its attributes, or compress it with a custom `encode`.',
   ])
 }
