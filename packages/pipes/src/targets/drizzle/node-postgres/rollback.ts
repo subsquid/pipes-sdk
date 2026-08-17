@@ -1,8 +1,7 @@
-import { Table, is } from 'drizzle-orm'
+import { Column, Table, is } from 'drizzle-orm'
 import { PrimaryKeyBuilder } from 'drizzle-orm/pg-core'
 
 import {
-  SQD_PRIMARY_COLS,
   getDrizzleForeignKeys,
   getDrizzleTableColumns,
   getDrizzleTableExtraColumns,
@@ -11,14 +10,38 @@ import {
 } from './consts.js'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
 
-export function generateTriggerSQL(from: string, to: string, table: Table) {
+export const SNAPSHOT_BLOCK_COLUMN = '___sqd__block_number'
+export const SNAPSHOT_OPERATION_COLUMN = '___sqd__operation'
+
+const quote = (name: string) => `"${name}"`
+
+/**
+ * Everything the trigger and the rollback statements need about a table, in real Postgres column
+ * names. Resolving names once here keeps every generated statement in database space, so nothing
+ * downstream has to translate between Drizzle property keys and column names.
+ */
+export type SnapshotPlan = {
+  name: string
+  snapshotName: string
+  columns: SnapshotColumn[]
+  primaryKeys: string[]
+}
+
+export type SnapshotColumn = {
+  name: string
+  sqlType: string
+  /** Postgres derives the value and rejects any explicit write, so undo must leave it alone. */
+  generated: boolean
+  /** `GENERATED ALWAYS AS IDENTITY`: insertable only via OVERRIDING SYSTEM VALUE, never updatable. */
+  identityAlways: boolean
+}
+
+export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column) => string): SnapshotPlan {
+  const name = getDrizzleTableName(table)
   const columns = getDrizzleTableColumns(table)
 
-  const colsDDL = Object.entries(columns)
-    .map(([name, col]) => `"${name}" ${col.getSQLType()}`)
-    .join(',\n  ')
+  let primaryCols: Column[] = Object.values(columns).filter((c) => c.primary)
 
-  let primaryCols = Object.values(columns).filter((c) => c.primary)
   if (primaryCols.length === 0) {
     const extraConfigFn = getDrizzleTableExtraConfig(table)
 
@@ -26,11 +49,11 @@ export function generateTriggerSQL(from: string, to: string, table: Table) {
       const extra = extraConfigFn(getDrizzleTableExtraColumns(table))
 
       for (const fn of extra) {
-        if (!is(fn, PrimaryKeyBuilder)) continue
+        if (!is(fn, PrimaryKeyBuilder)) {
+          continue
+        }
 
-        const primaryKeyBuilder = fn as any
-
-        primaryCols = primaryKeyBuilder.columns
+        primaryCols = (fn as any).columns
       }
     }
   }
@@ -38,34 +61,42 @@ export function generateTriggerSQL(from: string, to: string, table: Table) {
   if (primaryCols.length === 0) {
     throw new PostgresTargetError(
       POSTGRES_ERROR_CODES.MISSING_PRIMARY_KEY,
-      `Cannot generate snapshot trigger for table ${from} without primary key columns`,
+      `Cannot generate snapshot trigger for table ${name} without primary key columns`,
     )
   }
 
-  ;(table as any)[SQD_PRIMARY_COLS] = primaryCols
+  return {
+    name,
+    snapshotName: `${name}__snapshots`,
+    columns: Object.values(columns).map((col) => ({
+      name: resolveColumnName(col),
+      sqlType: col.getSQLType(),
+      // Mirrors Drizzle's own insert filter: a 'byDefault' generated column is writable.
+      generated: col.generated !== undefined && col.generated.type !== 'byDefault',
+      identityAlways: col.generatedIdentity?.type === 'always',
+    })),
+    primaryKeys: primaryCols.map(resolveColumnName),
+  }
+}
 
-  const primaryKey = [{ name: '___sqd__block_number' }, ...primaryCols].map((c) => `"${c.name}"`).join(',')
+export function generateTriggerSQL({ name, snapshotName, columns, primaryKeys }: SnapshotPlan) {
+  const colsDDL = columns.map((col) => `${quote(col.name)} ${col.sqlType}`).join(',\n  ')
+  const snapshotKey = [SNAPSHOT_BLOCK_COLUMN, ...primaryKeys].map(quote).join(',')
 
-  const colNames = Object.keys(columns)
-    .map((c) => `"${c}"`)
-    .join(', ')
-  const oldCols = Object.keys(columns)
-    .map((c) => `OLD."${c}"`)
-    .join(', ')
-  const newCols = Object.keys(columns)
-    .map((c) => `NEW."${c}"`)
-    .join(', ')
+  const colNames = columns.map((c) => quote(c.name)).join(', ')
+  const oldCols = columns.map((c) => `OLD.${quote(c.name)}`).join(', ')
+  const newCols = columns.map((c) => `NEW.${quote(c.name)}`).join(', ')
 
   return `
--- ===== SNAPSHOT SETUP FOR ${to} =====
-CREATE TABLE IF NOT EXISTS "${to}" (
+-- ===== SNAPSHOT SETUP FOR ${snapshotName} =====
+CREATE TABLE IF NOT EXISTS "${snapshotName}" (
   ${colsDDL},
-  "___sqd__operation" TEXT NOT NULL,
-  "___sqd__block_number" BIGINT NOT NULL,
-  PRIMARY KEY (${primaryKey})
+  "${SNAPSHOT_OPERATION_COLUMN}" TEXT NOT NULL,
+  "${SNAPSHOT_BLOCK_COLUMN}" BIGINT NOT NULL,
+  PRIMARY KEY (${snapshotKey})
 );
 
-CREATE OR REPLACE FUNCTION maybe_snapshot_${from}() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION maybe_snapshot_${name}() RETURNS trigger AS $$
 DECLARE
   snapshot_enabled BOOLEAN := COALESCE(NULLIF(current_setting('sqd.snapshot_enabled', true), '')::boolean, false);
   block_num BIGINT := COALESCE(NULLIF(current_setting('sqd.snapshot_block_number', true), '')::BIGINT, -1);
@@ -73,15 +104,15 @@ BEGIN
    IF snapshot_enabled = true THEN
      IF TG_OP = 'INSERT' THEN
         -- No prior value exists; record the key under 'INSERT' so undo drops the row.
-        INSERT INTO "${to}" (${colNames}, "___sqd__block_number", "___sqd__operation")
+        INSERT INTO "${snapshotName}" (${colNames}, "${SNAPSHOT_BLOCK_COLUMN}", "${SNAPSHOT_OPERATION_COLUMN}")
         VALUES (${newCols}, block_num, 'INSERT')
-        ON CONFLICT (${primaryKey}) DO NOTHING;
+        ON CONFLICT (${snapshotKey}) DO NOTHING;
      ELSE
         -- UPDATE/DELETE: keep the before-image (OLD) so undo restores the pre-change row.
         -- DO NOTHING preserves the earliest before-image when a row changes twice in one block.
-        INSERT INTO "${to}" (${colNames}, "___sqd__block_number", "___sqd__operation")
+        INSERT INTO "${snapshotName}" (${colNames}, "${SNAPSHOT_BLOCK_COLUMN}", "${SNAPSHOT_OPERATION_COLUMN}")
         VALUES (${oldCols}, block_num, TG_OP)
-        ON CONFLICT (${primaryKey}) DO NOTHING;
+        ON CONFLICT (${snapshotKey}) DO NOTHING;
      END IF;
    END IF;
 
@@ -93,12 +124,67 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS ${from}_snapshot_trigger ON "${from}";
+DROP TRIGGER IF EXISTS ${name}_snapshot_trigger ON "${name}";
 
-CREATE TRIGGER ${from}_snapshot_trigger
-AFTER INSERT OR UPDATE OR DELETE ON "${from}"
-FOR EACH ROW EXECUTE FUNCTION maybe_snapshot_${from}();
+CREATE TRIGGER ${name}_snapshot_trigger
+AFTER INSERT OR UPDATE OR DELETE ON "${name}"
+FOR EACH ROW EXECUTE FUNCTION maybe_snapshot_${name}();
 `
+}
+
+/**
+ * The earliest snapshot per row above the fork point holds that row's before-image at the fork
+ * boundary, so replaying it rewinds the row to its state at the cursor block — even when the prior
+ * value came from a finalized block that was never snapshotted.
+ *
+ * The operation is filtered *after* `DISTINCT ON`, never inside it: a row inserted and then updated
+ * above the fork must still be judged by its first snapshot, otherwise the later UPDATE would
+ * resurrect a row that never existed at the cursor.
+ */
+const earliestSnapshotPerRow = (plan: SnapshotPlan, blockNumber: number, selection: string) => `
+  SELECT DISTINCT ON (${plan.primaryKeys.map(quote).join(', ')}) ${selection}
+  FROM ${quote(plan.snapshotName)}
+  WHERE ${quote(SNAPSHOT_BLOCK_COLUMN)} > ${blockNumber}
+  ORDER BY ${plan.primaryKeys.map(quote).join(', ')}, ${quote(SNAPSHOT_BLOCK_COLUMN)} ASC`
+
+/** A row first seen above the fork ('INSERT') had no prior value, so rewinding drops it. */
+export function generateForkDeleteSQL(plan: SnapshotPlan, blockNumber: number) {
+  const primaryKeys = plan.primaryKeys.map(quote).join(', ')
+  const matchKey = plan.primaryKeys.map((c) => `t.${quote(c)} = s.${quote(c)}`).join(' AND ')
+
+  return `
+DELETE FROM ${quote(plan.name)} t
+USING (${earliestSnapshotPerRow(plan, blockNumber, `${primaryKeys}, ${quote(SNAPSHOT_OPERATION_COLUMN)}`)}
+) s
+WHERE s.${quote(SNAPSHOT_OPERATION_COLUMN)} = 'INSERT' AND ${matchKey};`
+}
+
+/**
+ * Restores the before-image kept for an UPDATE/DELETE. The copy stays inside Postgres on purpose:
+ * pulling rows into JS and writing them back through the ORM would re-encode values that the driver
+ * already returned in wire format.
+ */
+export function generateForkRestoreSQL(plan: SnapshotPlan, blockNumber: number) {
+  const primaryKeys = plan.primaryKeys.map(quote).join(', ')
+
+  const writable = plan.columns.filter((c) => !c.generated)
+  const colNames = writable.map((c) => quote(c.name)).join(', ')
+
+  const updatable = writable.filter((c) => !c.identityAlways && !plan.primaryKeys.includes(c.name))
+  const onConflict = updatable.length
+    ? `DO UPDATE SET ${updatable.map((c) => `${quote(c.name)} = EXCLUDED.${quote(c.name)}`).join(', ')}`
+    : 'DO NOTHING'
+
+  // Restoring an identity key means writing a value the sequence owns, which Postgres allows only here.
+  const overriding = writable.some((c) => c.identityAlways) ? ' OVERRIDING SYSTEM VALUE' : ''
+
+  return `
+INSERT INTO ${quote(plan.name)} (${colNames})${overriding}
+SELECT ${colNames}
+FROM (${earliestSnapshotPerRow(plan, blockNumber, '*')}
+) s
+WHERE s.${quote(SNAPSHOT_OPERATION_COLUMN)} <> 'INSERT'
+ON CONFLICT (${primaryKeys}) ${onConflict};`
 }
 
 /**

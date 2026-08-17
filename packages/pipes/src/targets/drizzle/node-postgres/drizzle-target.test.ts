@@ -1,6 +1,6 @@
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { integer, pgTable, varchar } from 'drizzle-orm/pg-core'
+import { integer, jsonb, numeric, pgTable, timestamp, varchar } from 'drizzle-orm/pg-core'
 import { Pool, QueryResultRow } from 'pg'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -26,6 +26,37 @@ async function getAllFromSyncTable(schema = 'public') {
   const res = await execute(`SELECT * FROM "${schema}"."sync" ORDER BY current_number ASC`)
 
   return res.rows
+}
+
+/** Blocks 1 and 2 written at the finalized head, then block 2 forks and 2a/3a replace it. */
+function forkAtBlockTwo(): MockResponse[] {
+  return [
+    ...[1, 2].map(
+      (block): MockResponse => ({
+        statusCode: 200,
+        data: [{ header: { number: block, hash: `0x${block}`, timestamp: block * 1000 } }],
+        head: { finalized: { number: 1, hash: '0x1' } },
+      }),
+    ),
+    {
+      // Forks block 2; the safe ancestor is the finalized block 1.
+      statusCode: 409,
+      data: {
+        previousBlocks: [
+          { number: 1, hash: '0x1' },
+          { number: 2, hash: '0x2a' },
+        ],
+      },
+    },
+    {
+      statusCode: 200,
+      data: [
+        { header: { number: 2, hash: '0x2a', timestamp: 2000 } },
+        { header: { number: 3, hash: '0x3a', timestamp: 3000 } },
+      ],
+      head: { finalized: { number: 1, hash: '0x1' } },
+    },
+  ]
 }
 
 describe('Drizzle target', () => {
@@ -1079,6 +1110,278 @@ describe('Drizzle target', () => {
           },
         ]
       `)
+    })
+  })
+
+  // The snapshot trigger runs against the base table's real columns (NEW./OLD.), not the Drizzle
+  // property keys. A schema that maps a camelCase key to a snake_case column must still snapshot
+  // and roll back correctly instead of failing with `column "..." does not exist`.
+  describe('snapshot trigger with a camelCase-to-snake_case column mapping', () => {
+    const items = pgTable('items', {
+      itemId: integer('item_id').primaryKey(),
+      itemValue: integer('item_value').notNull(),
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE items (
+          item_id integer PRIMARY KEY,
+          item_value integer NOT NULL
+        );
+      `)
+    })
+
+    it('rolls back to the pre-fork value without a missing-column error', async () => {
+      portal = await mockPortal(forkAtBlockTwo())
+
+      let rollbackCount = 0
+      let rolledBackValue: number | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [items],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(items).values({ itemId: 1, itemValue: 10 })
+              } else if (b.number === 2) {
+                await tx.update(items).set({ itemValue: 20 }).where(eq(items.itemId, 1))
+              }
+            }
+          },
+          onAfterRollback: async ({ tx }) => {
+            rollbackCount++
+
+            // Captured at the rollback point, before block 2's replay overwrites it again.
+            const [row] = await tx.select().from(items).where(eq(items.itemId, 1))
+            rolledBackValue = row?.itemValue
+          },
+        }),
+      )
+
+      expect(rollbackCount).toEqual(1)
+      expect(rolledBackValue).toEqual(10)
+    })
+  })
+
+  // Columns declared without a name keep the JS property key in `col.name`; only the dialect's
+  // casing cache knows the real column, so the trigger has to ask it rather than guess.
+  describe('snapshot trigger under dialect-level casing', () => {
+    const snakeDb = drizzle(pool, { casing: 'snake_case' })
+
+    const items = pgTable('items', {
+      itemId: integer().primaryKey(),
+      itemValue: integer().notNull(),
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE items (
+          item_id integer PRIMARY KEY,
+          item_value integer NOT NULL
+        );
+      `)
+    })
+
+    it('rolls back to the pre-fork value without a missing-column error', async () => {
+      portal = await mockPortal(forkAtBlockTwo())
+
+      let rolledBackValue: number | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db: snakeDb,
+          tables: [items],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(items).values({ itemId: 1, itemValue: 10 })
+              } else if (b.number === 2) {
+                await tx.update(items).set({ itemValue: 20 }).where(eq(items.itemId, 1))
+              }
+            }
+          },
+          onAfterRollback: async ({ tx }) => {
+            const [row] = await tx.select().from(items).where(eq(items.itemId, 1))
+            rolledBackValue = row?.itemValue
+          },
+        }),
+      )
+
+      expect(rolledBackValue).toEqual(10)
+    })
+  })
+
+  // The undo copy runs inside Postgres, so values keep their driver representation. Reading them
+  // into JS and writing them back through the ORM would re-encode what the driver already encoded.
+  describe('rollback of non-scalar column types', () => {
+    const records = pgTable('records', {
+      recordId: integer('record_id').primaryKey(),
+      payload: jsonb('payload').notNull(),
+      amount: numeric('amount').notNull(),
+      seenAt: timestamp('seen_at', { withTimezone: true }).notNull(),
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE records (
+          record_id integer PRIMARY KEY,
+          payload jsonb NOT NULL,
+          amount numeric NOT NULL,
+          seen_at timestamptz NOT NULL
+        );
+      `)
+    })
+
+    it('restores jsonb, numeric and timestamp values unchanged', async () => {
+      portal = await mockPortal(forkAtBlockTwo())
+
+      const payload = { tag: 'v1', nested: { n: 1 } }
+      const seenAt = new Date('2024-01-01T00:00:00.000Z')
+      let restored: typeof records.$inferSelect | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [records],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(records).values({ recordId: 1, payload, amount: '123.456', seenAt })
+              } else if (b.number === 2) {
+                await tx
+                  .update(records)
+                  .set({ payload: { tag: 'v2' }, amount: '999.999', seenAt: new Date('2025-06-06T12:00:00.000Z') })
+                  .where(eq(records.recordId, 1))
+              }
+            }
+          },
+          onAfterRollback: async ({ tx }) => {
+            const [row] = await tx.select().from(records).where(eq(records.recordId, 1))
+            restored = row
+          },
+        }),
+      )
+
+      expect(restored?.payload).toEqual(payload)
+      expect(restored?.amount).toEqual('123.456')
+      expect(restored?.seenAt?.toISOString()).toEqual(seenAt.toISOString())
+    })
+  })
+
+  // Postgres owns the value of these columns and rejects an explicit write, so undo has to leave a
+  // stored generated column alone and claim an identity key through OVERRIDING SYSTEM VALUE.
+  describe('rollback of columns Postgres writes itself', () => {
+    const generated = pgTable('gen', {
+      id: integer('id').primaryKey(),
+      amount: integer('amount').notNull(),
+      doubled: integer('doubled').generatedAlwaysAs(sql`"amount" * 2`),
+    })
+
+    const identity = pgTable('ident', {
+      id: integer('id').generatedAlwaysAsIdentity().primaryKey(),
+      amount: integer('amount').notNull(),
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE gen (
+          id integer PRIMARY KEY,
+          amount integer NOT NULL,
+          doubled integer GENERATED ALWAYS AS (amount * 2) STORED
+        );
+        CREATE TABLE ident (
+          id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          amount integer NOT NULL
+        );
+      `)
+    })
+
+    it('rolls back a stored generated column by letting Postgres recompute it', async () => {
+      portal = await mockPortal(forkAtBlockTwo())
+
+      let restored: typeof generated.$inferSelect | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [generated],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(generated).values({ id: 1, amount: 10 })
+              } else if (b.number === 2) {
+                await tx.update(generated).set({ amount: 20 }).where(eq(generated.id, 1))
+              }
+            }
+          },
+          onAfterRollback: async ({ tx }) => {
+            const [row] = await tx.select().from(generated).where(eq(generated.id, 1))
+            restored = row
+          },
+        }),
+      )
+
+      expect(restored?.amount).toEqual(10)
+      expect(restored?.doubled).toEqual(20)
+    })
+
+    it('rolls back a GENERATED ALWAYS AS IDENTITY key', async () => {
+      portal = await mockPortal(forkAtBlockTwo())
+
+      let restored: typeof identity.$inferSelect | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [identity],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(identity).values({ amount: 10 })
+              } else if (b.number === 2) {
+                await tx.update(identity).set({ amount: 20 }).where(eq(identity.id, 1))
+              }
+            }
+          },
+          onAfterRollback: async ({ tx }) => {
+            const [row] = await tx.select().from(identity).where(eq(identity.id, 1))
+            restored = row
+          },
+        }),
+      )
+
+      expect(restored?.id).toEqual(1)
+      expect(restored?.amount).toEqual(10)
     })
   })
 })

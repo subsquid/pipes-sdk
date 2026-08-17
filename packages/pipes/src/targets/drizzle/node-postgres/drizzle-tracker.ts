@@ -1,82 +1,62 @@
-import { Table, and, eq } from 'drizzle-orm'
-import { PgColumn } from 'drizzle-orm/pg-core'
+import { Column, Table } from 'drizzle-orm'
 
 import { BlockCursor } from '~/core/index.js'
 
-import { SQD_PRIMARY_COLS, getDrizzleTableName } from './consts.js'
+import { createColumnNameResolver, getDrizzleTableName } from './consts.js'
 import { Transaction } from './drizzle-target.js'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
-import { generateTriggerSQL } from './rollback.js'
+import {
+  SNAPSHOT_BLOCK_COLUMN,
+  SnapshotPlan,
+  buildSnapshotPlan,
+  generateForkDeleteSQL,
+  generateForkRestoreSQL,
+  generateTriggerSQL,
+} from './rollback.js'
 
 /** @internal */
 export class DrizzleTracker {
-  #knownTables = new Map<Table, boolean>()
+  // Insertion order is the FK-safe delete order (children → parents); reversed, it is the insert order.
+  #plans = new Map<Table, SnapshotPlan>()
+  readonly #resolveColumnName: (col: Column) => string
+
+  constructor(db: unknown) {
+    this.#resolveColumnName = createColumnNameResolver(db)
+  }
 
   add(table: Table) {
-    if (this.#knownTables.has(table)) return
+    if (this.#plans.has(table)) {
+      return
+    }
 
-    const from = getDrizzleTableName(table)
-    const to = `${from}__snapshots`
+    const plan = buildSnapshotPlan(table, this.#resolveColumnName)
 
-    const sql = generateTriggerSQL(from, to, table)
+    this.#plans.set(table, plan)
 
-    this.#knownTables.set(table, true)
-
-    return sql
+    return generateTriggerSQL(plan)
   }
 
   async cleanup(tx: Transaction, blockNumber: number) {
-    for (const table of this.#knownTables.keys()) {
-      const from = getDrizzleTableName(table)
-      const to = `${from}__snapshots`
-      await tx.execute<
-        {
-          ___sqd__block_number: number
-          ___sqd__operation: 'INSERT' | 'UPDATE' | 'DELETE'
-        } & Record<string, unknown>
-      >(`DELETE FROM "${to}" WHERE "___sqd__block_number" <= ${blockNumber};`)
+    for (const plan of this.#plans.values()) {
+      await tx.execute(`DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" <= ${blockNumber};`)
     }
   }
 
   async fork(tx: Transaction, cursor: BlockCursor) {
-    for (const table of this.#knownTables.keys()) {
-      const snapshots = `${getDrizzleTableName(table)}__snapshots`
-      const primaryCols: PgColumn[] = (table as any)[SQD_PRIMARY_COLS]
-      const pkList = primaryCols.map((col) => `"${col.name}"`).join(', ')
+    const plans = [...this.#plans.values()]
 
-      // The earliest snapshot per row above the fork point holds that row's before-image at the
-      // fork boundary, so replaying it rewinds the row to its state at the cursor block — even when
-      // the prior value came from a finalized block that was never snapshotted. A row first seen
-      // above the fork ('INSERT') had no prior value and is dropped.
-      const res = await tx.execute<
-        {
-          ___sqd__block_number: number
-          ___sqd__operation: 'INSERT' | 'UPDATE' | 'DELETE'
-        } & Record<string, unknown>
-      >(
-        `SELECT DISTINCT ON (${pkList}) *
-         FROM "${snapshots}"
-         WHERE "___sqd__block_number" > ${cursor.number}
-         ORDER BY ${pkList}, "___sqd__block_number" ASC`,
-      )
+    for (const plan of plans) {
+      await tx.execute(generateForkDeleteSQL(plan, cursor.number))
+    }
 
-      for (const row of res.rows) {
-        const { ___sqd__block_number, ___sqd__operation, ...snapshot } = row
+    // Reversed: a restored child row needs its parent back first.
+    for (const plan of plans.slice().reverse()) {
+      await tx.execute(generateForkRestoreSQL(plan, cursor.number))
+    }
 
-        const filter = and(...primaryCols.map((col) => eq(col, snapshot[col.name])))
-
-        if (___sqd__operation === 'INSERT') {
-          await tx.delete(table).where(filter)
-        } else {
-          await tx.insert(table).values(snapshot).onConflictDoUpdate({
-            target: primaryCols,
-            set: snapshot,
-          })
-        }
-      }
-
-      // Drop the consumed snapshots; those at or below the cursor stay for a later deeper rollback.
-      await tx.execute(`DELETE FROM "${snapshots}" WHERE "___sqd__block_number" > ${cursor.number}`)
+    // Drop the consumed snapshots; those at or below the cursor stay for a later deeper rollback.
+    for (const plan of plans) {
+      await tx.execute(`DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" > ${cursor.number}`)
     }
   }
 
@@ -85,7 +65,7 @@ export class DrizzleTracker {
       const orig = tx[method].bind(tx)
 
       tx[method] = (table: Table, ...args: any[]) => {
-        if (!this.#knownTables.has(table)) {
+        if (!this.#plans.has(table)) {
           throw new PostgresTargetError(
             POSTGRES_ERROR_CODES.UNTRACKED_TABLE,
             `Table "${getDrizzleTableName(table)}" is not tracked for rollbacks. Make sure to include it in the "tables" array when creating the target.`,

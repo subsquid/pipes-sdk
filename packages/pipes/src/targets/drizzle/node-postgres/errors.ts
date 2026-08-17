@@ -29,4 +29,6 @@ export const POSTGRES_ERROR_CODES = {
   MISSING_PRIMARY_KEY: 'E2105',
   /** Foreign keys form a cycle, so a safe delete order cannot be determined. */
   CIRCULAR_DEPENDENCY: 'E2106',
+  /** A column's real database name could not be resolved from the Drizzle dialect. */
+  COLUMN_NAME_UNRESOLVED: 'E2107',
 } as const
