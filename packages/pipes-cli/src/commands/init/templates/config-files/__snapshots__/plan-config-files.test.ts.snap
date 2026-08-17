@@ -16,7 +16,7 @@ exports[`planConfigFiles > package.json snapshots per (packageManager, target) >
     "@clickhouse/client": "^1.14.0",
     "@subsquid/evm-abi": "0.3.1",
     "@subsquid/evm-codec": "0.3.0",
-    "@subsquid/pipes": "^1.0.0",
+    "@subsquid/pipes": "^1.0.0-beta.1",
     "better-sqlite3": "^12.4.5",
     "dotenv": "^16.4.5",
     "zod": "^4.3.4"
@@ -47,7 +47,7 @@ exports[`planConfigFiles > package.json snapshots per (packageManager, target) >
     "@clickhouse/client": "^1.14.0",
     "@subsquid/evm-abi": "0.3.1",
     "@subsquid/evm-codec": "0.3.0",
-    "@subsquid/pipes": "^1.0.0",
+    "@subsquid/pipes": "^1.0.0-beta.1",
     "better-sqlite3": "^12.4.5",
     "dotenv": "^16.4.5",
     "zod": "^4.3.4"
@@ -80,7 +80,7 @@ exports[`planConfigFiles > package.json snapshots per (packageManager, target) >
   "dependencies": {
     "@subsquid/evm-abi": "0.3.1",
     "@subsquid/evm-codec": "0.3.0",
-    "@subsquid/pipes": "^1.0.0",
+    "@subsquid/pipes": "^1.0.0-beta.1",
     "better-sqlite3": "^12.4.5",
     "dotenv": "^16.4.5",
     "drizzle-kit": "^0.30.0",
