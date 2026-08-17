@@ -60,7 +60,7 @@ export function drizzleTarget<T>({
   onBeforeRollback?: (ctx: { tx: Transaction; cursor: BlockCursor }) => Promise<unknown> | unknown
   onAfterRollback?: (ctx: { tx: Transaction; cursor: BlockCursor }) => Promise<unknown> | unknown
 }) {
-  const tracker = new DrizzleTracker()
+  const tracker = new DrizzleTracker(db)
   const client = (db as any).$client
   if (!client) {
     throw new PostgresTargetError(

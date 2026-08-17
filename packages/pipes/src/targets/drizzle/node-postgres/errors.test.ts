@@ -3,10 +3,11 @@ import { describe, expect, it } from 'vitest'
 
 import { PipeError } from '~/core/errors.js'
 
+import { createColumnNameResolver } from './consts.js'
 import { drizzleTarget } from './drizzle-target.js'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
 import { PostgresState } from './postgres-state.js'
-import { generateTriggerSQL } from './rollback.js'
+import { buildSnapshotPlan } from './rollback.js'
 
 describe('PostgresTargetError', () => {
   it('carries the given E21xx code and a docs link', () => {
@@ -38,14 +39,25 @@ describe('PostgresTargetError', () => {
     }
   })
 
-  it('generateTriggerSQL on a table without a primary key throws MISSING_PRIMARY_KEY (E2105)', () => {
+  it('buildSnapshotPlan on a table without a primary key throws MISSING_PRIMARY_KEY (E2105)', () => {
     const table = pgTable('t', { a: integer('a') })
     try {
-      generateTriggerSQL('t', 'snap', table)
+      buildSnapshotPlan(table, (col) => col.name)
       throw new Error('expected throw')
     } catch (e) {
       expect(e).toBeInstanceOf(PostgresTargetError)
       expect((e as PostgresTargetError).code).toBe(POSTGRES_ERROR_CODES.MISSING_PRIMARY_KEY)
+    }
+  })
+
+  it('an unnamed column with no dialect to resolve it throws COLUMN_NAME_UNRESOLVED (E2107)', () => {
+    const table = pgTable('t', { someKey: integer().primaryKey() })
+    try {
+      buildSnapshotPlan(table, createColumnNameResolver({}))
+      throw new Error('expected throw')
+    } catch (e) {
+      expect(e).toBeInstanceOf(PostgresTargetError)
+      expect((e as PostgresTargetError).code).toBe(POSTGRES_ERROR_CODES.COLUMN_NAME_UNRESOLVED)
     }
   })
 })
