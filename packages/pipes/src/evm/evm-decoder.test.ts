@@ -18,8 +18,8 @@ import {
   IndexedParamsInput,
   evmEventDecoder,
 } from './evm-decoder.js'
-import { evmPortalStream } from './evm-portal-source.js'
 import { EvmQueryBuilder } from './evm-query-builder.js'
+import { evmPortalStream } from './evm-stream.js'
 import { contractFactory } from './factory.js'
 import { contractFactorySqliteStore } from './factory-adapters/sqlite.js'
 

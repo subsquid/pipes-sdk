@@ -6,7 +6,7 @@ export * from './evm-decoder.js'
 // consumer that references them needs the peer installed for typechecking; Portal-only usage that never
 // touches them does not.
 export * from './evm-fallback.js'
-export * from './evm-portal-source.js'
 export * from './evm-query-builder.js'
 export * from './evm-rpc-latency-watcher.js'
+export * from './evm-stream.js'
 export * from './factory.js'

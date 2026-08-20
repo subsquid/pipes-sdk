@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import { FieldSelection } from '~/portal-client/query/evm.js'
 
-import { augmentFields, dropEmptyBlocks, selectionGrew } from './project.js'
+import { augmentFields, dropEmptyBlocks } from './project.js'
 
 /**
  * `augmentFields` adds the fields a request's where-clauses must read to be *evaluated* client-side
- * (the RPC source filters full blocks locally), even when those fields aren't selected for output;
- * `selectionGrew` reports whether that augmentation added anything (so the caller can project back
- * down to the user's original selection). Mirrors the Squid evm-rpc-stream augment tests.
+ * (the RPC client filters full blocks locally), even when those fields aren't selected for output —
+ * the downstream cast then prunes the wire output back to the user's selection. Mirrors the Squid
+ * evm-rpc-stream augment tests.
  */
 
 describe('augmentFields', () => {
@@ -37,21 +37,13 @@ describe('augmentFields', () => {
   it('does not add a field that is already selected', () => {
     const fields: FieldSelection = { log: { address: true } }
     const augmented = augmentFields(fields, { logs: [{ address: ['0xaaa'] }] })
-    expect(selectionGrew(augmented, fields)).toBe(false)
+    expect(augmented.log).toEqual({ address: true })
   })
 
-  it('does not grow when no where-clause references an unselected field', () => {
+  it('adds nothing when no where-clause references an unselected field', () => {
     const fields: FieldSelection = { log: { data: true } }
     const augmented = augmentFields(fields, { logs: [{}] }) // empty where — nothing to add
-    expect(selectionGrew(augmented, fields)).toBe(false)
-  })
-})
-
-describe('selectionGrew', () => {
-  it('is true when augmentation added a field', () => {
-    const fields: FieldSelection = { log: { topics: true } }
-    const augmented = augmentFields(fields, { logs: [{ address: ['0xaaa'] }] })
-    expect(selectionGrew(augmented, fields)).toBe(true)
+    expect(augmented.log).toEqual({ data: true })
   })
 })
 

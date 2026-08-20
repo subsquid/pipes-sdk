@@ -1,8 +1,7 @@
-import { isForkException } from '~/portal-client/index.js'
+import { BlockStreamClient, PortalQuery, isForkException } from '~/portal-client/index.js'
 
 import { safeReturn, withTimeout } from './fallback-async.js'
 import { SourceErrorInfo, capabilityFailure, classifyError } from './fallback-diagnostics.js'
-import { FallbackUnderlyingSource } from './fallback-source.js'
 import { BlockCursor } from './types.js'
 
 export interface CapabilityProbeOptions {
@@ -19,11 +18,10 @@ export interface ProbeResult {
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /**
- * Build a generic `probeCapability` for any {@link FallbackUnderlyingSource}. It pulls a single
- * batch of *exactly the data the source is configured to serve* — the query (fields + request) is
- * baked into the source, so one `read(cursor)` batch re-exercises the whole pipeline (logs, traces,
- * state diffs) — starting just past the indexing frontier, and reports whether the source could
- * serve it.
+ * Build a generic capability probe for any {@link BlockStreamClient}. It pulls a single-block
+ * slice of *exactly the data the stream is configured to serve* — the full query (fields +
+ * request) re-exercises the whole pipeline (logs, traces, state diffs) — anchored just past the
+ * indexing frontier, and reports whether the source could serve it.
  *
  * This catches the reachable-but-incapable failures liveness alone misses: an RPC node with the
  * trace/`debug_` API disabled or pruned state at that depth fails the slice, as does a Portal that
@@ -33,20 +31,23 @@ const DEFAULT_TIMEOUT_MS = 30_000
  *
  * Capable iff the slice yields a batch or the stream ends without a non-fork error. A
  * `ForkException` counts as capable — the source served data and detected a reorg, a chain event
- * rather than an inability to serve. Any other error, or exceeding `timeoutMs`, reports not-capable,
- * with the cause (classified for logs + metrics) attached.
- *
- * (Unlike the Squid probe, which requests a one-block `{from, to}` slice, the Pipes `read` contract
- * is unbounded — so the probe takes only the first batch and closes the stream.)
+ * rather than an inability to serve. Any other error, or exceeding `timeoutMs`, reports
+ * not-capable, with the cause (classified for logs + metrics) attached.
  */
-export function makeCapabilityProbe<T>(
-  source: FallbackUnderlyingSource<T>,
+export function makeCapabilityProbe(
+  client: BlockStreamClient,
+  query: PortalQuery,
   options: CapabilityProbeOptions = {},
 ): (atCursor?: BlockCursor) => Promise<ProbeResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
   return async (atCursor?: BlockCursor): Promise<ProbeResult> => {
-    const iterator = source.read(atCursor)[Symbol.asyncIterator]()
+    const from = atCursor ? atCursor.number + 1 : query.fromBlock
+    // A one-block bounded slice; `parentBlockHash` is deliberately dropped — fork detection is the
+    // active stream's job, and a probe faulting a 409 would misreport a reorg as incapability.
+    const probeQuery = { ...query, fromBlock: from, toBlock: from, parentBlockHash: undefined }
+
+    const iterator = client.getStream(probeQuery as never)[Symbol.asyncIterator]()
     try {
       // One batch (or a clean stream end) is enough: it proves the source served the slice. The
       // timeout rejects with a ready-made cause (a `SourceErrorInfo`, not a bare Error).

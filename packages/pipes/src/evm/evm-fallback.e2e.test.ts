@@ -1,10 +1,9 @@
-import { EvmRpcClient, Rpc } from '@subsquid/evm-rpc'
 import { describe, expect, it } from 'vitest'
 
-import { BlockCursor, FallbackSource, FallbackUnderlyingSource, PortalBatch } from '~/core/index.js'
+import { BlockStreamClient, StreamData } from '~/portal-client/index.js'
 import { FieldSelection } from '~/portal-client/query/evm.js'
 
-import { createEvmFallback, evmPortalReadSource } from './evm-fallback.js'
+import { createEvmFallbackClient } from './evm-fallback.js'
 
 /**
  * Live end-to-end test: drive a fallback built from a real Portal source and a real RPC source,
@@ -23,57 +22,45 @@ const FIELDS = {
   log: { address: true, topics: true },
 } satisfies FieldSelection
 
-const REQUEST = { transactions: [{}], logs: [{}] }
-
-function rpc(): Rpc {
-  return new Rpc({ client: new EvmRpcClient({ url: RPC_URL, capacity: 5 }) })
+const QUERY: any = {
+  type: 'evm',
+  fields: FIELDS,
+  fromBlock: FROM,
+  toBlock: TO,
+  transactions: [{}],
+  logs: [{}],
 }
 
-async function streamNumbers(source: { read(c?: BlockCursor): AsyncIterable<PortalBatch<any[]>> }): Promise<number[]> {
+async function streamNumbers(client: BlockStreamClient): Promise<number[]> {
   const out: number[] = []
-  for await (const batch of source.read()) {
-    out.push(...batch.data.map((b: any) => b.header.number))
+  for await (const batch of client.getStream(QUERY, { finalized: true }) as AsyncIterable<StreamData<any>>) {
+    out.push(...batch.blocks.map((b: any) => b.header.number))
   }
   return out
 }
 
 describe.skipIf(!ENABLED)('EVM fallback — live', () => {
   it('streams a range through the primary (Portal)', async () => {
-    const fb = createEvmFallback({
-      fields: FIELDS,
-      request: REQUEST,
-      from: FROM,
-      to: TO,
-      sources: [
-        { type: 'portal', portal: PORTAL_URL },
-        { type: 'rpc', rpc: rpc() },
-      ],
+    const fb = createEvmFallbackClient([PORTAL_URL, { type: 'rpc', name: 'rpc-standby', url: RPC_URL, capacity: 5 }], {
+      finalized: true,
     })
 
     expect(await streamNumbers(fb)).toEqual([FROM, FROM + 1, TO])
   }, 120_000)
 
   it('fails over to the next source when the primary is down', async () => {
-    const broken: FallbackUnderlyingSource<any[]> = {
-      name: 'broken',
-      // biome-ignore lint/correctness/useYield: intentionally throwing
-      read: async function* () {
-        throw new Error('primary down')
-      },
-    }
-    const portal = evmPortalReadSource({
-      portal: PORTAL_URL,
-      fields: FIELDS,
-      request: REQUEST,
-      from: FROM,
-      to: TO,
-    })
-
-    const fb = new FallbackSource<any[]>([broken, portal])
+    const fb = createEvmFallbackClient(
+      [
+        // A portal URL that resolves but serves no such dataset — liveness dies, stream errors.
+        { url: 'https://portal.sqd.dev/datasets/definitely-not-a-dataset', name: 'broken' },
+        PORTAL_URL,
+      ],
+      { finalized: true },
+    )
 
     expect(fb.activeIndex).toBeUndefined()
     expect(await streamNumbers(fb)).toEqual([FROM, FROM + 1, TO])
-    expect(fb.activeIndex).toBe(1) // Portal took over
+    expect(fb.activeIndex).toBe(1) // the good Portal took over
     expect(fb.switchCount).toBeGreaterThanOrEqual(1)
   }, 120_000)
 })

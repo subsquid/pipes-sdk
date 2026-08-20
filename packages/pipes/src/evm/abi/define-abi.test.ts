@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vites
 import { MockPortal, MockResponse, mockPortal, readAll } from '~/testing/index.js'
 
 import { evmEventDecoder } from '../evm-decoder.js'
-import { evmPortalStream } from '../evm-portal-source.js'
+import { evmPortalStream } from '../evm-stream.js'
 import { commonAbis } from './common.js'
 import { defineAbi } from './define-abi.js'
 

@@ -4,11 +4,12 @@ import * as evmBarrel from './browser.js'
 import { translateMissingRpcPeer } from './evm-fallback.js'
 
 describe('public ./evm exports', () => {
-  it('surfaces the RPC-fallback source through the evm barrel (reachable by consumers)', () => {
+  it('surfaces the fallback + facade through the evm barrel (reachable by consumers)', () => {
     // Guards the whole feature being unreachable — the barrel must re-export it, and doing so must
     // not eagerly pull the optional evm-rpc peers (the import chain references them as types only).
-    expect(typeof evmBarrel.createEvmFallback).toBe('function')
-    expect(typeof evmBarrel.evmPortalReadSource).toBe('function')
+    expect(typeof evmBarrel.createEvmFallbackClient).toBe('function')
+    expect(typeof evmBarrel.evmStream).toBe('function')
+    expect(evmBarrel.evmPortalStream).toBe(evmBarrel.evmStream) // deprecated alias preserved
   })
 })
 

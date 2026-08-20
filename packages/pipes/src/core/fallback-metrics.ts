@@ -1,4 +1,4 @@
-import { FallbackMetrics } from './fallback-source.js'
+import { FallbackMetrics } from './fallback-client.js'
 import { Metrics } from './metrics-server.js'
 
 export interface FallbackMetricsSource {
@@ -8,7 +8,7 @@ export interface FallbackMetricsSource {
 const HEALTH_STATES = ['healthy', 'unhealthy', 'unknown'] as const
 
 /**
- * Register pull-based gauges that export a {@link FallbackSource}'s observable state on a metrics
+ * Register pull-based gauges that export a {@link FallbackClient}'s observable state on a metrics
  * surface (§4 — "unhealthiness reflected in metrics"): which source is active, each source's
  * trinary health, and the cumulative switch count. The gauges read `source.metrics()` on every
  * scrape via the prom-style `collect` callback, so there is nothing to push.

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
-import { evmPortalStream } from '~/evm/evm-portal-source.js'
+import { evmPortalStream } from '~/evm/evm-stream.js'
 import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
 import { MockPortal, finalizedMockPortal } from '~/testing/index.js'
 
