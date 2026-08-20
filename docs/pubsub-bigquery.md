@@ -256,13 +256,56 @@ per path, and watch the `sqd_pubsub_cold_start` gauge.
 **Schema changes must be additive and nullable.** Dropping or retyping a column, or adding
 a `REQUIRED` one, breaks subscribers whose tables no longer match.
 
-**No finality signal.** The feed converges after a chain reorg — a fork publishes a
-`DELETE` or a restoring `UPSERT` with a higher sequence number — but nothing on the wire
-says when a row became reorg-proof. "Act only on finalized values" is not expressible
-here.
+**No finality marker on a CDC row.** The feed converges after a chain reorg — a fork
+publishes a `DELETE` or a restoring `UPSERT` with a higher sequence number — but nothing in
+the CDC envelope says when a row became reorg-proof. "Act only on finalized values" is not
+expressible on a `topics` route. A signal route can carry that announcement on its own
+topic (see below); a BigQuery subscription still cannot act on it.
 
 **Quotas.** 10 000 attached subscriptions per topic, and a per-region cap on BigQuery
 subscription throughput.
+
+## Signal routes are not for BigQuery
+
+Alongside `topics`, the target accepts `signals`: routes that publish an application-defined
+payload with no CDC envelope — no `_id`, no `_CHANGE_TYPE`, no `_CHANGE_SEQUENCE_NUMBER`.
+They exist for consumers that fold their own state rather than mirror a table: raw event
+streams, watermark and finality announcements, control messages.
+
+**Do not attach a BigQuery subscription to a signal topic.** Every message would fail schema
+validation and land in the dead-letter topic. Signal topics take ordinary pull or push
+subscriptions.
+
+The fork story also differs. A signal has no row identity, so it cannot be repaired per
+message. Each route declares how it copes: `fork: { mode: 'boundary', map }` publishes one
+boundary message per fork — carrying a durable epoch counter and the block the feed rewound
+to — ahead of every CDC compensation, and the consumer unwinds its own state from that.
+`fork: { mode: 'finalized-only' }` promises the route never publishes anything a fork could
+orphan, and that promise is enforced rather than assumed.
+
+`docs/examples/evm/19.pubsub-signals.example.ts` is a runnable example.
+
+## Producer metrics
+
+Exported by the pipe's metrics server. Alert on the first two.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `sqd_pubsub_block_to_commit_lag_seconds` | histogram | Seconds from the committed block's chain timestamp to the Pub/Sub ack. End-to-end freshness, including block production and chain-to-portal propagation — a service level, not an attribution. Empty below the go-live block, or when the pipe's query selects no block `timestamp`. |
+| `sqd_pubsub_portal_to_commit_lag_seconds` | histogram | Seconds from the portal stamping the batch to the Pub/Sub ack. In-process latency, covering stream-buffer dwell and the pipe's transformers as well as this target. |
+| `sqd_pubsub_operations_total` | counter | Operations enqueued, by `topic`, `kind` (`cdc`/`signal`) and `operation` (`upsert`/`delete`, or `data`/`fork`). |
+| `sqd_pubsub_publish_duration_seconds` | histogram | Wallclock of one outbox drain. Split a `portal_to_commit` regression against this. |
+| `sqd_pubsub_published_bytes_total` | counter | Payload bytes confirmed published, attributes excluded. |
+| `sqd_pubsub_outbox_depth` | gauge | Rows queued but unconfirmed. Sustained growth means the publisher is not keeping up. |
+| `sqd_pubsub_compensations_per_fork` | histogram | Compensating operations per resolved fork — fork blast radius. Signals are excluded; they compensate nothing. |
+| `sqd_pubsub_manifest_rows` | gauge | Rows in the rollback manifest — the unfinalized window the target can still repair. |
+| `sqd_pubsub_publish_saturation_seconds` | counter | Message ordering only: seconds spent publishing a partition at ≥80% of Pub/Sub's 1 MB/s per-ordering-key cap. Growth means the headroom is eroding. |
+| `sqd_pubsub_cold_start` | gauge | 1 when the state file started empty. See the lost-sequencer limit above. |
+
+Both lag histograms are observed once per batch above the go-live block, including a batch
+whose routes mapped nothing: they measure how current the destination is, and a route that
+legitimately publishes nothing for a stretch is still current. Gating them on a non-empty
+publish would make a sparse feed's freshness series go silent and read as a dead pipe.
 
 ## When a shared dataset is the better answer
 

@@ -18,16 +18,21 @@ export {
 export {
   type CommitInput,
   type OutboxRow,
+  type PendingCdcOperation,
   type PendingOperation,
+  type PendingSignalOperation,
   type PubsubState,
   type RouteMode,
   type RowIdSource,
+  type SignalForkContext,
   SqlitePubsubState,
 } from './pubsub-state.js'
 export {
   type MessageDraft,
   type PubsubTargetOptions,
   type RollbackInverse,
+  type SignalDraft,
+  type SignalRoute,
   type TopicRoute,
   pubsubTarget,
 } from './pubsub-target.js'

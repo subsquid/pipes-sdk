@@ -490,8 +490,12 @@ describe('pubsubTarget', () => {
         metrics,
       })
 
-      expect(metrics.counter('sqd_pubsub_ops_total').total).toBe(2)
-      expect(metrics.counter('sqd_pubsub_ops_total').calls[0].labels).toMatchObject({ topic: 'blocks', op: 'upsert' })
+      expect(metrics.counter('sqd_pubsub_operations_total').total).toBe(2)
+      expect(metrics.counter('sqd_pubsub_operations_total').calls[0].labels).toMatchObject({
+        topic: 'blocks',
+        kind: 'cdc',
+        operation: 'upsert',
+      })
     })
 
     describe('commit-lag histograms', () => {
@@ -931,13 +935,24 @@ describe('pubsubTarget', () => {
         'network down',
       )
 
+      // The stream keeps a route, so the target itself is valid — but the pending row's route is
+      // now a signal route, and its CDC encoder is gone. Same failure as deleting it outright.
       await expect(
         driveBatches({
           statePath,
           publisher: new FakePublisher(),
           blocks: [],
           finalized: 0,
-          targetOptions: { topics: {} },
+          targetOptions: {
+            topics: {},
+            signals: {
+              blocks: {
+                topic: 'blocks',
+                map: () => [],
+                fork: { mode: 'finalized-only' },
+              },
+            },
+          },
         }),
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED })
     })
@@ -1080,6 +1095,32 @@ describe('pubsubTarget', () => {
       await expect(
         driveBatches({ statePath, publisher: new FakePublisher(), blocks: [], finalized: 0 }),
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH })
+    })
+
+    it('drains a pending v2 CDC outbox after migrating its route metadata', async () => {
+      const statePath = tempStatePath()
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+
+      await expect(driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 0 })).rejects.toThrow(
+        'network down',
+      )
+
+      const state = new SqlitePubsubState({ path: statePath })
+      await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
+      await state.setMeta('wire_config', JSON.stringify(['test-pipe', false, false, [['blocks', 'canonical']]]))
+      await state.close()
+
+      const restarted = new FakePublisher()
+      await driveBatches({ statePath, publisher: restarted, blocks: [], finalized: 0 })
+
+      expect(restarted.published).toHaveLength(1)
+      const migrated = new SqlitePubsubState({ path: statePath })
+      await migrated.open({ cursorKey: 'test-pipe', logger: testLogger() })
+      expect(await migrated.getMeta('wire_config')).toBe(
+        JSON.stringify(['test-pipe', false, false, [['cdc:blocks', 'canonical']]]),
+      )
+      await migrated.close()
     })
 
     it('rechecks a custom encoder output size during recovery', async () => {
