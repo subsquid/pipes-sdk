@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { evmPortalStream } from '~/evm/evm-portal-source.js'
 import { MockPortal, mockMetricsServer, mockPortal, testLogger } from '~/testing/index.js'
@@ -41,6 +41,10 @@ function blocksRoute(topic = 'blocks') {
   }
 }
 
+/** A chain whose block N is stamped 12s apart from a realistic epoch, as a real cursor would be. */
+const CHAIN_GENESIS_SECONDS = 1_700_000_000
+const chainTime = (blockNumber: number) => CHAIN_GENESIS_SECONDS + blockNumber * 12
+
 /** Drives `target.write()` one block per batch, so batch boundaries are the test's to choose. */
 async function driveBatches({
   statePath,
@@ -48,12 +52,19 @@ async function driveBatches({
   blocks,
   finalized,
   targetOptions = {},
+  metrics,
+  lastBlockReceivedAt,
+  blockTimestamp = chainTime,
 }: {
   statePath: string
   publisher: FakePublisher
   blocks: number[]
   finalized: number
   targetOptions?: Partial<Parameters<typeof pubsubTarget<Blocks>>[0]>
+  metrics?: ReturnType<typeof mockMetricsServer>
+  lastBlockReceivedAt?: Date
+  /** Cursor timestamp per block; `() => undefined` reproduces a query that selects no timestamp. */
+  blockTimestamp?: (blockNumber: number) => number | undefined
 }) {
   const target = pubsubTarget<Blocks>({
     pubsub: {} as never,
@@ -69,9 +80,11 @@ async function driveBatches({
       yield {
         data: { blocks: [{ number, hash: `0x${number}`, timestamp: number }] },
         ctx: makeBatchContext({
-          current: { number, hash: `0x${number}` },
+          current: { number, hash: `0x${number}`, timestamp: blockTimestamp(number) },
           finalized: { number: finalized, hash: `0x${finalized}` },
           rollbackChain: [{ number, hash: `0x${number}` }],
+          metrics: metrics?.server.metrics,
+          lastBlockReceivedAt,
         }),
       }
     }
@@ -479,6 +492,225 @@ describe('pubsubTarget', () => {
 
       expect(metrics.counter('sqd_pubsub_ops_total').total).toBe(2)
       expect(metrics.counter('sqd_pubsub_ops_total').calls[0].labels).toMatchObject({ topic: 'blocks', op: 'upsert' })
+    })
+
+    describe('commit-lag histograms', () => {
+      /** Block 5 on the fixture chain, published 90s of wall clock later. */
+      const BLOCK = 5
+      const PUBLISHED_AT = chainTime(BLOCK) + 90
+
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      /** Freezes the clock at `PUBLISHED_AT`, minus a publish window the drain then consumes. */
+      function atPublishTime(publishSeconds = 0) {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date((PUBLISHED_AT - publishSeconds) * 1000))
+
+        const publisher = new FakePublisher()
+        publisher.onDrain = () => vi.advanceTimersByTime(publishSeconds * 1000)
+
+        return publisher
+      }
+
+      it('observes block_to_commit_lag as wall-clock ack minus the block’s chain time', async () => {
+        const metrics = mockMetricsServer()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+        })
+
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([90])
+      })
+
+      it('observes portal_to_commit_lag as wall-clock ack minus batch.lastBlockReceivedAt', async () => {
+        const metrics = mockMetricsServer()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+          lastBlockReceivedAt: new Date((PUBLISHED_AT - 6) * 1000),
+        })
+
+        expect(metrics.histogram('sqd_pubsub_portal_to_commit_lag_seconds').observations).toEqual([6])
+      })
+
+      it('labels both histograms with the pipe id', async () => {
+        const metrics = mockMetricsServer()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+        })
+
+        // An undeclared label name throws in prom-client and an unlabelled observe on a
+        // labelled histogram silently creates a series no dashboard query matches.
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').calls[0].labels).toEqual({ id: 'test-pipe' })
+        expect(metrics.histogram('sqd_pubsub_portal_to_commit_lag_seconds').calls[0].labels).toEqual({
+          id: 'test-pipe',
+        })
+      })
+
+      it('anchors on the publish ack, not on the outbox ack-delete that follows it', async () => {
+        const metrics = mockMetricsServer()
+
+        // The drain burns 4s publishing; the state.confirm() after it must not be inside the
+        // measured quantity, so the lag stays the block's own 90s.
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(4),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+        })
+
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([90])
+        expect(metrics.histogram('sqd_pubsub_publish_duration_seconds').observations).toEqual([4])
+      })
+
+      it('still observes when the publish fails, so an outage climbs instead of going silent', async () => {
+        const metrics = mockMetricsServer()
+        const publisher = atPublishTime()
+        publisher.failOn = () => new Error('publish boom')
+
+        await expect(
+          driveBatches({
+            statePath: tempStatePath(),
+            publisher,
+            blocks: [BLOCK],
+            finalized: BLOCK,
+            metrics,
+            lastBlockReceivedAt: new Date((PUBLISHED_AT - 6) * 1000),
+          }),
+        ).rejects.toThrow('publish boom')
+
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([90])
+        expect(metrics.histogram('sqd_pubsub_portal_to_commit_lag_seconds').observations).toEqual([6])
+      })
+
+      it('normalizes millisecond chain timestamps instead of reporting them 1000x off', async () => {
+        const metrics = mockMetricsServer()
+
+        // tron and substrate both declare epoch ms; verbatim subtraction yields ~-1.7e12.
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+          blockTimestamp: (n) => chainTime(n) * 1000,
+        })
+
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([90])
+      })
+
+      it('drops the above-2^53 timestamps tron emits rather than poisoning the histogram sum', async () => {
+        const metrics = mockMetricsServer()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+          // Parsed, not spelled: the literal cannot be written at full precision.
+          blockTimestamp: () => Number('639208360527210660'),
+        })
+
+        // One such observation would move `_sum` to a magnitude where the float64 ULP exceeds
+        // every later sample, freezing the series for the life of the process.
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([])
+      })
+
+      it('skips block_to_commit_lag, but not portal_to_commit_lag, when the cursor has no timestamp', async () => {
+        const metrics = mockMetricsServer()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+          lastBlockReceivedAt: new Date((PUBLISHED_AT - 6) * 1000),
+          blockTimestamp: () => undefined,
+        })
+
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([])
+        expect(metrics.histogram('sqd_pubsub_portal_to_commit_lag_seconds').observations).toEqual([6])
+      })
+
+      it('observes neither histogram below the go-live block', async () => {
+        const metrics = mockMetricsServer()
+        const publisher = atPublishTime()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher,
+          blocks: [BLOCK],
+          finalized: BLOCK,
+          metrics,
+          targetOptions: { publishFrom: 1_000_000 },
+        })
+
+        // Nothing was published, so a reading here would describe a stage that never ran.
+        expect(publisher.published).toEqual([])
+        expect(metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations).toEqual([])
+        expect(metrics.histogram('sqd_pubsub_portal_to_commit_lag_seconds').observations).toEqual([])
+      })
+
+      it('observes once per batch across a multi-batch run', async () => {
+        const metrics = mockMetricsServer()
+
+        await driveBatches({
+          statePath: tempStatePath(),
+          publisher: atPublishTime(),
+          blocks: [1, 2, 3],
+          finalized: 3,
+          metrics,
+        })
+
+        const observations = metrics.histogram('sqd_pubsub_block_to_commit_lag_seconds').observations
+        expect(observations).toHaveLength(3)
+
+        // Each batch is measured against its own block, 12s apart on the fixture chain.
+        expect(observations[0] - observations[1]).toBe(12)
+        expect(observations[1] - observations[2]).toBe(12)
+      })
+    })
+
+    describe('recovery drain metrics', () => {
+      it('reports the restart backlog once the first batch registers the metrics', async () => {
+        const statePath = tempStatePath()
+        const metrics = mockMetricsServer()
+
+        // Leave a full outbox behind: the publish fails, so the rows stay queued.
+        const failing = new FakePublisher()
+        failing.failOn = () => new Error('publish boom')
+        await expect(
+          driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 1, metrics: mockMetricsServer() }),
+        ).rejects.toThrow('publish boom')
+
+        // The restart drains that backlog before any batch has brought ctx.metrics.
+        const recovered = new FakePublisher()
+        await driveBatches({ statePath, publisher: recovered, blocks: [2], finalized: 2, metrics })
+
+        expect(recovered.published.length).toBeGreaterThan(1)
+
+        // Two drains: the deferred recovery one, then the batch's own.
+        expect(metrics.histogram('sqd_pubsub_publish_duration_seconds').observations).toHaveLength(2)
+        expect(metrics.counter('sqd_pubsub_published_bytes_total').total).toBeGreaterThan(0)
+      })
     })
   })
 

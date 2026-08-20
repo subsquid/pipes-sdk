@@ -8,6 +8,7 @@ import {
   type HookContext,
   type Logger,
   type Metrics,
+  blockTimestampSeconds,
   createTarget,
   formatBlock,
   formatNumber,
@@ -237,11 +238,12 @@ export function bigqueryTarget<T>(options: {
             // commitEndMs was captured before post-commit so the duration / lag still reflect
             // the AppendRows ack moment, not the post-commit delay.
             metrics.commitDuration.observe({ id: ctx.id }, (commitEndMs - commitStartMs) / 1000)
-            if (typeof next.timestamp === 'number') {
-              // Block timestamps are epoch seconds (see cursorFromHeader). Skip the lag
-              // observation when timestamp is missing rather than emit a wildly wrong value
-              // derived from `0`.
-              metrics.blockToCommitLag.observe({ id: ctx.id }, commitEndMs / 1000 - next.timestamp)
+            // Portal block times are per-network (tron and substrate report ms), so they are
+            // normalized here rather than trusted verbatim; an unusable one is skipped, not
+            // observed as a wildly wrong value derived from `0`.
+            const blockTimestamp = blockTimestampSeconds(next.timestamp)
+            if (blockTimestamp !== undefined) {
+              metrics.blockToCommitLag.observe({ id: ctx.id }, commitEndMs / 1000 - blockTimestamp)
             }
 
             logger.info({

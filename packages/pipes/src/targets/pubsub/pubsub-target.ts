@@ -9,6 +9,7 @@ import {
   Logger,
   Metrics,
   Profiler,
+  blockTimestampSeconds,
   createTarget,
   formatBlock,
 } from '~/core/index.js'
@@ -29,6 +30,7 @@ import {
 } from './protocol.js'
 import {
   GooglePubsubPublisher,
+  PublishMessage,
   Publisher,
   PublisherOptions,
   TopicSetup,
@@ -172,6 +174,15 @@ const CAP_BYTES_PER_SECOND = 1024 * 1024
 const META_GO_LIVE = 'go_live_block'
 const META_WIRE_CONFIG = 'wire_config'
 const STATS_EVERY_BATCHES = 25
+
+/** Chain-scale: block production and chain-to-portal propagation dominate. */
+const CHAIN_LAG_BUCKETS = [0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600]
+
+/** Process-scale: buffer dwell, transformers, commit and publish — normally well under a second. */
+const PIPELINE_LAG_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60]
+
+/** One drain's measurements, held until `ctx.metrics` exists — see `#recordDrain`. */
+type DrainSample = { elapsed: number; bytes: number; saturation: number }
 
 type ResolvedRoute = {
   stream: string
@@ -339,6 +350,8 @@ class WriteContext {
   #batches = 0
   #finalityChecked = false
   #skippedLogged = false
+  #lagWarned = false
+  #deferredDrains: DrainSample[] = []
 
   constructor(options: WriteContextOptions) {
     this.#options = options
@@ -353,6 +366,11 @@ class WriteContext {
       if (!this.#metrics) {
         this.#metrics = registerPubsubMetrics(ctx.metrics)
         this.#metrics.coldStart.set({ id: ctx.id }, this.#options.coldStart ? 1 : 0)
+
+        const deferred = this.#deferredDrains.splice(0)
+        for (const sample of deferred) {
+          this.#recordDrain(sample)
+        }
       }
 
       this.#assertFinality(ctx)
@@ -380,7 +398,15 @@ class WriteContext {
         this.#metrics.ops.inc({ id: ctx.id, topic: operation.topic, op: operation.op }, 1)
       }
 
-      await this.drain({ span })
+      let publishAckAt: number | undefined
+      try {
+        publishAckAt = await this.drain({ span })
+      } finally {
+        // Observed even when the publish threw. The lag is climbing precisely during an outage,
+        // and a series that goes silent then cannot alert on the condition it exists to detect.
+        // drain() records publishDuration/publishedBytes before rethrowing for the same reason.
+        this.#observeCommitLag(ctx, publishAckAt ?? Date.now())
+      }
 
       this.#batches++
       if (this.#batches % STATS_EVERY_BATCHES === 1) {
@@ -396,12 +422,16 @@ class WriteContext {
   /**
    * Publish everything the state has queued, then delete only the confirmed rows. A publish
    * whose outcome is unknown keeps its row, so the retry resends the SAME seq and bytes.
+   *
+   * Returns the moment PubSub acked, which is the anchor for the commit-lag histograms. The
+   * outbox ack-delete that follows is durability bookkeeping, not publish latency, and the
+   * BigQuery metric this one is read beside excludes its own post-commit for the same reason.
    */
-  async drain({ span, fork }: { span?: Profiler; fork?: boolean } = {}): Promise<void> {
+  async drain({ span, fork }: { span?: Profiler; fork?: boolean } = {}): Promise<number> {
     const { state, publisher, namespace, uidAttribute, logger } = this.#options
 
     const rows = await state.pending()
-    if (!rows.length) return
+    if (!rows.length) return Date.now()
 
     const wire = rows.map((row) => this.#wireMessage(row, { namespace, uidAttribute }))
 
@@ -413,29 +443,51 @@ class WriteContext {
     const startedAt = Date.now()
     const publish = () => publisher.drain(wire)
     const result = await (span ? span.measure('publish', publish) : publish())
-    const elapsed = (Date.now() - startedAt) / 1000
+    const publishAckAt = Date.now()
+    const elapsed = (publishAckAt - startedAt) / 1000
 
     if (result.confirmed.length) {
       const ack = () => state.confirm(result.confirmed)
       await (span ? span.measure('ack', ack) : ack())
     }
 
-    if (this.#metrics) {
-      this.#metrics.publishDuration.observe(elapsed)
-      this.#metrics.publishedBytes.inc(result.bytes)
+    this.#recordDrain({ elapsed, bytes: result.bytes, saturation: this.#saturation(wire, elapsed) })
 
-      // Per-key throughput at or near PubSub's ordering-key cap.
-      if (this.#options.messageOrdering && elapsed > 0) {
-        for (const partition of partitionRows(wire)) {
-          const bytes = partition.reduce((sum, row) => sum + row.payload.byteLength, 0)
-          if (bytes / elapsed >= 0.8 * CAP_BYTES_PER_SECOND) {
-            this.#metrics.saturation.inc(elapsed)
-          }
-        }
+    if (result.error) throw result.error
+
+    return publishAckAt
+  }
+
+  /** Seconds spent publishing partitions at or above 80% of PubSub's per-ordering-key cap. */
+  #saturation(wire: PublishMessage[], elapsed: number): number {
+    if (!this.#options.messageOrdering || elapsed <= 0) return 0
+
+    let saturated = 0
+    for (const partition of partitionRows(wire)) {
+      const bytes = partition.reduce((sum, row) => sum + row.payload.byteLength, 0)
+      if (bytes / elapsed >= 0.8 * CAP_BYTES_PER_SECOND) {
+        saturated += elapsed
       }
     }
 
-    if (result.error) throw result.error
+    return saturated
+  }
+
+  #recordDrain(sample: DrainSample): void {
+    // The recovery drain runs before any batch has brought `ctx.metrics`. Hold the sample so a
+    // large restart backlog still reaches the dashboard once the first batch registers them,
+    // instead of republishing the whole outbox with no metric output at all.
+    if (!this.#metrics) {
+      this.#deferredDrains.push(sample)
+
+      return
+    }
+
+    this.#metrics.publishDuration.observe(sample.elapsed)
+    this.#metrics.publishedBytes.inc(sample.bytes)
+    if (sample.saturation > 0) {
+      this.#metrics.saturation.inc(sample.saturation)
+    }
   }
 
   #rollbackable(ctx: BatchContext): boolean {
@@ -503,6 +555,49 @@ class WriteContext {
     if (!skipped.length) return
 
     logger.warn(`no PubSub route configured for stream(s): ${skipped.join(', ')} — they are not published`)
+  }
+
+  /**
+   * Both histograms measure the same interval from two different anchors, so they are observed
+   * together or not at all. `drain()` flushes whatever the outbox holds, which on a restart or a
+   * fork is more than this batch — the readings are batch-level, not a per-row ack.
+   */
+  #observeCommitLag(ctx: BatchContext, publishAckAtMs: number): void {
+    if (!this.#metrics) return
+
+    // Below go-live `#map` drops every draft and nothing is published, so a reading here would
+    // describe a stage that never ran — and a cold-start backfill would push years of chain
+    // distance into a `_sum` that never decays.
+    if (ctx.stream.state.current.number < (this.#goLive ?? 0)) return
+
+    const publishAckAt = publishAckAtMs / 1000
+
+    const receivedAt = ctx.batch.lastBlockReceivedAt
+    if (receivedAt instanceof Date) {
+      this.#metrics.portalToCommitLag.observe({ id: ctx.id }, publishAckAt - receivedAt.getTime() / 1000)
+    }
+
+    const blockTimestamp = blockTimestampSeconds(ctx.stream.state.current.timestamp)
+    if (blockTimestamp === undefined) {
+      this.#warnMissingBlockTimestamp(ctx)
+
+      return
+    }
+
+    this.#metrics.blockToCommitLag.observe({ id: ctx.id }, publishAckAt - blockTimestamp)
+  }
+
+  #warnMissingBlockTimestamp(ctx: BatchContext): void {
+    if (this.#lagWarned) return
+    this.#lagWarned = true
+
+    // Without this an operator cannot tell an unselected query field from a dead pipe: both
+    // render as an empty series.
+    this.#options.logger.warn(
+      `no usable block timestamp at ${formatBlock(ctx.stream.state.current.number)} — ` +
+        'sqd_pubsub_block_to_commit_lag_seconds stays empty for as long as that holds. Select the ' +
+        'block `timestamp` field in the pipe’s query if that panel is expected to populate.',
+    )
   }
 
   #map(data: any, ctx: BatchContext): PendingOperation[] {
@@ -828,6 +923,8 @@ type PubsubMetrics = {
   compensations: Histogram<string>
   coldStart: Gauge<'id'>
   saturation: Counter<string>
+  blockToCommitLag: Histogram<'id'>
+  portalToCommitLag: Histogram<'id'>
 }
 
 function registerPubsubMetrics(metrics: Metrics): PubsubMetrics {
@@ -873,6 +970,26 @@ function registerPubsubMetrics(metrics: Metrics): PubsubMetrics {
       help:
         'Message ordering: seconds spent publishing a partition at ≥80% of PubSub’s 1 MB/s ' +
         'per-ordering-key cap. Growing values mean the headroom requirement is eroding.',
+    }),
+    blockToCommitLag: metrics.histogram({
+      name: 'sqd_pubsub_block_to_commit_lag_seconds',
+      help:
+        'End-to-end freshness: seconds from the committed block’s chain timestamp to the PubSub ' +
+        'ack. Includes block production and chain-to-portal propagation, so it is a service-level ' +
+        'reading, not an attribution of where the time went. Batch-level, not a per-row ack. ' +
+        'Empty while the pipe is below its go-live block or the query selects no block timestamp.',
+      labelNames: ['id'] as const,
+      buckets: CHAIN_LAG_BUCKETS,
+    }),
+    portalToCommitLag: metrics.histogram({
+      name: 'sqd_pubsub_portal_to_commit_lag_seconds',
+      help:
+        'In-process latency: seconds from the portal client stamping the batch ' +
+        '(batch.lastBlockReceivedAt) to the PubSub ack. Also covers stream-buffer dwell and the ' +
+        'pipe’s transformers, so a regression here is not necessarily in this target — split it ' +
+        'against sqd_pubsub_publish_duration_seconds and the `pubsub` profiler span.',
+      labelNames: ['id'] as const,
+      buckets: PIPELINE_LAG_BUCKETS,
     }),
   }
 }

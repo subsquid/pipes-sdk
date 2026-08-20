@@ -87,7 +87,7 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
       fromBlock: cursor.number,
       queryHash,
     })) {
-      const decoded: StreamData<GetBlock<Q>> = JSON.parse(await this.decompress(message))
+      const decoded: StreamData<GetBlock<Q>> = reviveMeta(JSON.parse(await this.decompress(message)))
 
       yield decoded
 
@@ -134,4 +134,17 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
       // TODO check next batch in cache
     }
   }
+}
+
+/**
+ * `meta.lastBlockReceivedAt` is typed `Date`, but JSON has no date type: the round-trip through
+ * the cache hands it back as an ISO string. Consumers call `.getTime()` on it, so restore the
+ * declared type before the batch escapes the cache.
+ */
+function reviveMeta<T>(batch: StreamData<T>): StreamData<T> {
+  if (batch.meta?.lastBlockReceivedAt) {
+    batch.meta.lastBlockReceivedAt = new Date(batch.meta.lastBlockReceivedAt)
+  }
+
+  return batch
 }
