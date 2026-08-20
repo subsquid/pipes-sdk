@@ -189,6 +189,35 @@ describe('Portal cache', () => {
       expect(rows).toHaveLength(1)
     })
 
+    it('should hand back lastBlockReceivedAt as a Date on the cached pass', async () => {
+      portal = await mockPortal([
+        {
+          statusCode: 200,
+          data: [
+            { header: { number: 1, hash: '0x1', timestamp: 1000 } },
+            { header: { number: 2, hash: '0x2', timestamp: 2000 } },
+          ],
+          head: { finalized: { number: 2, hash: '0x2' } },
+        },
+      ])
+
+      const stream = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+        cache: portalSqliteCache({ path: DB_PATH }),
+      })
+
+      const live = await readAllChunks(stream)
+      const cached = await readAllChunks(stream)
+
+      // JSON has no date type, so the cache round-trip returns an ISO string unless it is
+      // revived. Consumers (the pubsub target, the rpc-latency watcher) call .getTime() on it.
+      expect(live[0].ctx.batch.lastBlockReceivedAt).toBeInstanceOf(Date)
+      expect(cached[0].ctx.batch.lastBlockReceivedAt).toBeInstanceOf(Date)
+      expect(() => cached[0].ctx.batch.lastBlockReceivedAt.getTime()).not.toThrow()
+    })
+
     it('should not reuse data that has from greater than request', async () => {
       portal = await mockPortal([
         {

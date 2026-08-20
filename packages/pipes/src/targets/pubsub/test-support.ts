@@ -28,6 +28,8 @@ export class FakePublisher implements Publisher {
   readonly setupCalls: string[][] = []
   /** Return an error to fail that publish; the row (and everything behind it) stays queued. */
   failOn?: (row: PublishMessage, index: number) => Error | undefined
+  /** Runs inside the measured publish window, so a fake-timer test can give it a real duration. */
+  onDrain?: (rows: PublishMessage[]) => void
   closed = false
 
   async setup(topics: string[]): Promise<void> {
@@ -37,6 +39,8 @@ export class FakePublisher implements Publisher {
   async drain(rows: PublishMessage[]): Promise<DrainResult> {
     const confirmed: number[] = []
     let bytes = 0
+
+    this.onDrain?.(rows)
 
     for (let i = 0; i < rows.length; i++) {
       const failure = this.failOn?.(rows[i], i)
@@ -114,12 +118,14 @@ export function makeBatchContext({
   finalized,
   rollbackChain,
   latest,
+  lastBlockReceivedAt,
   metrics = mockMetricsServer().server.metrics,
 }: {
   current: BlockCursor
   finalized?: BlockCursor
   rollbackChain?: BlockCursor[]
   latest?: BlockCursor
+  lastBlockReceivedAt?: Date
   metrics?: BatchContext['metrics']
 }): BatchContext {
   const profilerStub: Record<string, unknown> = {
@@ -138,6 +144,6 @@ export function makeBatchContext({
       state: { current, rollbackChain: rollbackChain ?? [current], initial: 0, last: current.number, ranges: [] },
       head: { finalized, latest: latest ?? current },
     },
-    batch: { blocksCount: 1, bytesSize: 0, requests: {}, lastBlockReceivedAt: new Date(0) },
+    batch: { blocksCount: 1, bytesSize: 0, requests: {}, lastBlockReceivedAt: lastBlockReceivedAt ?? new Date() },
   } as unknown as BatchContext
 }

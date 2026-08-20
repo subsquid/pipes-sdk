@@ -263,6 +263,15 @@ The tracked tables' foreign keys form a cycle, so no safe delete order can be de
 
 **Fix** — break the foreign-key cycle among the tracked tables.
 
+### E2107 · Column name unresolved
+
+A column declared without an explicit database name (`integer()`) keeps its JS property key
+until the Drizzle dialect's casing cache resolves the real one, and that lookup returned
+nothing — so the snapshot trigger and rollback SQL cannot name the column.
+
+**Fix** — name the column explicitly, e.g. `integer('item_id')`, or pass a `casing` option to
+`drizzle(..., { casing: 'snake_case' })` so the dialect can resolve it.
+
 ---
 
 ## BigQuery target

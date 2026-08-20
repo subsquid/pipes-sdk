@@ -776,6 +776,34 @@ describe('bigqueryTarget — commit metrics', () => {
     expect(histogram.observations).toEqual([])
   })
 
+  it('normalizes millisecond and rejects out-of-range block timestamps', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(1_700_000_005 * 1000))
+
+    const metrics = mockMetricsServer()
+    const target = buildTarget({
+      onData: async ({ store, data }) => {
+        store.insert('events', [data as Record<string, unknown>])
+      },
+    })
+
+    async function* read() {
+      // tron and substrate declare epoch ms; verbatim subtraction would read ~-1.7e12.
+      yield {
+        data: { block_number: 10, tx_hash: '0xa' },
+        ctx: makeBatchContext({ number: 10, hash: '0xa', timestamp: 1_700_000_000_000 }, [], 0, metrics),
+      }
+      // Above 2^53 — tron's portal emits these, and one would freeze `_sum` permanently.
+      yield {
+        data: { block_number: 11, tx_hash: '0xb' },
+        ctx: makeBatchContext({ number: 11, hash: '0xb', timestamp: Number('639208360527210660') }, [], 0, metrics),
+      }
+    }
+    await target.write({ read: read as never, logger: testLogger() })
+
+    expect(metrics.histogram('sqd_bigquery_block_to_commit_lag_seconds').observations).toEqual([5])
+  })
+
   it('observes commit_duration once per batch', async () => {
     // Two batches → two observations on the same registered histogram. We don't pin values
     // (that's wallclock-dependent and brittle); we just assert count and non-negativity.
