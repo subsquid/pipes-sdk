@@ -33,21 +33,6 @@ export function augmentFields(fields: FieldSelection, req: DataRequest): FieldSe
   return { ...fields, log, transaction, trace }
 }
 
-const SELECTION_TYPES = ['block', 'transaction', 'log', 'trace', 'stateDiff'] as const
-
-/** True if `augmented` selects any field that `original` does not (augmentation only adds). */
-export function selectionGrew(augmented: FieldSelection, original: FieldSelection): boolean {
-  for (const t of SELECTION_TYPES) {
-    const aug = (augmented as any)[t] ?? {}
-    const orig = (original as any)[t] ?? {}
-    for (const k in aug) {
-      if (aug[k] && !orig[k]) return true
-    }
-  }
-
-  return false
-}
-
 /**
  * Keep the items of `projected` whose positionally-aligned item in `pre` (the pre-filter decode of
  * the same block) survived filtering into `kept`. `projected[i]` and `pre[i]` are the same on-chain

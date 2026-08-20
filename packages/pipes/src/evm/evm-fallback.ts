@@ -1,184 +1,119 @@
-import type { Rpc } from '@subsquid/evm-rpc'
-import { cast } from '@subsquid/util-internal-validation'
-
 import {
-  BatchContext,
   BlockCursor,
   CapabilityProbeOptions,
+  FallbackClient,
+  FallbackClientSource,
   FallbackPolicy,
-  FallbackSource,
-  FallbackUnderlyingSource,
-  MetricsServer,
-  PortalBatch,
-  cursorFromHeader,
-  defaultLogger,
-  extractRollbackChain,
-  makeCapabilityProbe,
-  noopMetricsServer,
-  registerFallbackMetrics,
+  FallbackStrategy,
+  Logger,
+  redactUrl,
 } from '~/core/index.js'
-import { Span } from '~/core/profiling.js'
-import { ApiDataset } from '~/portal-client/client.js'
-import { PortalClient, PortalClientOptions } from '~/portal-client/index.js'
-import { Block, DataRequest, FieldSelection, getBlockSchema } from '~/portal-client/query/evm.js'
+import {
+  ApiDataset,
+  BlockRef,
+  BlockStreamClient,
+  GetBlock,
+  PortalBlockStream,
+  PortalBlockStreamOptions,
+  PortalClient,
+  PortalClientOptions,
+  Query,
+  StreamData,
+  isBlockStreamClient,
+} from '~/portal-client/index.js'
 
-import type { RpcMethodOptions } from './evm-rpc-source.js'
-import { withRequiredFields } from './rpc/decode.js'
+import type { EvmRpcConnectionOptions, RpcMethodOptions } from './evm-rpc-block-client.js'
 
-// Re-export the RPC method-selection type so consumers can type an `rpc` source's `method`. Type-only,
-// so it's erased from the JS and never pulls the optional peers at *runtime* — but, like the `Rpc`-typed
-// config field, it is preserved in the emitted .d.ts, so a TS consumer that references the RPC-config
-// types needs @subsquid/evm-rpc installed for typechecking.
-export type { RpcMethodOptions } from './evm-rpc-source.js'
+// Re-export the RPC config types so consumers can type an `rpc` source spec. Type-only, so they are
+// erased from the JS and never pull the optional peers at *runtime*; they also reference no
+// evm-rpc types, so a Portal-only TS consumer typechecks without the peers installed.
+export type { EvmRpcConnectionOptions, RpcMethodOptions } from './evm-rpc-block-client.js'
 
-/** One EVM source in a fallback. Both kinds share the same `fields` + `request`. */
-export type EvmFallbackSourceConfig<F extends FieldSelection> =
-  | { type: 'portal'; name?: string; portal: string | PortalClientOptions | PortalClient }
-  | { type: 'rpc'; name?: string; rpc: Rpc; method?: RpcMethodOptions; strideSize?: number; strideConcurrency?: number }
+/**
+ * One EVM source in a fallback list, in the order of preference (first entry is the primary).
+ *
+ * - a `string` is a portal dataset URL with default settings;
+ * - an object without `type` (or with `type: 'portal'`) is a portal source with
+ *   {@link PortalClientOptions} settings;
+ * - `type: 'rpc'` is a JSON-RPC source — plain connection options, no `@subsquid/evm-rpc` import
+ *   needed (the RPC stack is loaded lazily when the source is first used, and the
+ *   `@subsquid/evm-rpc` + `@subsquid/evm-normalization` optional peers must be installed by then);
+ * - `type: 'custom'` plugs in any ready {@link BlockStreamClient}.
+ */
+export type EvmSourceSpec =
+  | string
+  | ({ type?: 'portal'; name?: string } & PortalClientOptions)
+  | ({
+      type: 'rpc'
+      name?: string
+      method?: RpcMethodOptions
+      strideSize?: number
+      strideConcurrency?: number
+      finalized?: boolean
+    } & EvmRpcConnectionOptions)
+  | { type: 'custom'; name?: string; client: BlockStreamClient }
 
-export interface EvmFallbackOptions<F extends FieldSelection> {
-  fields: F
-  request: DataRequest
-  from: number
-  to?: number
-  finalized?: boolean
-  sources: EvmFallbackSourceConfig<F>[]
+export interface EvmFallbackOptions {
+  /** Machinery knobs and the default strategy's thresholds. */
   policy?: FallbackPolicy
-  /**
-   * Attach a generic capability probe to every source (default `true`): a source counts as
-   * `healthy` only once it confirms it can serve the configured data at the indexing frontier —
-   * catching a reachable-but-incapable source (trace/`debug_` disabled, pruned state, a Portal
-   * answering HTTP 400 to a type-valid query) before a switch-up promotes it. Pass `false` to govern
-   * health by liveness alone, or `{timeoutMs}` to tune the probe.
-   */
+  /** Custom decision function; events it leaves unanswered use the default strategy. */
+  strategy?: FallbackStrategy
+  /** Capability probing for standby sources (default on); `false` for liveness-only health. */
   capabilityProbe?: boolean | CapabilityProbeOptions
-  /** When provided, fallback health/switch gauges are registered on this metrics server (§4). */
-  metrics?: MetricsServer
+  /** Stream finalized blocks only. Applied to every source that doesn't set it itself. */
+  finalized?: boolean
+  logger?: Logger
 }
 
 /**
- * A Portal source adapter that exposes the fallback's `read(cursor)` contract: it fetches raw
- * blocks from the Portal and casts them with the same `getBlockSchema` the Portal source uses, so
- * its output matches the RPC source's. A `ForkException` propagates from the Portal client
- * unchanged (it is already Pipes' `ForkException`).
+ * Build a {@link FallbackClient} over an ordered list of EVM source specs. The result is a
+ * {@link BlockStreamClient} — it slots into a `PortalStream` (and thus `evmStream`) exactly where
+ * a single portal client goes, all sources serving the same query so their output is
+ * interchangeable.
  */
-export function evmPortalReadSource<F extends FieldSelection>(
-  options: { name?: string; portal: string | PortalClientOptions | PortalClient } & Omit<
-    EvmFallbackOptions<F>,
-    'sources' | 'policy'
-  >,
-): FallbackUnderlyingSource<Block<F>[]> {
-  const portal =
-    options.portal instanceof PortalClient
-      ? options.portal
-      : new PortalClient(typeof options.portal === 'string' ? { url: options.portal } : options.portal)
-
-  const fields = withRequiredFields(options.fields)
-  const schema = getBlockSchema(fields)
-  const name = options.name ?? 'portal'
-  const logger = defaultLogger({ id: name })
-  const metrics = noopMetricsServer().metrics
-  const rawQuery = { type: 'evm', fields: options.fields, ...options.request }
-
-  const finalized = options.finalized ?? true
-
-  return {
-    name,
-    // Independent head poll (no stream) that powers staleness/lag detection + standby liveness.
-    getHead: async (): Promise<BlockCursor | undefined> => {
-      const head = await portal.getHead({ finalized })
-      return head ? { number: head.number, hash: head.hash } : undefined
-    },
-    read: async function* (cursor?: BlockCursor): AsyncIterable<PortalBatch<Block<F>[]>> {
-      const from = cursor ? cursor.number + 1 : options.from
-      const query: any = {
-        type: 'evm',
-        fields,
-        fromBlock: from,
-        toBlock: options.to,
-        ...options.request,
-        parentBlockHash: cursor?.hash,
+export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {
+  const sources: FallbackClientSource[] = specs.map((spec, i) => {
+    if (typeof spec === 'string') {
+      return {
+        name: `portal-${i}`,
+        client: new PortalClient({ url: spec, finalized: options.finalized }),
       }
-
-      for await (const batch of portal.getStream(query, { finalized })) {
-        const data = batch.blocks.map((raw) => cast(schema, raw)) as unknown as Block<F>[]
-        if (data.length === 0) continue
-
-        const current = cursorFromHeader(data[data.length - 1] as any)
-        const finalized = batch.head.finalized
-          ? { number: batch.head.finalized.number, hash: batch.head.finalized.hash }
-          : undefined
-
-        const ctx: BatchContext = {
-          id: name,
-          profiler: Span.root('batch', false),
-          metrics,
-          logger,
-          stream: {
-            dataset: {} as ApiDataset,
-            head: { finalized, latest: current },
-            state: {
-              initial: from,
-              last: current.number,
-              current,
-              ranges: [{ from: options.from, to: options.to }],
-              rollbackChain: extractRollbackChain({ blocks: data as any, head: finalized }),
-            },
-            query: { url: portal.getUrl?.() ?? '', hash: '', raw: rawQuery },
-          },
-          batch: {
-            blocksCount: data.length,
-            bytesSize: batch.meta.bytes,
-            requests: batch.meta.requests,
-            lastBlockReceivedAt: batch.meta.lastBlockReceivedAt,
-          },
-        }
-
-        yield { data, ctx }
+    }
+    if (spec.type === 'custom') {
+      if (!isBlockStreamClient(spec.client)) {
+        throw new Error(`fallback source ${i}: 'custom' spec requires a BlockStreamClient in \`client\``)
       }
-    },
-  }
-}
+      return { name: spec.name ?? `custom-${i}`, client: spec.client }
+    }
+    if (spec.type === 'rpc') {
+      const { type: _type, name, method, strideSize, strideConcurrency, finalized, ...connection } = spec
+      return {
+        name: name ?? `rpc-${i}`,
+        client: lazyEvmRpcBlockClient({
+          connection,
+          name: name ?? `rpc-${i}`,
+          finalized: finalized ?? options.finalized ?? false,
+          method,
+          strideSize,
+          strideConcurrency,
+        }),
+      }
+    }
 
-/**
- * Build a {@link FallbackSource} over an ordered list of EVM sources (Portal and/or RPC), all
- * sharing one field selection + request so they produce identical output. Drop-in for a single
- * Portal stream — same `AsyncIterable<PortalBatch> + pipeTo`.
- */
-export function createEvmFallback<F extends FieldSelection>(
-  options: EvmFallbackOptions<F>,
-): FallbackSource<Block<F>[]> {
-  const underlying: FallbackUnderlyingSource<Block<F>[]>[] = options.sources.map((cfg, i) => {
-    const source =
-      cfg.type === 'portal'
-        ? evmPortalReadSource({
-            name: cfg.name ?? `portal-${i}`,
-            portal: cfg.portal,
-            fields: options.fields,
-            request: options.request,
-            from: options.from,
-            to: options.to,
-            finalized: options.finalized,
-          })
-        : lazyRpcSource(cfg.name ?? `rpc-${i}`, cfg, options)
-
-    if (options.capabilityProbe === false) return source
-
+    const { type: _type, name, ...portalOptions } = spec
     return {
-      ...source,
-      probeCapability: makeCapabilityProbe(
-        source,
-        options.capabilityProbe === true ? undefined : options.capabilityProbe,
-      ),
+      name: name ?? `portal-${i}`,
+      client: new PortalClient({ finalized: options.finalized, ...portalOptions }),
     }
   })
 
-  const fallback = new FallbackSource(underlying, options.policy)
-  if (options.metrics) {
-    registerFallbackMetrics(options.metrics.metrics, fallback)
-  }
-
-  return fallback
+  return new FallbackClient({
+    sources,
+    policy: options.policy,
+    strategy: options.strategy,
+    capabilityProbe: options.capabilityProbe,
+    logger: options.logger,
+  })
 }
 
 // The full optional "RPC stack": `@subsquid/evm-rpc` + `@subsquid/evm-normalization` and evm-rpc's
@@ -208,54 +143,60 @@ export function translateMissingRpcPeer(e: unknown, sourceName = 'rpc'): unknown
 }
 
 /**
- * An RPC fallback source whose `@subsquid/evm-rpc` dependency is loaded **lazily** — only when the
- * source is actually read (i.e. it becomes active). A multi-Portal fallback therefore never
- * imports the RPC stack, and a misconfigured RPC source fails with a clear, actionable error
- * instead of an opaque module-not-found at startup. (`@subsquid/evm-rpc` + `evm-normalization` are
- * declared as optional peer dependencies — a Portal-only consumer never installs them.)
+ * An RPC {@link BlockStreamClient} whose `@subsquid/evm-rpc` dependency is loaded **lazily** — on
+ * the first call that actually needs the endpoint. A multi-Portal fallback therefore never imports
+ * the RPC stack, and a misconfigured RPC source fails with a clear, actionable error instead of an
+ * opaque module-not-found at startup. (The RPC stack is declared as optional peer dependencies — a
+ * Portal-only consumer never installs it.)
  */
-function lazyRpcSource<F extends FieldSelection>(
-  name: string,
-  cfg: Extract<EvmFallbackSourceConfig<F>, { type: 'rpc' }>,
-  options: EvmFallbackOptions<F>,
-): FallbackUnderlyingSource<Block<F>[]> {
-  let inner:
-    | {
-        read(cursor?: BlockCursor): AsyncIterable<PortalBatch<Block<F>[]>>
-        getHead(): Promise<BlockCursor | undefined>
-      }
-    | undefined
+function lazyEvmRpcBlockClient(config: {
+  connection: EvmRpcConnectionOptions
+  name: string
+  finalized: boolean
+  method?: RpcMethodOptions
+  strideSize?: number
+  strideConcurrency?: number
+}): BlockStreamClient {
+  let inner: BlockStreamClient | undefined
 
-  const load = async () => {
+  const load = async (): Promise<BlockStreamClient> => {
     if (inner) return inner
-    let mod: typeof import('./evm-rpc-source.js')
+    let mod: typeof import('./evm-rpc-block-client.js')
     try {
-      mod = await import('./evm-rpc-source.js')
+      mod = await import('./evm-rpc-block-client.js')
     } catch (e) {
-      throw translateMissingRpcPeer(e, name)
+      throw translateMissingRpcPeer(e, config.name)
     }
-    inner = new mod.EvmRpcSource({
-      id: name,
-      rpc: cfg.rpc,
-      fields: options.fields,
-      request: options.request,
-      from: options.from,
-      to: options.to,
-      finalized: options.finalized,
-      method: cfg.method,
-      strideSize: cfg.strideSize,
-      strideConcurrency: cfg.strideConcurrency,
+    inner = new mod.EvmRpcBlockClient({
+      rpc: config.connection,
+      name: config.name,
+      finalized: config.finalized,
+      method: config.method,
+      strideSize: config.strideSize,
+      strideConcurrency: config.strideConcurrency,
     })
     return inner
   }
 
   return {
-    name,
+    finalized: config.finalized,
+    getUrl: () => redactUrl(config.connection.url) ?? config.name,
+    getMetadata: async (): Promise<ApiDataset> => (await load()).getMetadata(),
     // Head-polling a standby RPC source loads the RPC stack — that is fine/desirable: it is exactly
     // when we want to confirm the source is loadable and viable before switching up to it.
-    getHead: async () => (await load()).getHead(),
-    read: async function* (cursor?: BlockCursor): AsyncIterable<PortalBatch<Block<F>[]>> {
-      yield* (await load()).read(cursor)
+    getHead: async (options?: { finalized: boolean }): Promise<BlockRef | undefined> => (await load()).getHead(options),
+    resolveTimestamp: async (seconds: number): Promise<number> => (await load()).resolveTimestamp(seconds),
+    getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
+      async function* stream(): AsyncGenerator<StreamData<GetBlock<Q>>> {
+        const client = await load()
+        yield* client.getStream(query, options) as AsyncIterable<StreamData<GetBlock<Q>>>
+      }
+      return {
+        [Symbol.asyncIterator]: () => stream()[Symbol.asyncIterator](),
+      }
     },
   }
 }
+
+/** Re-exported so strategy authors can anchor switches to the pipe's resume cursor type. */
+export type { BlockCursor }

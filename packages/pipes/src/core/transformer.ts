@@ -1,5 +1,5 @@
 import { Metrics } from '~/core/metrics-server.js'
-import { PortalClient } from '~/portal-client/client.js'
+import { BlockStreamClient } from '~/portal-client/client.js'
 
 import { Logger } from './logger.js'
 import { BatchContext } from './portal-source.js'
@@ -12,7 +12,7 @@ export type StartContext = {
   state: { current?: BlockCursor; initial: number }
   logger: Logger
   metrics: Metrics
-  portal: PortalClient
+  portal: BlockStreamClient
 }
 export type StopContext = { logger: Logger }
 type TransformerFn<In, Out> = (data: In, ctx: BatchContext) => Promise<Out> | Out

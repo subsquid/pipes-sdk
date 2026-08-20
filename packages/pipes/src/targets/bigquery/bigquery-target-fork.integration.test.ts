@@ -3,7 +3,7 @@ import type { managedwriter } from '@google-cloud/bigquery-storage'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import type { BlockCursor } from '~/core/index.js'
-import { evmPortalStream } from '~/evm/evm-portal-source.js'
+import { evmPortalStream } from '~/evm/evm-stream.js'
 import { type MockPortal, type MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
 
 import { type BigQueryWriter } from './bigquery-store.js'

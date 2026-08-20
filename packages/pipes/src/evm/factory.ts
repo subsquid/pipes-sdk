@@ -16,7 +16,7 @@ import {
   getNormalizedEventParams,
   isEventWithArgs,
 } from './evm-decoder.js'
-import { evmPortalStream } from './evm-portal-source.js'
+import { evmPortalStream } from './evm-stream.js'
 
 export type EventArgs = {
   [key: string]: Codec<any> & { indexed?: boolean }

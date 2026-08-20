@@ -38,7 +38,9 @@ describe('redactText', () => {
   })
 
   it('redacts an embedded ws:// / wss:// endpoint (JSON-RPC providers quote these)', () => {
-    expect(redactText('socket wss://k3y@node.example.com/rpc dropped')).toBe('socket wss://node.example.com/rpc dropped')
+    expect(redactText('socket wss://k3y@node.example.com/rpc dropped')).toBe(
+      'socket wss://node.example.com/rpc dropped',
+    )
   })
 })
 

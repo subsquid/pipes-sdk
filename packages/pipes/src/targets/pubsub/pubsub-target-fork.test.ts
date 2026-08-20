@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { evmPortalStream } from '~/evm/evm-portal-source.js'
+import { evmPortalStream } from '~/evm/evm-stream.js'
 import { MockPortal, MockResponse, mockPortal } from '~/testing/index.js'
 
 import { MessageDraft, TopicRoute, pubsubTarget } from './pubsub-target.js'

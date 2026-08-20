@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { evmPortalStream } from '~/evm/evm-portal-source.js'
+import { evmPortalStream } from '~/evm/evm-stream.js'
 import { MockPortal, mockMetricsServer, mockPortal, testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES } from './errors.js'

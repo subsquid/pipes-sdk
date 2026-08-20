@@ -8,7 +8,7 @@ import { encodeEvent, mockBlock, mockEvmPortalStream, resetMockBlockCounter } fr
 import { MockPortal, mockPortal, readAll } from '~/testing/index.js'
 
 import { FactoryEvent, evmEventDecoder } from './evm-decoder.js'
-import { evmPortalStream } from './evm-portal-source.js'
+import { evmPortalStream } from './evm-stream.js'
 import { Factory, InternalFactoryEvent, contractFactory } from './factory.js'
 import { contractFactorySqliteStore } from './factory-adapters/sqlite.js'
 

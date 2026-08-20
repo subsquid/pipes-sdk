@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import { MockGauge } from '~/testing/index.js'
 
+import { FallbackMetrics } from './fallback-client.js'
 import { registerFallbackMetrics } from './fallback-metrics.js'
-import { FallbackMetrics } from './fallback-source.js'
 
 describe('registerFallbackMetrics', () => {
   it('exports active source, per-source health, and switch count via collect', () => {
