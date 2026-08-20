@@ -24,6 +24,12 @@ export interface CounterConfiguration<T extends string> extends MetricConfigurat
 export interface Gauge<T extends string = string> {
   set(value: number): void
   set(labels: LabelValues<T>, value: number): void
+  /**
+   * Clear all label combinations — call before re-setting in `collect` to drop stale series.
+   * Optional so a custom `MetricsServer` that predates it still satisfies the interface; callers must
+   * invoke it with optional chaining. Without it, stale label series simply aren't pruned.
+   */
+  reset?(): void
 }
 export interface GaugeConfiguration<T extends string> extends MetricConfiguration<T> {
   collect?: CollectFunction<Gauge<T>>
@@ -71,6 +77,7 @@ class NoopCounter<T extends string> implements Counter<T> {
 }
 class GaugeNoop<T extends string> implements Gauge<T> {
   set(): void {}
+  reset(): void {}
 }
 class HistogramNoop<T extends string> implements Histogram<T> {
   observe(): void {}
