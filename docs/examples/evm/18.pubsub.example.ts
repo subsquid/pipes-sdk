@@ -39,7 +39,10 @@
  * `_uid`; enabling the SDK option alone does not configure Dataflow.
  *
  * The state file holds the cursor, rollback data, outbox, and sequence counter. Keep it on durable
- * storage and run one producer per path. State schemas are not migrated in place.
+ * storage and run one producer per path.
+ *
+ * `19.pubsub-signals.example.ts` covers signal routes — messages published without the CDC
+ * envelope, for consumers that fold their own state instead of mirroring rows.
  *
  * To run:
  *

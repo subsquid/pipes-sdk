@@ -734,3 +734,26 @@ precision loss, or a sequence outside that supported range reached the encoder. 
 would make later changes look stale to BigQuery.
 
 **Fix** — start a new feed with fresh state and a fresh namespace, then re-bootstrap its destination.
+
+### E2425 · No routes configured
+
+The target was constructed with neither a `topics` entry nor a `signals` entry, so it would open a
+state file, take its exclusive lock, and publish nothing.
+
+**Fix** — configure at least one CDC topic route or one signal route.
+
+### E2426 · Signal draft without a usable block
+
+A signal route produced a draft whose `block.number` is missing, negative, or not an integer. Every
+signal is attributed to a block so the go-live cut and the `finalized-only` check can be applied.
+
+**Fix** — set `block` on the draft to the block the signal describes.
+
+### E2427 · Finalized-only signal from an unfinalized block
+
+A route declaring `fork.mode: 'finalized-only'` mapped a block above the dataset's finalized head.
+That mode is a promise that the route publishes nothing a fork could orphan, and a signal cannot be
+retracted once it is on the wire.
+
+**Fix** — read the finalized stream, withhold the signal until its block finalizes, or switch the
+route to `fork.mode: 'boundary'` and publish a compensating boundary message on a fork.

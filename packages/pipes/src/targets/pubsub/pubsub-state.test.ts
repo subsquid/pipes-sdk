@@ -8,7 +8,7 @@ import { BlockCursor } from '~/core/index.js'
 import { testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { CommitInput, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
+import { CommitInput, PendingCdcOperation, SqlitePubsubState } from './pubsub-state.js'
 
 const encoder = new TextEncoder()
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -49,8 +49,9 @@ function block(number: number, suffix = 'a'): BlockCursor {
   return { number, hash: `0x${number}${suffix}`, timestamp: 1_700_000_000 + number }
 }
 
-function operation(overrides: Partial<PendingOperation> & { id?: string } = {}): PendingOperation {
+function operation(overrides: Partial<PendingCdcOperation> & { id?: string } = {}): PendingCdcOperation {
   return {
+    kind: 'cdc',
     route: 'transfers',
     topic: 'transfers',
     orderingKey: '',
@@ -235,7 +236,8 @@ describe('SqlitePubsubState', () => {
     expect(result.coldStart).toBe(false)
   })
 
-  it('refuses the previous schema instead of migrating it in place', async () => {
+  // Only v2 has an in-place migration to v3; anything older is refused rather than guessed at.
+  it('refuses a schema older than the one it can migrate', async () => {
     const path = statePath()
     const first = await openState(path)
     await first.state.setMeta('schema_version', '1')
@@ -552,7 +554,7 @@ describe('SqlitePubsubState', () => {
   })
 
   describe('materialized identity', () => {
-    async function revise(state: SqlitePubsubState, overrides: Partial<PendingOperation>) {
+    async function revise(state: SqlitePubsubState, overrides: Partial<PendingCdcOperation>) {
       await commit(state, {
         operations: [operation({ id: 'candle-1', mode: 'materialized', blockNumber: 101, ...overrides })],
         ledger: [block(100), block(101)],
