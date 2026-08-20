@@ -4,6 +4,8 @@ import { BlockStreamClient, StreamData } from '~/portal-client/index.js'
 import { FieldSelection } from '~/portal-client/query/evm.js'
 
 import { createEvmFallbackClient } from './evm-fallback.js'
+import { evmQuery } from './evm-query-builder.js'
+import { evmStream } from './evm-stream.js'
 
 /**
  * Live end-to-end test: drive a fallback built from a real Portal source and a real RPC source,
@@ -18,6 +20,8 @@ const FROM = Number(process.env['RPC_E2E_BLOCK'] || 22000000)
 const TO = FROM + 2
 
 const FIELDS = {
+  // The facade injects the block header selection; at this raw-client level it must be explicit.
+  block: { number: true, hash: true },
   transaction: { from: true, to: true, value: true },
   log: { address: true, topics: true },
 } satisfies FieldSelection
@@ -62,5 +66,30 @@ describe.skipIf(!ENABLED)('EVM fallback — live', () => {
     expect(await streamNumbers(fb)).toEqual([FROM, FROM + 1, TO])
     expect(fb.activeIndex).toBe(1) // the good Portal took over
     expect(fb.switchCount).toBeGreaterThanOrEqual(1)
+  }, 120_000)
+
+  it('the full facade streams decoded blocks from an RPC-only source list', async () => {
+    // The flagship new path end-to-end: evmStream → FallbackClient → lazily-loaded RPC client →
+    // wire blocks → the facade's normalize cast → typed output. No portal involved at all.
+    const stream = evmStream({
+      id: 'e2e-rpc-only',
+      portal: [{ type: 'rpc', url: RPC_URL, capacity: 5, finalized: true }],
+      outputs: evmQuery()
+        .addFields({ block: { number: true, hash: true, timestamp: true }, transaction: { from: true, to: true } })
+        .addTransactionRequest({ range: { from: FROM, to: TO }, request: {} })
+        .addRange({ from: FROM, to: TO }),
+    })
+
+    const numbers: number[] = []
+    for await (const { data } of stream) {
+      for (const block of data) {
+        numbers.push(block.header.number)
+        expect(block.header.hash).toMatch(/^0x/)
+        expect(block.transactions.length).toBeGreaterThan(0)
+        expect(block.transactions[0].from).toMatch(/^0x/)
+      }
+    }
+
+    expect(numbers).toEqual([FROM, FROM + 1, TO])
   }, 120_000)
 })
