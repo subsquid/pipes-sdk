@@ -157,7 +157,9 @@ describe('evmStream', () => {
   })
 
   it("routes the pipe's logger into the fallback so it cannot log outside the caller's control", async () => {
-    const lines: { level: string; message: string; id?: string }[] = []
+    // pino's default message key is `msg`; the SDK's own logger renames it to `message`, so read
+    // whichever the caller's logger produced.
+    const lines: { msg?: string; message?: string }[] = []
     const captured = pino(
       { level: 'warn' },
       { write: (line: string) => lines.push(JSON.parse(line)) },
