@@ -8,6 +8,7 @@ import {
   redactUrl,
 } from '~/core/index.js'
 import { HttpClient } from '~/http-client/index.js'
+import { once } from '~/internal/function.js'
 import {
   ApiDataset,
   BlockRef,
@@ -205,17 +206,18 @@ function lazyEvmRpcBlockClient(config: {
   strideSize?: number
   strideConcurrency?: number
 }): BlockStreamClient {
-  let inner: BlockStreamClient | undefined
-
-  const load = async (): Promise<BlockStreamClient> => {
-    if (inner) return inner
+  // Shared across concurrent callers: a head poll and a capability probe routinely race here, and
+  // constructing the client twice would give one configured endpoint two connection pools and two
+  // rate limiters.
+  const load = once(async (): Promise<BlockStreamClient> => {
     let mod: typeof import('./evm-rpc-block-client.js')
     try {
       mod = await import('./evm-rpc-block-client.js')
     } catch (e) {
       throw translateMissingRpcPeer(e, config.name)
     }
-    inner = new mod.EvmRpcBlockClient({
+
+    return new mod.EvmRpcBlockClient({
       rpc: config.connection,
       name: config.name,
       finalized: config.finalized,
@@ -223,8 +225,7 @@ function lazyEvmRpcBlockClient(config: {
       strideSize: config.strideSize,
       strideConcurrency: config.strideConcurrency,
     })
-    return inner
-  }
+  })
 
   return {
     finalized: config.finalized,

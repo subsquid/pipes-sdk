@@ -1,3 +1,25 @@
+/**
+ * Runs `fn` at most once, sharing the in-flight promise with every concurrent caller. Guarding on
+ * the *result* instead — `if (value) return value` — leaves a window where callers that arrive
+ * before the first one resolves each start their own run, which for a lazily constructed client
+ * means several clients (and several connection pools) for one configured endpoint.
+ *
+ * A failed run is not cached: the next caller starts a fresh attempt, so a transient failure
+ * cannot poison the helper for the life of the process.
+ */
+export function once<T>(fn: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined
+
+  return () => {
+    pending ??= fn().catch((e) => {
+      pending = undefined
+      throw e
+    })
+
+    return pending
+  }
+}
+
 /** Sleeps for the given number of milliseconds. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
