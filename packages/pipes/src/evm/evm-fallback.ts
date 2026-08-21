@@ -1,9 +1,9 @@
 import {
   BlockCursor,
-  CapabilityProbeOptions,
+  DefaultFallbackStrategyOptions,
   FallbackClient,
   FallbackClientSource,
-  FallbackPolicy,
+  FallbackDetectionOptions,
   FallbackStrategy,
   Logger,
   redactUrl,
@@ -55,18 +55,18 @@ export type EvmSourceSpec =
 
 export interface EvmFallbackOptions {
   /**
-   * Configuration data: measurement knobs (probe cadence, health thresholds, cooldowns) plus the
-   * thresholds the stock switching decisions are derived from. Fully determines behavior when no
-   * `strategy` is given.
+   * How source failure and recovery are *detected*: capability probes, head polls, liveness
+   * thresholds, cooldowns, and the freshness conditions whose verdicts reach the strategy as
+   * events (`stall.stale`, `batch.lagging`). See {@link FallbackDetectionOptions}.
    */
-  policy?: FallbackPolicy
+  detection?: FallbackDetectionOptions
   /**
-   * Decision code: overrides the stock switching decisions per event; the stock decision arrives
-   * as `ctx.defaultCommand`, and returning `undefined` lets it stand.
+   * What to *do* about the detected state: plain options tune the stock strategy
+   * ({@link DefaultFallbackStrategyOptions} — e.g. `{ preferPrimary: 'onFailureOnly' }`), a
+   * function replaces its decisions per event (the stock decision arrives as
+   * `ctx.defaultCommand`; returning `undefined` lets it stand).
    */
-  strategy?: FallbackStrategy
-  /** Capability probing for standby sources (default on); `false` for liveness-only health. */
-  capabilityProbe?: boolean | CapabilityProbeOptions
+  strategy?: FallbackStrategy | DefaultFallbackStrategyOptions
   /** Stream finalized blocks only. Applied to every source that doesn't set it itself. */
   finalized?: boolean
   logger?: Logger
@@ -116,9 +116,8 @@ export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFall
 
   return new FallbackClient({
     sources,
-    policy: options.policy,
+    detection: options.detection,
     strategy: options.strategy,
-    capabilityProbe: options.capabilityProbe,
     logger: options.logger,
   })
 }

@@ -14,12 +14,13 @@ import { CapabilityProbeOptions, ProbeResult, makeCapabilityProbe } from './fall
 import { SourceErrorInfo, classifyError, freshnessFailure, strategyFailure } from './fallback-diagnostics.js'
 import {
   AllSourcesDownError,
-  FallbackPolicy,
-  ResolvedFallbackPolicy,
+  FallbackDetectionOptions,
+  ResolvedFallbackDetection,
   SourceHealth,
-  resolveFallbackPolicy,
+  resolveFallbackDetection,
 } from './fallback-health.js'
 import {
+  DefaultFallbackStrategyOptions,
   FallbackCommand,
   FallbackEvent,
   FallbackStrategy,
@@ -45,27 +46,18 @@ export interface FallbackClientOptions {
   /** Underlying sources in preference order — index 0 is the primary. */
   sources: FallbackClientSource[]
   /**
-   * Configuration **data**: tunes what the engine measures (probe cadence, head-poll TTL/timeout,
-   * liveness thresholds, cooldowns) and the thresholds the stock decisions are derived from
-   * (`preferPrimary`, `maxLagBlocks`, `maxStalenessMs`, `allDownTimeoutMs`). With no `strategy`,
-   * the policy fully determines behavior.
+   * How failure and recovery are *detected*: capability probes, head polls, liveness thresholds,
+   * cooldowns, and the freshness conditions whose verdicts the strategy receives as events
+   * (`stall.stale`, `batch.lagging`). See {@link FallbackDetectionOptions}.
    */
-  policy?: FallbackPolicy
+  detection?: FallbackDetectionOptions
   /**
-   * Decision **code**: consulted at every decision point with the measurements *and* the stock
-   * decision (`ctx.defaultCommand`); whatever it returns wins, and `undefined` lets the stock
-   * decision stand — so it overrides exactly the decisions it cares about. See
-   * {@link FallbackStrategy}.
+   * What to *do* about the detected state. Plain options tune the stock strategy
+   * ({@link DefaultFallbackStrategyOptions}); a function replaces its decisions per event — it is
+   * consulted with the measurements *and* the stock decision (`ctx.defaultCommand`), whatever it
+   * returns wins, and `undefined` lets the stock decision stand. See {@link FallbackStrategy}.
    */
-  strategy?: FallbackStrategy
-  /**
-   * Attach a generic capability probe to every source (default `true`): a source counts as
-   * `healthy` only once it confirms it can serve the configured query at the indexing frontier —
-   * catching a reachable-but-incapable source (trace/`debug_` disabled, pruned state, a Portal
-   * answering HTTP 400 to a type-valid query) before a switch-up promotes it. Pass `false` to
-   * govern health by liveness alone, or `{timeoutMs}` to tune the probe.
-   */
-  capabilityProbe?: boolean | CapabilityProbeOptions
+  strategy?: FallbackStrategy | DefaultFallbackStrategyOptions
   logger?: Logger
 }
 
@@ -119,11 +111,10 @@ type WireBlock = { header: { number: number; hash: string; timestamp?: number } 
  */
 export class FallbackClient implements BlockStreamClient {
   readonly #sources: FallbackClientSource[]
-  readonly #policy: ResolvedFallbackPolicy
+  readonly #detection: ResolvedFallbackDetection
   readonly #strategy: FallbackStrategy | undefined
   readonly #defaultStrategy: FallbackStrategy
   readonly #health: SourceHealth[]
-  readonly #probeOptions: boolean | CapabilityProbeOptions
   readonly #logger: Logger
   readonly finalized: boolean
 
@@ -167,12 +158,13 @@ export class FallbackClient implements BlockStreamClient {
     this.finalized = finalized
 
     this.#sources = options.sources
-    this.#policy = resolveFallbackPolicy(options.policy)
-    this.#strategy = options.strategy
-    this.#defaultStrategy = defaultFallbackStrategy(this.#policy)
-    this.#probeOptions = options.capabilityProbe ?? true
+    this.#detection = resolveFallbackDetection(options.detection)
+    this.#strategy = typeof options.strategy === 'function' ? options.strategy : undefined
+    this.#defaultStrategy = defaultFallbackStrategy(
+      typeof options.strategy === 'function' ? undefined : options.strategy,
+    )
     this.#health = options.sources.map(
-      (s) => new SourceHealth(this.#policy, s.probeCapability != null || this.#probeOptions !== false),
+      (s) => new SourceHealth(this.#detection, s.probeCapability != null || this.#detection.capabilityProbe !== false),
     )
     this.#logger = options.logger ?? defaultLogger({ id: 'fallback' })
   }
@@ -235,7 +227,7 @@ export class FallbackClient implements BlockStreamClient {
     // Re-arm the lag trigger per stream: a reused instance starting a later (far-behind-head)
     // backfill must not inherit "reached the tip" from a previous run and false-fire on lag.
     this.#lagArmed = false
-    const probeOptions = this.#probeOptions
+    const probeOptions = this.#detection.capabilityProbe
     this.#probes = this.#sources.map((s) => {
       if (s.probeCapability) return s.probeCapability
       if (probeOptions === false) return undefined
@@ -294,14 +286,14 @@ export class FallbackClient implements BlockStreamClient {
             // Boundary decision: refresh the other sources' heads (which doubles as their
             // liveness/capability driver), update the lag gauges, then let the strategy decide
             // whether to stay, fail over (lag), or reclaim a recovered higher-preference source.
-            const command = await this.#decideAtBoundary(active, cursor)
+            const { command, lagging } = await this.#decideAtBoundary(active, cursor)
             if (command.action === 'use' && command.index !== active) {
               this.#assertSourceIndex(command.index)
               forced = command.index
               break
             }
             if (command.action === 'failover') {
-              this.#failSource(active, this.#boundaryFailoverCause())
+              this.#failSource(active, this.#boundaryFailoverCause(lagging))
               break
             }
             if (command.action === 'abort') {
@@ -362,13 +354,13 @@ export class FallbackClient implements BlockStreamClient {
       if (eligible) {
         allDownSince = undefined
       } else {
-        allDownSince ??= this.#policy.clock()
+        allDownSince ??= this.#detection.clock()
       }
 
       const command = this.#decide(
         { type: 'select', error: lastError },
         cursor,
-        allDownSince !== undefined ? this.#policy.clock() - allDownSince : undefined,
+        allDownSince !== undefined ? this.#detection.clock() - allDownSince : undefined,
       )
 
       if (command.action === 'use') {
@@ -381,7 +373,7 @@ export class FallbackClient implements BlockStreamClient {
       }
       // 'hold' (and a nonsensical 'failover' with nothing active) both wait and ask again.
       this.#clearActive()
-      await sleep(this.#policy.allDownPollMs)
+      await sleep(this.#detection.allDownPollMs)
     }
   }
 
@@ -394,7 +386,10 @@ export class FallbackClient implements BlockStreamClient {
   }
 
   /** Refresh other-source heads, update lag gauges, then consult the strategy at the boundary. */
-  async #decideAtBoundary(active: number, cursor: BlockCursor | undefined): Promise<FallbackCommand> {
+  async #decideAtBoundary(
+    active: number,
+    cursor: BlockCursor | undefined,
+  ): Promise<{ command: FallbackCommand; lagging: boolean }> {
     const others = await this.#chainHeadOthers(active, cursor)
     const lastNumber = cursor?.number ?? -1
     this.chainHead = others != null ? Math.max(others, lastNumber) : lastNumber
@@ -407,21 +402,24 @@ export class FallbackClient implements BlockStreamClient {
       // reference (`lag >= 0`). A negative lag means the independent reference is itself behind us
       // (stale/lagging) — arming on that would let a later-recovering source's head trip a spurious
       // failover while we are still backfilling.
-      if (this.#policy.maxLagBlocks != null && lag >= 0 && lag <= this.#policy.maxLagBlocks) {
+      if (this.#detection.maxLagBlocks != null && lag >= 0 && lag <= this.#detection.maxLagBlocks) {
         this.#lagArmed = true // arm at tip (latched)
       }
     }
 
-    return this.#decide({ type: 'batch' }, cursor)
+    // The detection verdict rides on the event: the strategy decides what to do about it.
+    const lagging = this.#detection.maxLagBlocks != null && this.#lagArmed && this.lag > this.#detection.maxLagBlocks
+
+    return { command: this.#decide({ type: 'batch', lagging }, cursor), lagging }
   }
 
-  /** Why the active source was failed over at a boundary — lag when the numbers say so. */
-  #boundaryFailoverCause(): SourceErrorInfo {
-    if (this.#policy.maxLagBlocks != null && this.#lagArmed && this.lag > this.#policy.maxLagBlocks) {
+  /** Why the active source was failed over at a boundary — lag when the detection said so. */
+  #boundaryFailoverCause(lagging: boolean): SourceErrorInfo {
+    if (lagging) {
       return freshnessFailure(
         'stream',
         'lag',
-        `fell behind the chain head by more than ${this.#policy.maxLagBlocks} blocks`,
+        `fell behind the chain head by more than ${this.#detection.maxLagBlocks} blocks`,
       )
     }
 
@@ -454,7 +452,7 @@ export class FallbackClient implements BlockStreamClient {
    * records a liveness failure. `null` defers to the underlying client's own request timeout.
    */
   #headWithTimeout(p: Promise<BlockRef | undefined>): Promise<BlockRef | undefined> {
-    const timeoutMs = this.#policy.headPollTimeoutMs
+    const timeoutMs = this.#detection.headPollTimeoutMs
     return withTimeout(p, timeoutMs, () => new Error(`head poll timed out after ${timeoutMs}ms`))
   }
 
@@ -464,9 +462,9 @@ export class FallbackClient implements BlockStreamClient {
    * probe.
    */
   async #getCachedHead(i: number, last?: BlockCursor): Promise<number | undefined> {
-    const now = this.#policy.clock()
+    const now = this.#detection.clock()
     const cached = this.#headCache[i]
-    if (cached && now - cached.at < this.#policy.headTtlMs) return cached.value
+    if (cached && now - cached.at < this.#detection.headTtlMs) return cached.value
 
     try {
       const head = await this.#headWithTimeout(this.#sources[i].client.getHead({ finalized: this.finalized }))
@@ -494,8 +492,8 @@ export class FallbackClient implements BlockStreamClient {
     const probe = this.#probes[i]
     if (!probe || this.#health[i].capabilityConfirmed || this.#capabilityProbing[i]) return
 
-    const now = this.#policy.clock()
-    if (now - (this.#lastProbeAt[i] ?? 0) < this.#policy.capabilityProbeIntervalMs) return
+    const now = this.#detection.clock()
+    if (now - (this.#lastProbeAt[i] ?? 0) < this.#detection.capabilityProbeIntervalMs) return
 
     this.#lastProbeAt[i] = now
     this.#capabilityProbing[i] = true
@@ -532,12 +530,12 @@ export class FallbackClient implements BlockStreamClient {
     active: number,
     cursor?: BlockCursor,
   ): Promise<IteratorResult<StreamData<any>> | typeof FAILOVER> {
-    if (this.#policy.maxStalenessMs == null && !this.#strategy) {
+    if (this.#detection.maxStalenessMs == null && !this.#strategy) {
       this.staleness = 0
       return iterator.next()
     }
 
-    const start = this.#policy.clock()
+    const start = this.#detection.clock()
     const nextP = iterator.next()
     nextP.catch(() => {}) // a later abandon must not surface as an unhandled rejection
     const settled = nextP.then(
@@ -546,7 +544,7 @@ export class FallbackClient implements BlockStreamClient {
     )
 
     while (true) {
-      const tick = delay(this.#policy.freshnessTickMs)
+      const tick = delay(this.#detection.freshnessTickMs)
       const r = await Promise.race([settled, tick.promise.then(() => ({ type: 'tick' as const }))])
       tick.cancel()
 
@@ -561,24 +559,24 @@ export class FallbackClient implements BlockStreamClient {
         throw r.e
       }
 
-      const pendingMs = this.#policy.clock() - start
+      const pendingMs = this.#detection.clock() - start
       this.staleness = pendingMs
+
+      // The detection verdict: the request has been outstanding past the stalled threshold.
+      const stale = this.#detection.maxStalenessMs != null && pendingMs > this.#detection.maxStalenessMs
 
       // Re-polling the other sources both feeds the stall decision and (re)probes their
       // liveness/capability, so a held source keeps noticing when the chain comes back. Polls are
-      // gated on the staleness threshold (a healthy-but-slow request should not fan out head
-      // queries) — except under a custom strategy, which may want fresh snapshots on every tick;
-      // the `headTtlMs` cache bounds the poll rate either way.
-      const pastThreshold = this.#policy.maxStalenessMs != null && pendingMs > this.#policy.maxStalenessMs
-      const others = pastThreshold || this.#strategy ? await this.#chainHeadOthers(active, cursor) : undefined
+      // gated on the stalled verdict (a healthy-but-slow request should not fan out head queries)
+      // — except under a custom strategy, which may want fresh snapshots on every tick; the
+      // `headTtlMs` cache bounds the poll rate either way.
+      const others = stale || this.#strategy ? await this.#chainHeadOthers(active, cursor) : undefined
       const lastNumber = cursor?.number ?? -1
       const fresherAhead = others != null && others > lastNumber
-      // Observability: every source is stuck at the same head — switching would not help. Uses the
-      // default threshold even under a custom strategy (the gauge describes the chain, not the policy).
-      this.chainStalled =
-        this.#policy.maxStalenessMs != null && pendingMs > this.#policy.maxStalenessMs && !fresherAhead
+      // Observability: every source is stuck at the same head — switching would not help.
+      this.chainStalled = stale && !fresherAhead
 
-      const command = this.#decide({ type: 'stall', pendingMs }, cursor)
+      const command = this.#decide({ type: 'stall', pendingMs, stale }, cursor)
       if (command.action === 'failover') {
         this.staleness = 0
         return FAILOVER

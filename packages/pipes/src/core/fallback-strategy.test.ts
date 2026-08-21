@@ -47,31 +47,27 @@ describe('defaultFallbackStrategy', () => {
     expect((command as { error?: Error }).error).toBeInstanceOf(AllSourcesDownError)
   })
 
-  it('batch: fails over on excessive lag, but only once armed at the tip', () => {
-    const strategy = defaultFallbackStrategy({ maxLagBlocks: 10 })
-    const base = {
-      event: { type: 'batch' } as const,
-      activeIndex: 0,
-      sources: [snap(0, 'healthy', { active: true })],
-      lagBlocks: 50,
-    }
+  it('batch: fails over on the lagging verdict', () => {
+    // The verdict is the detection's (thresholds + tip-arming live there); the strategy just acts.
+    const strategy = defaultFallbackStrategy()
+    const base = { activeIndex: 0, sources: [snap(0, 'healthy', { active: true })] }
 
-    expect(strategy(ctx({ ...base, atTip: false }))).toEqual({ action: 'hold' }) // backfill: never
-    expect(strategy(ctx({ ...base, atTip: true }))).toEqual({ action: 'failover' })
+    expect(strategy(ctx({ ...base, event: { type: 'batch', lagging: false } }))).toEqual({ action: 'hold' })
+    expect(strategy(ctx({ ...base, event: { type: 'batch', lagging: true } }))).toEqual({ action: 'failover' })
   })
 
   it('batch: eagerly reclaims a recovered higher-preference source; onFailureOnly does not', () => {
     const sources = [snap(0, 'healthy'), snap(1, 'healthy', { active: true })]
-    const batch = { event: { type: 'batch' } as const, activeIndex: 1, sources }
+    const batch = { event: { type: 'batch', lagging: false } as const, activeIndex: 1, sources }
 
     expect(defaultFallbackStrategy()(ctx(batch))).toEqual({ action: 'use', index: 0 })
     expect(defaultFallbackStrategy({ preferPrimary: 'onFailureOnly' })(ctx(batch))).toEqual({ action: 'hold' })
   })
 
-  it('stall: fails over past the threshold only when a fresher source is ahead', () => {
-    const strategy = defaultFallbackStrategy({ maxStalenessMs: 100 })
+  it('stall: fails over on the stale verdict only when a fresher source is ahead', () => {
+    const strategy = defaultFallbackStrategy()
     const stalled = {
-      event: { type: 'stall', pendingMs: 200 } as const,
+      event: { type: 'stall', pendingMs: 200, stale: true } as const,
       activeIndex: 0,
       cursor: { number: 50, hash: '0x50' },
     }
@@ -87,16 +83,15 @@ describe('defaultFallbackStrategy', () => {
   })
 
   it('is configurable standalone — a custom strategy can delegate to its own instance', () => {
-    // The documented composition path: different thresholds, same algorithm.
-    const lenient = defaultFallbackStrategy({ maxLagBlocks: 100 })
-    const base = {
-      event: { type: 'batch' } as const,
-      activeIndex: 0,
-      sources: [snap(0, 'healthy', { active: true })],
-      atTip: true,
+    // The documented composition path: different decision options, same algorithm.
+    const sticky = defaultFallbackStrategy({ preferPrimary: 'onFailureOnly' })
+    const batch = {
+      event: { type: 'batch', lagging: false } as const,
+      activeIndex: 1,
+      sources: [snap(0, 'healthy'), snap(1, 'healthy', { active: true })],
     }
 
-    expect(lenient(ctx({ ...base, lagBlocks: 50 }))).toEqual({ action: 'hold' })
-    expect(lenient(ctx({ ...base, lagBlocks: 150 }))).toEqual({ action: 'failover' })
+    expect(sticky(ctx(batch))).toEqual({ action: 'hold' })
+    expect(defaultFallbackStrategy()(ctx(batch))).toEqual({ action: 'use', index: 0 })
   })
 })

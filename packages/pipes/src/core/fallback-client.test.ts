@@ -60,12 +60,12 @@ const QUERY: any = { type: 'evm', fromBlock: 0 }
 
 function fallback(
   sources: FallbackClientSource[],
-  policy?: FallbackClientOptions['policy'],
+  detection?: FallbackClientOptions['detection'],
   extra?: Partial<FallbackClientOptions>,
 ): FallbackClient {
   // Probes default off in these tests — the generic probe issues real `getStream` slices, which
   // would pollute the mocks' read records. Probe behavior is exercised via per-source overrides.
-  return new FallbackClient({ sources, policy, capabilityProbe: false, logger: silent, ...extra })
+  return new FallbackClient({ sources, detection: { capabilityProbe: false, ...detection }, logger: silent, ...extra })
 }
 
 async function collect(fb: FallbackClient, query: any = QUERY): Promise<number[]> {
@@ -254,7 +254,6 @@ describe('FallbackClient — supervisor', () => {
       cooldownMs: 50,
       headTtlMs: 0,
       livenessRecoverThreshold: 1, // one head-poll liveness pass is enough for a probe-less source
-      preferPrimary: 'eager',
       maxLagBlocks: null,
       maxStalenessMs: null,
     })
@@ -285,14 +284,11 @@ describe('FallbackClient — supervisor', () => {
       }
     })
 
-    const fb = fallback([s0, s1], {
-      clock: () => now,
-      cooldownMs: 50,
-      capabilityProbeIntervalMs: 0,
-      headTtlMs: 0,
-      livenessRecoverThreshold: 1,
-      preferPrimary: 'onFailureOnly', // sticky: only switch on failure, never reclaim
-    })
+    const fb = fallback(
+      [s0, s1],
+      { clock: () => now, cooldownMs: 50, capabilityProbeIntervalMs: 0, headTtlMs: 0, livenessRecoverThreshold: 1 },
+      { strategy: { preferPrimary: 'onFailureOnly' } }, // sticky: only switch on failure, never reclaim
+    )
 
     const out = await collect(fb)
 
@@ -382,7 +378,11 @@ describe('FallbackClient — supervisor', () => {
     const down: StreamFn = async function* () {
       throw new Error('down')
     }
-    const fb = fallback([source('s0', down), source('s1', down)], { allDownTimeoutMs: 0, allDownPollMs: 1 })
+    const fb = fallback(
+      [source('s0', down), source('s1', down)],
+      { allDownPollMs: 1 },
+      { strategy: { allDownTimeoutMs: 0 } },
+    )
 
     await expect(collect(fb)).rejects.toThrowError(/all fallback data sources/)
   })
@@ -396,13 +396,11 @@ describe('FallbackClient — supervisor', () => {
       await wait(60)
       throw new Error('s0 down')
     })
-    const fb = fallback([s0], {
-      maxStalenessMs: 30,
-      freshnessTickMs: 5,
-      allDownTimeoutMs: 0,
-      allDownPollMs: 1,
-      cooldownMs: 60_000,
-    })
+    const fb = fallback(
+      [s0],
+      { maxStalenessMs: 30, freshnessTickMs: 5, allDownPollMs: 1, cooldownMs: 60_000 },
+      { strategy: { allDownTimeoutMs: 0 } },
+    )
 
     const it = fb.getStream(QUERY)[Symbol.asyncIterator]()
     expect((await it.next()).value.blocks[0].header.number).toBe(50)
