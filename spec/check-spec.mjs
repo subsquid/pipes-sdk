@@ -50,7 +50,9 @@ const BOLD_DEF = /\*\*((?:REQ|DEF|WP|RP|CN|INV|LIV|FM|RS|PF|SLI|HZ|OB|IB|CT|GAP)
 for (const [f, t] of text) {
   const b = base(f)
   for (const m of t.matchAll(BOLD_DEF)) addDef(m[1], f)
-  if (b === '09-failure-model.md') for (const m of t.matchAll(/^\|\s*(FM-\d+)\s*\|/gm)) addDef(m[1], f)
+  // FM rows live in 09; module 16 owns the fallback band (FM-60…69) in the same table form.
+  if (b === '09-failure-model.md' || b === '16-fallback.md')
+    for (const m of t.matchAll(/^\|\s*(FM-\d+)\s*\|/gm)) addDef(m[1], f)
   if (b === '13-conformance-tdd.md') {
     for (const m of t.matchAll(/^\|\s*(CT-\d+)\s*\|/gm)) addDef(m[1], f)
     for (const m of t.matchAll(/^\|\s*(GAP-\d+)\s*\|/gm)) addDef(m[1], f)
