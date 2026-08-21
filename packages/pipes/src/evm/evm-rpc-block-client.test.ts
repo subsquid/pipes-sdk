@@ -34,4 +34,16 @@ describe('EvmRpcBlockClient', () => {
 
     await expect(client.resolveTimestamp(1700000000)).rejects.toThrowError(/portal source/)
   })
+
+  it('rejects a non-EVM query with an actionable error', async () => {
+    // It implements the chain-generic client contract, but only speaks EVM.
+    const client = new EvmRpcBlockClient({ rpc: { url: KEYED_URL } })
+    const solanaQuery = { type: 'solana', fields: {}, fromBlock: 0 } as never
+
+    await expect(
+      (async () => {
+        for await (const b of client.getStream(solanaQuery)) void b
+      })(),
+    ).rejects.toThrowError(/only serve EVM queries, got type "solana"/)
+  })
 })

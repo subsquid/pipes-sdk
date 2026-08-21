@@ -1,13 +1,12 @@
-import { BlockCursor } from '~/core/types.js'
-import { BlockStreamClient, StreamData } from '~/portal-client/index.js'
+import { BlockRef, BlockStreamClient, StreamData } from '~/portal-client/index.js'
 
 export type MockBlockStreamClientOptions = {
   name?: string
   finalized?: boolean
   /** The batches `getStream` serves; receives the query it was called with. */
   stream?: (query: any) => AsyncGenerator<StreamData<any>>
-  /** The independent head poll; defaults to "no head known". */
-  getHead?: () => Promise<BlockCursor | undefined>
+  /** The independent head poll (receives the caller's options); defaults to "no head known". */
+  getHead?: (options?: { finalized: boolean }) => Promise<BlockRef | undefined>
 }
 
 export type MockBlockStreamClient = BlockStreamClient & {
@@ -34,7 +33,8 @@ export function mockBlockStreamClient(options: MockBlockStreamClientOptions = {}
     finalized: options.finalized ?? false,
     getUrl: () => `mock://${name}`,
     getMetadata: async () => ({ dataset: name, aliases: [], real_time: true, start_block: 0 }),
-    getHead: async () => (options.getHead ? await options.getHead() : undefined),
+    getHead: async (headOptions?: { finalized: boolean }) =>
+      options.getHead ? await options.getHead(headOptions) : undefined,
     resolveTimestamp: async () => {
       throw new Error(`${name}: resolveTimestamp unsupported`)
     },
