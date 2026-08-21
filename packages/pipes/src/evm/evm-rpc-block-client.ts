@@ -1,24 +1,12 @@
-import { mapRpcBlock } from '@subsquid/evm-normalization'
-import {
-  EvmRpcClient,
-  EvmRpcDataSource,
-  Rpc,
-  Block as RpcBlock,
-  DataRequest as RpcDataRequest,
-} from '@subsquid/evm-rpc'
-import { toJSON } from '@subsquid/util-internal-json'
-import { cast } from '@subsquid/util-internal-validation'
+import { EvmRpcClient, EvmRpcDataSource, Rpc, DataRequest as RpcDataRequest } from '@subsquid/evm-rpc'
 
 import { redactUrl } from '~/core/fallback-diagnostics.js'
 import { ApiDataset, BlockRef, PortalBlockStreamOptions } from '~/portal-client/client.js'
 import { ForkException, GetBlock, PortalBlockStream, Query, StreamData } from '~/portal-client/index.js'
-import { DataRequest, FieldSelection, getBlockSchema } from '~/portal-client/query/evm.js'
+import { FieldSelection } from '~/portal-client/query/evm.js'
 
-import { withRequiredFields } from './rpc/decode.js'
-import { Relations, filterBlock, setUpRelations } from './rpc/filter.js'
-import { augmentFields, dropEmptyBlocks, keptByPosition } from './rpc/project.js'
-import { toRequiredData } from './rpc/request.js'
-import { shimWireBlock } from './rpc/shim.js'
+import { dropEmptyBlocks } from './rpc/project.js'
+import { createWireBlockMapper } from './rpc/wire.js'
 
 /** RPC method-selection toggles (the per-chain "C1" config) merged into the coarse fetch request. */
 export interface RpcMethodOptions {
@@ -125,13 +113,9 @@ export class EvmRpcBlockClient {
 
   async *#stream(query: EvmQueryShape, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<any>> {
     const { type: _type, fields = {}, fromBlock = 0, toBlock, parentBlockHash, ...request } = query
-    const outputFields = withRequiredFields(fields)
-    // The filter needs the where-clause fields decoded even when not selected for output; the wire
-    // blocks keep every field regardless — the downstream cast prunes to the user's selection.
-    const augmented = augmentFields(outputFields, request)
-    const schema = getBlockSchema(augmented)
+    const mapper = createWireBlockMapper(fields, request)
 
-    const coarse = toRequiredData(request, fields)
+    const coarse = mapper.requiredData
     const req: RpcDataRequest = {
       // mapRpcBlock always maps the block's transactions, so full tx objects must be fetched. This
       // is why `RequiredData` carries no `transactions` toggle — it could never be false.
@@ -159,7 +143,7 @@ export class EvmRpcBlockClient {
 
     try {
       for await (const { blocks, finalizedHead } of stream) {
-        const wire = blocks.map((raw) => this.#toWireBlock(raw, coarse, augmented, schema, request))
+        const wire = blocks.map((raw) => mapper.map(raw))
         // Match the Portal: a block left empty by filtering is dropped (boundary blocks kept).
         const data = dropEmptyBlocks(wire, request.includeAllBlocks as boolean | undefined)
         if (data.length === 0) continue
@@ -188,44 +172,6 @@ export class EvmRpcBlockClient {
       throw e
     }
   }
-
-  /**
-   * Normalize a raw RPC block to the portal wire shape and filter its item arrays down to what the
-   * request matches. The predicates run on a throwaway *decoded* copy (`cast` at the augmented
-   * fields); the surviving positions are then mapped back onto the wire arrays — decoded and wire
-   * arrays align 1:1 by construction, and position + object identity (never a synthesized key)
-   * keeps structurally identical items apart.
-   */
-  #toWireBlock(
-    raw: RpcBlock,
-    coarse: { traces: boolean; stateDiffs: boolean },
-    augmented: FieldSelection,
-    schema: ReturnType<typeof getBlockSchema>,
-    request: DataRequest,
-  ): FilterableWireBlock {
-    const normalized = mapRpcBlock(raw, { withTraces: coarse.traces, withStateDiffs: coarse.stateDiffs })
-    const wire = shimWireBlock(toJSON(normalized)) as FilterableWireBlock
-    wire.logs ??= []
-    wire.transactions ??= []
-    wire.traces ??= []
-    wire.stateDiffs ??= []
-
-    const decoded: any = cast(schema, wire)
-    const preLogs = decoded.logs ?? []
-    const preTransactions = decoded.transactions ?? []
-    const preTraces = decoded.traces ?? []
-    const preStateDiffs = decoded.stateDiffs ?? []
-
-    const relations: Relations = setUpRelations(decoded)
-    filterBlock(decoded, request, relations)
-
-    wire.logs = keptByPosition(wire.logs, preLogs, decoded.logs ?? [])
-    wire.transactions = keptByPosition(wire.transactions, preTransactions, decoded.transactions ?? [])
-    wire.traces = keptByPosition(wire.traces, preTraces, decoded.traces ?? [])
-    wire.stateDiffs = keptByPosition(wire.stateDiffs, preStateDiffs, decoded.stateDiffs ?? [])
-
-    return wire
-  }
 }
 
 /** The EVM portal query fields this client consumes (a structural view of `EvmQuery`). */
@@ -237,14 +183,6 @@ type EvmQueryShape = {
   parentBlockHash?: string
   includeAllBlocks?: boolean
   [key: string]: unknown
-}
-
-type FilterableWireBlock = {
-  header: { number: number; hash: string; timestamp?: number }
-  logs: unknown[]
-  transactions: unknown[]
-  traces: unknown[]
-  stateDiffs: unknown[]
 }
 
 interface SqdForkException {
