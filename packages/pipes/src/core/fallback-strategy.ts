@@ -1,17 +1,26 @@
 /**
- * Code-as-config for the fallback's *decisions*. The engine ({@link FallbackClient}) keeps the
- * machinery nobody should have to rewrite — health bookkeeping, liveness/capability probes,
- * head polling, error classification, staleness clocks — and consults a {@link FallbackStrategy}
- * at every decision point: which source to drive, whether to abandon the active one, whether to
- * reclaim a recovered one. The default strategy reproduces the documented policy exactly; a custom
- * one can replace any subset of the decisions (return `undefined` to fall back to the default for
- * that event), so "not our algorithm" is a function away without giving up the machinery.
+ * Code-as-config for the fallback's *decisions*.
  *
- * Safety invariants are NOT delegated: fork propagation, resume-from-cursor and never switching
- * mid-batch stay in the engine regardless of the strategy.
+ * Responsibilities are split in two:
+ *
+ * - **`policy` is data** ({@link FallbackPolicy}): it tunes what the engine *measures* — probe
+ *   cadence, head-poll TTL/timeout, liveness thresholds, cooldowns — and the thresholds the
+ *   *stock decisions* are derived from (`preferPrimary`, `maxLagBlocks`, `maxStalenessMs`,
+ *   `allDownTimeoutMs`). With no strategy installed, the policy fully determines behavior.
+ * - **`strategy` is code** ({@link FallbackStrategy}): a function consulted at every decision
+ *   point — which source to drive, whether to abandon the active one, whether to reclaim a
+ *   recovered one. The measurements still follow the policy; the strategy only replaces what is
+ *   *decided* about them. For every event the stock decision is precomputed and handed to the
+ *   strategy as {@link FallbackStrategyContext.defaultCommand}, so a custom strategy can inspect,
+ *   veto, or amend it — and returning `undefined` simply lets it stand.
+ *
+ * The engine ({@link FallbackClient}) keeps the machinery nobody should have to rewrite — health
+ * bookkeeping, liveness/capability probes, head polling, error classification, staleness clocks —
+ * and its safety invariants are NOT delegated: fork propagation, resume-from-cursor and never
+ * switching mid-batch hold regardless of the strategy.
  */
 import { SourceErrorInfo } from './fallback-diagnostics.js'
-import { AllSourcesDownError, FallbackHealth, ResolvedFallbackPolicy } from './fallback-health.js'
+import { AllSourcesDownError, FallbackHealth, FallbackPolicy, resolveFallbackPolicy } from './fallback-health.js'
 import { BlockCursor } from './types.js'
 
 /** Why the strategy is being consulted. */
@@ -63,6 +72,13 @@ export interface FallbackStrategyContext {
   atTip: boolean
   /** ms since every source went unhealthy; only set on `select` when no source is eligible. */
   allDownMs?: number
+  /**
+   * What the stock strategy ({@link defaultFallbackStrategy} over the configured policy) decides
+   * for this event — always set when a custom strategy is consulted. Inspect it to veto or amend
+   * the stock behavior instead of re-deriving it; returning `undefined` (or `defaultCommand`
+   * itself) lets it stand.
+   */
+  defaultCommand?: FallbackCommand
 }
 
 export type FallbackCommand =
@@ -77,8 +93,20 @@ export type FallbackCommand =
 
 /**
  * Decides what the fallback does at each {@link FallbackEvent}. Returning `undefined` (or nothing)
- * delegates that event to the default strategy, so a custom strategy only has to express what it
- * wants to change — e.g. handle `select` and ignore the rest.
+ * lets the stock decision (`ctx.defaultCommand`) stand, so a custom strategy only has to express
+ * what it wants to change — handle one event and ignore the rest, or veto a specific stock
+ * decision:
+ *
+ * ```ts
+ * // never fail over to the expensive RPC standby while still backfilling
+ * strategy: (ctx) => {
+ *   const d = ctx.defaultCommand
+ *   if (d?.action === 'use' && ctx.sources[d.index].name === 'rpc' && !ctx.atTip) {
+ *     return { action: 'hold' }
+ *   }
+ *   return undefined // everything else: stock behavior
+ * }
+ * ```
  */
 export type FallbackStrategy = (ctx: FallbackStrategyContext) => FallbackCommand | undefined | void
 
@@ -93,8 +121,15 @@ export type FallbackStrategy = (ctx: FallbackStrategyContext) => FallbackCommand
  * - `stall`: fail the active source over once its request has been outstanding longer than
  *   `maxStalenessMs` **and** a fresher source is ahead — if everyone is equally stuck it is a
  *   chain stall, and churning sources would not help, so hold.
+ *
+ * This is what runs when no custom strategy is configured, and what produces
+ * {@link FallbackStrategyContext.defaultCommand} when one is. It is a pure function of the
+ * context, so a custom strategy can also instantiate its own (e.g. with different thresholds) and
+ * delegate to it: `defaultFallbackStrategy({ maxLagBlocks: 100 })(ctx)`.
  */
-export function defaultFallbackStrategy(policy: ResolvedFallbackPolicy): FallbackStrategy {
+export function defaultFallbackStrategy(policyOptions?: FallbackPolicy): FallbackStrategy {
+  const policy = resolveFallbackPolicy(policyOptions)
+
   return (ctx: FallbackStrategyContext): FallbackCommand => {
     switch (ctx.event.type) {
       case 'select': {

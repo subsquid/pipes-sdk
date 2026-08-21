@@ -934,4 +934,58 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     expect(contexts[1].sources[0].health).toBe('unhealthy')
     expect(contexts[1].sources[0].cause?.detail).toContain('connection refused')
   })
+
+  it('hands the stock decision to the custom strategy as ctx.defaultCommand', async () => {
+    const defaults: any[] = []
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      throw new Error('boom')
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(2)
+    })
+    const observe: FallbackStrategy = (ctx) => {
+      if (ctx.event.type === 'select') defaults.push(ctx.defaultCommand)
+      return undefined
+    }
+    const fb = fallback([s0, s1], undefined, { strategy: observe })
+
+    expect(await collect(fb)).toEqual([1, 2])
+
+    // First selection: the stock decision is the primary; after s0's failure, the standby.
+    expect(defaults[0]).toEqual({ action: 'use', index: 0 })
+    expect(defaults[1]).toEqual({ action: 'use', index: 1 })
+  })
+
+  it('a strategy can veto the stock decision it sees in ctx.defaultCommand', async () => {
+    // Same setup as freshness test (a): lag arms at the tip, then trips — the stock decision at
+    // the second boundary is `failover`. The custom strategy vetoes exactly that decision.
+    const s1heads = [95, 110]
+    const s0 = source('s0', async function* () {
+      yield batch(90)
+      yield batch(91)
+      yield batch(92)
+    })
+    const s1 = source(
+      's1',
+      async function* () {
+        yield batch(99) // must never serve
+      },
+      async () => cursor(s1heads.shift() ?? 110),
+    )
+    let vetoed = 0
+    const vetoFailover: FallbackStrategy = (ctx) => {
+      if (ctx.event.type === 'batch' && ctx.defaultCommand?.action === 'failover') {
+        vetoed++
+        return { action: 'hold' }
+      }
+      return undefined
+    }
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 }, { strategy: vetoFailover })
+
+    expect(await collect(fb)).toEqual([90, 91, 92]) // s0 served the whole range
+    expect(vetoed).toBeGreaterThan(0) // the stock failover was actually proposed — and overridden
+    expect(fb.activeIndex).toBe(0)
+    expect(s1.reads).toHaveLength(0)
+  })
 })
