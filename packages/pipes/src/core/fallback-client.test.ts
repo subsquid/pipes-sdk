@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { BlockStreamClient, ForkException, StreamData } from '~/portal-client/index.js'
+import { ForkException, StreamData } from '~/portal-client/index.js'
+import { mockBlockStreamClient } from '~/testing/index.js'
 
 import { FallbackClient, FallbackClientOptions, FallbackClientSource } from './fallback-client.js'
 import { FallbackStrategy } from './fallback-strategy.js'
@@ -38,22 +39,9 @@ type MockSource = FallbackClientSource & { reads: any[] }
 
 /** A mock underlying source; `reads` records every `getStream` query it received. */
 function source(name: string, stream: StreamFn, getHead?: HeadFn, probeCapability?: ProbeFn): MockSource {
-  const reads: any[] = []
-  const client = {
-    finalized: false,
-    getUrl: () => `mock://${name}`,
-    getMetadata: async () => ({ dataset: name, aliases: [], real_time: true, start_block: 0 }),
-    getHead: async () => (getHead ? await getHead() : undefined),
-    resolveTimestamp: async () => {
-      throw new Error(`${name}: resolveTimestamp unsupported`)
-    },
-    getStream: (query: any) => {
-      reads.push(query)
-      return { [Symbol.asyncIterator]: () => stream(query)[Symbol.asyncIterator]() }
-    },
-  } as unknown as BlockStreamClient
+  const client = mockBlockStreamClient({ name, stream, getHead })
 
-  return { name, client, reads, ...(probeCapability ? { probeCapability: probeCapability as any } : {}) }
+  return { name, client, reads: client.reads, ...(probeCapability ? { probeCapability: probeCapability as any } : {}) }
 }
 
 const QUERY: any = { type: 'evm', fromBlock: 0 }

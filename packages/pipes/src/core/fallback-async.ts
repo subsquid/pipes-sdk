@@ -39,3 +39,16 @@ export function safeReturn(it: AsyncIterator<unknown>): void {
     /* ignore */
   }
 }
+
+/**
+ * A cancellable timer: `promise` resolves after `ms` unless `cancel()` clears it first. The stall
+ * ticker races it against the pending batch, and must clear the timer on every race winner so
+ * abandoned ticks don't accumulate.
+ */
+export function delay(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout>
+  const promise = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms)
+  })
+  return { promise, cancel: () => clearTimeout(timer) }
+}

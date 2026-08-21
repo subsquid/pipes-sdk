@@ -168,22 +168,19 @@ describe('evmStream', () => {
     ).toThrow(/array of sources/)
   })
 
-  it('rejects the portal cache over a fallback source list', async () => {
+  it('rejects the portal cache over a fallback source list at construction', async () => {
     portal = await mockPortal([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
+    const url = portal.url
 
-    const stream = evmStream({
-      id: 'test',
-      portal: [portal.url],
-      cache: { getStream: () => ({}) as any },
-      outputs: evmQuery()
-        .addFields({ block: { number: true, hash: true } })
-        .addRange({ from: 0, to: 1 }),
-    })
-
-    await expect(
-      (async () => {
-        for await (const b of stream) void b
-      })(),
-    ).rejects.toThrow(/cache requires a single Portal source/)
+    expect(() =>
+      evmStream({
+        id: 'test',
+        portal: [url],
+        cache: { getStream: () => ({}) as any },
+        outputs: evmQuery()
+          .addFields({ block: { number: true, hash: true } })
+          .addRange({ from: 0, to: 1 }),
+      }),
+    ).toThrow(/cache requires a single Portal source/)
   })
 })

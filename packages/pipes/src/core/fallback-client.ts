@@ -1,3 +1,4 @@
+import { sleep } from '~/internal/function.js'
 import { ApiDataset, BlockRef } from '~/portal-client/client.js'
 import {
   BlockStreamClient,
@@ -9,12 +10,13 @@ import {
   isForkException,
 } from '~/portal-client/index.js'
 
-import { safeReturn, withTimeout } from './fallback-async.js'
+import { delay, safeReturn, withTimeout } from './fallback-async.js'
 import { CapabilityProbeOptions, ProbeResult, makeCapabilityProbe } from './fallback-capability.js'
 import { SourceErrorInfo, classifyError, freshnessFailure, strategyFailure } from './fallback-diagnostics.js'
 import {
   AllSourcesDownError,
   FallbackDetectionOptions,
+  FallbackHealth,
   ResolvedFallbackDetection,
   SourceHealth,
   resolveFallbackDetection,
@@ -28,6 +30,7 @@ import {
   defaultFallbackStrategy,
 } from './fallback-strategy.js'
 import { Logger, defaultLogger } from './logger.js'
+import { cursorFromHeader } from './portal-source.js'
 import { BlockCursor } from './types.js'
 
 /** One ranked underlying source: any {@link BlockStreamClient} plus its display name. */
@@ -71,25 +74,11 @@ export interface FallbackMetrics {
   chainHead: number | undefined
   /** Set when every source is stuck at the same head (no fresher alternative to switch to). */
   chainStalled: boolean
-  sources: { name: string; health: SourceHealth['state']; active: boolean; cause?: SourceErrorInfo }[]
+  sources: { name: string; health: FallbackHealth; active: boolean; cause?: SourceErrorInfo }[]
 }
 
 /** Returned by the stall-aware fetch when the strategy decided to fail the active source over. */
 const FAILOVER = Symbol('failover')
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function delay(ms: number): { promise: Promise<void>; cancel: () => void } {
-  let timer: ReturnType<typeof setTimeout>
-  const promise = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, ms)
-  })
-  return { promise, cancel: () => clearTimeout(timer) }
-}
-
-type WireBlock = { header: { number: number; hash: string; timestamp?: number } }
 
 /**
  * A meta-client over an ordered list of {@link BlockStreamClient}s — itself a `BlockStreamClient`,
@@ -244,7 +233,7 @@ export class FallbackClient implements BlockStreamClient {
       lastError = undefined
       this.#setActive(active)
 
-      const q: any = { ...query }
+      const q: Query = { ...query }
       if (cursor) {
         q.fromBlock = cursor.number + 1
         q.parentBlockHash = cursor.hash
@@ -273,27 +262,23 @@ export class FallbackClient implements BlockStreamClient {
             this.#health[active].onCapability(true)
 
             if (batch.blocks.length > 0) {
-              const lastBlock = batch.blocks[batch.blocks.length - 1] as WireBlock
-              cursor = {
-                number: lastBlock.header.number,
-                hash: lastBlock.header.hash,
-                timestamp: lastBlock.header.timestamp,
-              }
+              cursor = cursorFromHeader(batch.blocks[batch.blocks.length - 1])
             }
 
             yield batch as StreamData<GetBlock<Q>>
 
-            // Boundary decision: refresh the other sources' heads (which doubles as their
-            // liveness/capability driver), update the lag gauges, then let the strategy decide
-            // whether to stay, fail over (lag), or reclaim a recovered higher-preference source.
-            const { command, lagging } = await this.#decideAtBoundary(active, cursor)
+            // Observe, then decide: refresh the other sources' heads (which doubles as their
+            // liveness/capability driver) and update the lag gauges to produce the boundary event,
+            // then let the strategy decide whether to stay, fail over, or reclaim a source.
+            const event = await this.#observeBoundary(active, cursor)
+            const command = this.#decide(event, cursor)
             if (command.action === 'use' && command.index !== active) {
               this.#assertSourceIndex(command.index)
               forced = command.index
               break
             }
             if (command.action === 'failover') {
-              this.#failSource(active, this.#boundaryFailoverCause(lagging))
+              this.#failSource(active, this.#boundaryFailoverCause(event.lagging))
               break
             }
             if (command.action === 'abort') {
@@ -385,11 +370,11 @@ export class FallbackClient implements BlockStreamClient {
     }
   }
 
-  /** Refresh other-source heads, update lag gauges, then consult the strategy at the boundary. */
-  async #decideAtBoundary(
+  /** Refresh other-source heads and the lag gauges, and produce the boundary event's verdict. */
+  async #observeBoundary(
     active: number,
     cursor: BlockCursor | undefined,
-  ): Promise<{ command: FallbackCommand; lagging: boolean }> {
+  ): Promise<Extract<FallbackEvent, { type: 'batch' }>> {
     const others = await this.#chainHeadOthers(active, cursor)
     const lastNumber = cursor?.number ?? -1
     this.chainHead = others != null ? Math.max(others, lastNumber) : lastNumber
@@ -410,7 +395,7 @@ export class FallbackClient implements BlockStreamClient {
     // The detection verdict rides on the event: the strategy decides what to do about it.
     const lagging = this.#detection.maxLagBlocks != null && this.#lagArmed && this.lag > this.#detection.maxLagBlocks
 
-    return { command: this.#decide({ type: 'batch', lagging }, cursor), lagging }
+    return { type: 'batch', lagging }
   }
 
   /** Why the active source was failed over at a boundary — lag when the detection said so. */
