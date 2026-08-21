@@ -3,7 +3,7 @@ import type { Codec } from '@subsquid/evm-codec'
 
 import { BlockCursor, Logger, PortalRange, createTarget } from '~/core/index.js'
 import { arrayify } from '~/internal/array.js'
-import { PortalClient } from '~/portal-client/client.js'
+import { BlockStreamClient } from '~/portal-client/client.js'
 import { Log, LogRequest } from '~/portal-client/query/evm.js'
 
 import {
@@ -187,7 +187,7 @@ export class Factory<T extends EventArgs> {
   }
 
   /** @internal */
-  async runPreindex({ portal, range, logger }: { portal: PortalClient; range: PortalRange; logger: Logger }) {
+  async runPreindex({ portal, range, logger }: { portal: BlockStreamClient; range: PortalRange; logger: Logger }) {
     const name = `factory preindexing ${this.factoryAddress().join(', ')}`
 
     logger.info(`Starting ${name}`)

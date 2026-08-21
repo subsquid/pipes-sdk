@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { BlockStreamClient, ForkException, StreamData } from '~/portal-client/index.js'
+import { ForkException, StreamData } from '~/portal-client/index.js'
+import { MockBlockStreamClient, mockBlockStreamClient } from '~/testing/index.js'
 
 import { makeCapabilityProbe } from './fallback-capability.js'
 import { BlockCursor } from './types.js'
@@ -20,22 +21,8 @@ function batch(n: number): StreamData<{ header: { number: number; hash: string }
 type StreamFn = (query: any) => AsyncGenerator<StreamData<any>>
 
 /** A mock client; `reads` records every `getStream` query it received. */
-function client(stream: StreamFn): BlockStreamClient & { reads: any[] } {
-  const reads: any[] = []
-  return {
-    finalized: false,
-    reads,
-    getUrl: () => 'mock://probe',
-    getMetadata: async () => ({ dataset: 'mock', aliases: [], real_time: true, start_block: 0 }),
-    getHead: async () => undefined,
-    resolveTimestamp: async () => {
-      throw new Error('unsupported')
-    },
-    getStream: (query: any) => {
-      reads.push(query)
-      return { [Symbol.asyncIterator]: () => stream(query)[Symbol.asyncIterator]() }
-    },
-  }
+function client(stream: StreamFn): MockBlockStreamClient {
+  return mockBlockStreamClient({ stream })
 }
 
 const QUERY = { type: 'evm', fields: { block: { number: true } }, fromBlock: 0, parentBlockHash: '0xdead' }

@@ -94,13 +94,15 @@ export function evmStream<Out extends EvmOutputs>({
     )
   }
 
-  let source: typeof portal | BlockStreamClient = portal
+  let source: string | PortalClientOptions | BlockStreamClient
   if (Array.isArray(portal)) {
     const client = createEvmFallbackClient(portal, fallback)
     if (metrics) {
       registerFallbackMetrics(metrics.metrics, client)
     }
     source = client
+  } else {
+    source = portal
   }
 
   type F = { block: { hash: true; number: true } }
@@ -110,7 +112,7 @@ export function evmStream<Out extends EvmOutputs>({
 
   return new PortalStream<EvmQueryBuilder<F>, EvmStreamData<Out>>({
     id,
-    portal: source as string | PortalClientOptions | BlockStreamClient,
+    portal: source,
     query,
     cache,
     logger,

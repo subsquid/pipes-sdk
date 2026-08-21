@@ -1,5 +1,4 @@
 import {
-  BlockCursor,
   DefaultFallbackStrategyOptions,
   FallbackClient,
   FallbackClientSource,
@@ -195,7 +194,7 @@ function lazyEvmRpcBlockClient(config: {
     getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
       async function* stream(): AsyncGenerator<StreamData<GetBlock<Q>>> {
         const client = await load()
-        yield* client.getStream(query, options) as AsyncIterable<StreamData<GetBlock<Q>>>
+        yield* client.getStream(query, options)
       }
       return {
         [Symbol.asyncIterator]: () => stream()[Symbol.asyncIterator](),
@@ -203,6 +202,3 @@ function lazyEvmRpcBlockClient(config: {
     },
   }
 }
-
-/** Re-exported so strategy authors can anchor switches to the pipe's resume cursor type. */
-export type { BlockCursor }

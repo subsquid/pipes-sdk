@@ -3,7 +3,7 @@ import { EvmRpcClient, EvmRpcDataSource, Rpc, DataRequest as RpcDataRequest } fr
 import { redactUrl } from '~/core/fallback-diagnostics.js'
 import { ApiDataset, BlockRef, PortalBlockStreamOptions } from '~/portal-client/client.js'
 import { ForkException, GetBlock, PortalBlockStream, Query, StreamData } from '~/portal-client/index.js'
-import { FieldSelection } from '~/portal-client/query/evm.js'
+import { Query as EvmQuery } from '~/portal-client/query/evm.js'
 
 import { dropEmptyBlocks } from './rpc/project.js'
 import { createWireBlockMapper } from './rpc/wire.js'
@@ -104,14 +104,14 @@ export class EvmRpcBlockClient {
     const self = this
     return {
       [Symbol.asyncIterator]() {
-        return self.#stream(query as EvmQueryShape, options)[Symbol.asyncIterator]() as AsyncIterator<
+        return self.#stream(query as EvmQuery, options)[Symbol.asyncIterator]() as AsyncIterator<
           StreamData<GetBlock<Q>>
         >
       },
     }
   }
 
-  async *#stream(query: EvmQueryShape, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<any>> {
+  async *#stream(query: EvmQuery, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<any>> {
     const { type: _type, fields = {}, fromBlock = 0, toBlock, parentBlockHash, ...request } = query
     const mapper = createWireBlockMapper(fields, request)
 
@@ -145,7 +145,7 @@ export class EvmRpcBlockClient {
       for await (const { blocks, finalizedHead } of stream) {
         const wire = blocks.map((raw) => mapper.map(raw))
         // Match the Portal: a block left empty by filtering is dropped (boundary blocks kept).
-        const data = dropEmptyBlocks(wire, request.includeAllBlocks as boolean | undefined)
+        const data = dropEmptyBlocks(wire, request.includeAllBlocks)
         if (data.length === 0) continue
 
         const head = finalizedHead ? { number: finalizedHead.number, hash: finalizedHead.hash } : undefined
@@ -172,17 +172,6 @@ export class EvmRpcBlockClient {
       throw e
     }
   }
-}
-
-/** The EVM portal query fields this client consumes (a structural view of `EvmQuery`). */
-type EvmQueryShape = {
-  type?: string
-  fields?: FieldSelection
-  fromBlock?: number
-  toBlock?: number
-  parentBlockHash?: string
-  includeAllBlocks?: boolean
-  [key: string]: unknown
 }
 
 interface SqdForkException {

@@ -243,6 +243,12 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       profiler: typeof options.profiler === 'undefined' ? process.env.NODE_ENV !== 'production' : options.profiler,
     }
 
+    if (this.#options.cache && !(this.#portal instanceof PortalClient)) {
+      // The cache both keys and *fetches* through a real portal client; a custom client
+      // (RPC-backed, fallback) has no portal to fetch through, so this cannot silently no-op.
+      throw new Error('portal cache requires a single Portal source; it cannot wrap a custom block stream client')
+    }
+
     this.#metricServer = options.metrics ?? noopMetricsServer()
     this.#transformers = options.transformers || []
 
@@ -300,12 +306,6 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
         fromBlock: range.from,
         toBlock: range.to,
         parentBlockHash: isResumeContinuation ? cursor.hash : undefined,
-      }
-
-      if (this.#options.cache && !(this.#portal instanceof PortalClient)) {
-        // The cache both keys and *fetches* through a real portal client; a custom client
-        // (RPC-backed, fallback) has no portal to fetch through, so this cannot silently no-op.
-        throw new Error('portal cache requires a single Portal source; it cannot wrap a custom block stream client')
       }
 
       // `portal` already enforces finality when the target requires it. Forwarding the effective
