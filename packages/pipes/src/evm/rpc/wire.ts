@@ -39,8 +39,14 @@ export interface WireBlockMapper {
  * selection, exactly as it prunes portal output.
  */
 export function createWireBlockMapper(fields: FieldSelection, request: DataRequest): WireBlockMapper {
-  const augmented = augmentFields(withRequiredFields(fields), request)
-  const schema = getBlockSchema(augmented)
+  // Decode only what *filtering* reads: the structural fields relations are built from, plus the
+  // fields the where-clauses evaluate. Deliberately NOT the user's output selection — a receipt-
+  // backed output field (`gasUsed`, `status`) is only fetched when transactions are requested, so
+  // casting the pre-filter block at the output selection would throw on a perfectly valid query
+  // that selects transaction fields while requesting only logs. The wire block keeps every field
+  // regardless; the downstream normalize/cast decodes the surviving items at the user's selection.
+  const filterFields = augmentFields(withRequiredFields({}), request)
+  const schema = getBlockSchema(filterFields)
   const requiredData = toRequiredData(request, fields)
 
   return {
