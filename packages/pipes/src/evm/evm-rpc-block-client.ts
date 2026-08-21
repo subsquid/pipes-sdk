@@ -112,6 +112,11 @@ export class EvmRpcBlockClient {
   }
 
   async *#stream(query: EvmQuery, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<any>> {
+    if (query.type !== 'evm') {
+      // The client implements the chain-generic contract but can only serve EVM queries; failing
+      // here names the mistake instead of surfacing it as a confusing mapping/decoding error.
+      throw new Error(`EvmRpcBlockClient can only serve EVM queries, got type "${query.type}"`)
+    }
     const { type: _type, fields = {}, fromBlock = 0, toBlock, parentBlockHash, ...request } = query
     const mapper = createWireBlockMapper(fields, request)
 
@@ -154,6 +159,9 @@ export class EvmRpcBlockClient {
           blocks: data,
           head: { finalized: head, latest: head ? { number: head.number } : undefined },
           meta: {
+            // A real measurement, deliberately: the serialize is a few ms per batch while the RPC
+            // fetch it accompanies takes seconds, and 0 would render throughput as broken. The
+            // wire JSON is ASCII (hex strings + numbers), so string length equals byte length.
             bytes: JSON.stringify(data).length,
             requestedFromBlock: fromBlock,
             lastBlockReceivedAt: new Date(),

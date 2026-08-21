@@ -127,13 +127,22 @@ export interface BlockStreamClient {
   getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>>
 }
 
-/** True for anything satisfying the {@link BlockStreamClient} contract (duck-typed on `getStream`). */
+/**
+ * True for anything satisfying the full {@link BlockStreamClient} contract. Every member is
+ * checked so a partial object fails classification here — immediately and clearly — rather than
+ * deep inside a stream when the missing method is first called.
+ */
 export function isBlockStreamClient(value: unknown): value is BlockStreamClient {
+  if (typeof value !== 'object' || value == null) return false
+  const client = value as BlockStreamClient
+
   return (
-    typeof value === 'object' &&
-    value != null &&
-    typeof (value as BlockStreamClient).getStream === 'function' &&
-    typeof (value as BlockStreamClient).getHead === 'function'
+    typeof client.finalized === 'boolean' &&
+    typeof client.getUrl === 'function' &&
+    typeof client.getMetadata === 'function' &&
+    typeof client.getHead === 'function' &&
+    typeof client.resolveTimestamp === 'function' &&
+    typeof client.getStream === 'function'
   )
 }
 

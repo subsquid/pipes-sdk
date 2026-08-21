@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ForkException, StreamData } from '~/portal-client/index.js'
+import { BlockRef, ForkException, StreamData } from '~/portal-client/index.js'
 import { mockBlockStreamClient } from '~/testing/index.js'
 
 import { FallbackClient, FallbackClientOptions, FallbackClientSource } from './fallback-client.js'
@@ -17,7 +17,7 @@ import { BlockCursor } from './types.js'
 /** Keep the default cause-logging (warn) out of the test output. */
 const silent = defaultLogger({ level: 'silent' })
 
-function cursor(n: number, hash = `0x${n}`): BlockCursor {
+function cursor(n: number, hash = `0x${n}`): BlockRef {
   return { number: n, hash }
 }
 
@@ -32,7 +32,7 @@ function batch(n: number, opts: { hash?: string; finalized?: number } = {}): Str
 }
 
 type StreamFn = (query: any) => AsyncGenerator<StreamData<WireBlock>>
-type HeadFn = () => Promise<BlockCursor | undefined>
+type HeadFn = () => Promise<BlockRef | undefined>
 type ProbeFn = () => Promise<{ ok: boolean; cause?: any }>
 
 type MockSource = FallbackClientSource & { reads: any[] }
@@ -675,7 +675,7 @@ describe('FallbackClient — freshness', () => {
 
 describe('FallbackClient — head-poll timeout (robustness)', () => {
   // A head poll that never resolves — models a sick standby: TCP up, no response.
-  const hangHead = (): Promise<BlockCursor | undefined> => new Promise<BlockCursor | undefined>(() => {})
+  const hangHead = (): Promise<BlockRef | undefined> => new Promise<BlockRef | undefined>(() => {})
 
   it('a sick standby whose getHead hangs does not stall the healthy active source', async () => {
     const s0 = source('s0', async function* () {
