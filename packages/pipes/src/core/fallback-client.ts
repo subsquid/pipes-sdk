@@ -155,7 +155,7 @@ export class FallbackClient implements BlockStreamClient {
   /** Clock of the last capability probe per source — throttles the (full-query) standby probe. */
   readonly #lastProbeAt: number[] = []
   /** Cached independent head per source, with the clock it was fetched at (TTL `headTtlMs`). */
-  readonly #headCache: ({ value: number | undefined; at: number } | undefined)[] = []
+  readonly #headCache: ({ value: number | undefined; at: number; cursorAt?: number } | undefined)[] = []
   /** Lag failover arms only once the tip is first reached, so a deep backfill never trips it. */
   #lagArmed = false
   /** The last source actually driven — survives the all-down gap so switch counting stays correct. */
@@ -164,6 +164,12 @@ export class FallbackClient implements BlockStreamClient {
   #streaming = false
   /** Sources abandoned for not making progress — they must prove they can serve before a reclaim. */
   readonly #leftUnproductive: boolean[] = []
+  /**
+   * Whether the last mid-request failover followed the *stalled* verdict. Captured when the
+   * decision is taken because it cannot be recomputed afterwards: a source that hangs carries its
+   * wait in the outstanding request, which is gone by the time the cause is built.
+   */
+  #stallWasStale = false
   /**
    * Bumped per stream. A capability probe is fire-and-forget and can outlive the stream that
    * started it (its own timeout is 30s by default), so its verdict is stamped with the generation
@@ -340,10 +346,7 @@ export class FallbackClient implements BlockStreamClient {
           while (true) {
             const next = await this.#nextWithStallTicks(iterator, active, cursor)
             if (next === FAILOVER) {
-              this.#failSource(
-                active,
-                freshnessFailure('stream', 'stale', 'no batch progress while a fresher source was ahead'),
-              )
+              this.#failSource(active, this.#stallFailoverCause())
               break
             }
             if (next.done) return // source completed (bounded stream)
@@ -366,7 +369,7 @@ export class FallbackClient implements BlockStreamClient {
             // liveness/capability driver) and update the lag gauges to produce the boundary event,
             // then let the strategy decide whether to stay, fail over, or reclaim a source.
             const event = await this.#observeBoundary(active, cursor)
-            const command = this.#decide(event, cursor)
+            const command = this.#decideInStream(event, cursor)
             if (command.action === 'use' && command.index !== active) {
               this.#assertSourceIndex(command.index, true)
               forced = command.index
@@ -377,6 +380,7 @@ export class FallbackClient implements BlockStreamClient {
               break
             }
             if (command.action === 'abort') {
+              this.#clearActive()
               throw new StreamAbort(command.error ?? new AllSourcesDownError())
             }
           }
@@ -409,14 +413,22 @@ export class FallbackClient implements BlockStreamClient {
    *   "acceptable distance behind" the lag check uses; disabling lag *failover* does not abolish
    *   the notion of jitter, so the default still applies.
    */
-  #isBehind(i: number, cursor: BlockCursor | undefined): boolean {
-    const head = this.#headCache[i]?.value
-    if (cursor == null) return false
+  #isBehind(i: number): boolean {
+    const sample = this.#headCache[i]
+    // Head and cursor are compared as sampled at the same instant. Reading the live cursor against
+    // a head cached up to `headTtlMs` ago would count everything the chain produced in between as
+    // "behind" — on a sub-second chain that skew alone exceeds the whole allowance.
+    if (sample?.cursorAt == null) return false
+    const head = sample.value
 
-    if (this.#leftUnproductive[i]) return head == null || head <= cursor.number
+    // Dropped for not making progress: it has to be level with the pipe again before we go back,
+    // or we would stall, fail over and crawl back in a loop. Being *level* is enough — demanding
+    // it be ahead of a tip-following source is a bar nothing can clear.
+    if (this.#leftUnproductive[i]) return head == null || head < sample.cursorAt
 
+    // Dropped for a fault: only a structural gap disqualifies it, never ordinary ingestion jitter.
     const allowance = this.#detection.maxLagBlocks ?? DEFAULT_BEHIND_ALLOWANCE
-    return head != null && head + allowance < cursor.number
+    return head != null && head + allowance < sample.cursorAt
   }
 
   /** The *stalled* verdict: unproductive wait past the window, optionally plus an open request. */
@@ -424,6 +436,19 @@ export class FallbackClient implements BlockStreamClient {
     return (
       this.#detection.maxStalenessMs != null && this.#unproductiveMs + outstandingMs > this.#detection.maxStalenessMs
     )
+  }
+
+  /**
+   * Consult the strategy from inside the read loop. A strategy that throws is the same class of
+   * programmer error as one returning `abort` or a bad index — the supervisor's own catch would
+   * otherwise blame the source and re-drive it forever.
+   */
+  #decideInStream(event: FallbackEvent, cursor: BlockCursor | undefined): FallbackCommand {
+    try {
+      return this.#decide(event, cursor)
+    } catch (e) {
+      throw new StreamAbort(e)
+    }
   }
 
   /** Consult the strategy (custom first, default for unanswered events). */
@@ -438,7 +463,7 @@ export class FallbackClient implements BlockStreamClient {
         active: this.activeIndex === i,
         cause: this.#health[i].cause,
         head: this.#headCache[i]?.value,
-        behind: this.#isBehind(i, cursor),
+        behind: this.#isBehind(i),
       })),
       cursor,
       lagBlocks: this.lag,
@@ -554,6 +579,15 @@ export class FallbackClient implements BlockStreamClient {
     })
   }
 
+  /** Why the active source was failed over mid-request — a real stall, or the strategy's call. */
+  #stallFailoverCause(): SourceErrorInfo {
+    if (this.#stallWasStale) {
+      return freshnessFailure('stream', 'stale', 'no batch progress while a fresher source was ahead')
+    }
+
+    return strategyFailure('failover decided by the fallback strategy while a request was outstanding')
+  }
+
   /** Why the active source was failed over at a boundary — the detection verdict that tripped. */
   #boundaryFailoverCause(event: Extract<FallbackEvent, { type: 'batch' }>): SourceErrorInfo {
     if (event.stale) {
@@ -621,12 +655,12 @@ export class FallbackClient implements BlockStreamClient {
         ),
       )
       const value = head?.number
-      this.#headCache[i] = { value, at: now }
+      this.#headCache[i] = { value, at: now, cursorAt: last?.number }
       if (value != null) this.#health[i].onLivenessPass()
       this.#maybeProbeCapability(i, last)
       return value
     } catch (e) {
-      this.#headCache[i] = { value: undefined, at: now }
+      this.#headCache[i] = { value: undefined, at: now, cursorAt: last?.number }
       this.#failSource(i, classifyError('liveness', e))
       return undefined
     }
@@ -740,13 +774,14 @@ export class FallbackClient implements BlockStreamClient {
       // Observability: every source is stuck at the same head — switching would not help.
       this.chainStalled = stale && !fresherAhead
 
-      const command = this.#decide({ type: 'stall', pendingMs, stale }, cursor)
+      const command = this.#decideInStream({ type: 'stall', pendingMs, stale }, cursor)
       if (command.action === 'failover') {
-        this.#unproductiveMs = 0
+        this.#stallWasStale = stale
         this.staleness = 0
         return FAILOVER
       }
       if (command.action === 'abort') {
+        this.#clearActive()
         throw new StreamAbort(command.error ?? new AllSourcesDownError())
       }
       // 'hold' / 'use' keep waiting ('use' mid-request would tear a batch; switches happen at boundaries)
@@ -760,7 +795,9 @@ export class FallbackClient implements BlockStreamClient {
    * also reach {@link metrics}; the full `detail` (incl. the request) is logged, never a label.
    */
   #failSource(i: number, cause: SourceErrorInfo): void {
-    if (cause.reason === 'stale') this.#leftUnproductive[i] = true
+    // Only the supervisor's own stall verdict demotes a source; a custom probe is free to report
+    // `stale` about something else entirely.
+    if (cause.check === 'stream' && cause.reason === 'stale') this.#leftUnproductive[i] = true
     const before = this.#health[i].state
     switch (cause.check) {
       case 'stream':

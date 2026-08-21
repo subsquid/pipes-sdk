@@ -1150,6 +1150,103 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     expect(fb.metrics().sources[1].cause).toBeUndefined()
   }, 10_000)
 
+  it('reclaims a source dropped for stalling once it is level with the pipe again', async () => {
+    // Demanding it be *ahead* of the cursor is a bar nothing can clear: the cursor is set by the
+    // source currently driving at the tip, so a recovered primary that has caught up sits exactly
+    // level with it and would stay demoted for the life of the stream.
+    let caughtUp = false
+    let currentTip = 100
+    let runs = 0
+    const primary = source(
+      'primary',
+      async function* () {
+        runs++
+        if (runs === 1) {
+          yield batch(100)
+          await hang() // stops progressing ⇒ dropped for staleness
+        }
+        yield batch(500) // must be reclaimed
+      },
+      // Level with the pipe once caught up — never ahead of a source driving at the tip.
+      async () => cursor(caughtUp ? currentTip : 100),
+    )
+    const standby = source(
+      'standby',
+      async function* () {
+        // Keeps delivering, so nothing ever fails it over: the ONLY way back to the primary is an
+        // eager reclaim, which is what this test is about.
+        for (let n = 101; n <= 140; n++) {
+          currentTip = n
+          yield batch(n)
+          if (n === 103) caughtUp = true // the primary has ingested up to the tip too
+          await wait(12)
+        }
+      },
+      async () => cursor(140),
+    )
+
+    const fb = fallback([primary, standby], {
+      cooldownMs: 20,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+      maxStalenessMs: 60,
+      freshnessTickMs: 10,
+      maxLagBlocks: 10,
+    })
+
+    const got: number[] = []
+    const drain = (async () => {
+      for await (const b of fb.getStream(QUERY)) got.push(...b.blocks.map((x: any) => x.header.number))
+    })()
+    drain.catch(() => {})
+    await wait(600)
+
+    expect(got).toContain(500) // the recovered primary was taken back
+    expect(fb.activeIndex).toBe(0)
+  }, 10_000)
+
+  it('surfaces a throw from a custom strategy instead of blaming the source', async () => {
+    // The same class of programmer error as `abort` or a bad index: caught as a source fault it
+    // would re-drive the source forever, burning CPU and never reaching the caller.
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+    })
+    const fb = fallback(
+      [s0],
+      { maxLagBlocks: null, maxStalenessMs: null },
+      {
+        strategy: (ctx) => {
+          if (ctx.event.type === 'batch') throw new Error('strategy exploded')
+          return undefined
+        },
+      },
+    )
+
+    await expect(collect(fb)).rejects.toThrowError('strategy exploded')
+  }, 10_000)
+
+  it('does not label a strategy-decided stall failover as staleness', async () => {
+    // With staleness detection off, a failover on a `stall` event is the strategy's call alone.
+    // Recording it as `stale` would also latch the stricter reclaim rule on an innocent source.
+    const slow = source('slow', async function* () {
+      yield batch(1)
+      await hang()
+    })
+    const other = source('other', async function* () {
+      yield batch(2)
+    })
+    const fb = fallback(
+      [slow, other],
+      { maxStalenessMs: null, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null },
+      { strategy: (ctx) => (ctx.event.type === 'stall' ? { action: 'failover' } : undefined) },
+    )
+
+    await collect(fb)
+
+    expect(fb.metrics().sources[0].cause).toMatchObject({ reason: 'strategy' })
+  }, 10_000)
+
   it('does not let one hung endpoint block the aggregate head lookup', async () => {
     // `from: 'latest'` resolves through getHead, so a source whose head poll never settles would
     // hang the pipe at startup even though another source can answer.

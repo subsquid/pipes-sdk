@@ -57,9 +57,12 @@ export interface FallbackSourceSnapshot {
   /** Latest independently-polled head block number (TTL-cached); `undefined` when unknown. */
   head?: number
   /**
-   * Detection's verdict that this source's reach has fallen structurally under the pipe, so taking
-   * over would only stall it. Ordinary ingestion jitter does not count — see the allowance in
-   * `FallbackDetectionOptions.maxLagBlocks`.
+   * Detection's verdict that this source's reach has fallen under the pipe, so taking over would
+   * only stall it. Ordinary ingestion jitter does not count — see the allowance in
+   * `FallbackDetectionOptions.maxLagBlocks`; a source dropped for not progressing has to be level
+   * with the pipe again instead. The stock strategy consults it when *reclaiming* a preferred
+   * source, and deliberately not when selecting after a failure: with nothing else to drive, an
+   * optimistic pick beats refusing to read at all.
    */
   behind?: boolean
 }
