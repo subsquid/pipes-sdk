@@ -7,7 +7,7 @@ single-source ingestion contract (04) — every property there continues to hold
 stream a source list produces — and adds nothing to the sink contract: a sink cannot tell
 a multi-source pipe from a single-source one (INV-60).
 
-Bands reserved for this module: `DEF-60…69`, `WP-60…69`, `INV-60…69`, `LIV-60…64`,
+Bands reserved for this module: `DEF-60…69`, `WP-60…79`, `INV-60…69`, `LIV-60…64`,
 `FM-60…69`, `OB-60…66`.
 
 ## Model
@@ -121,6 +121,14 @@ asked"* from *"there is no head"*: the former fails the read, because a resolver
 reads an unanswered lookup as "no head" resolves `latest` to the genesis block and
 silently backfills the entire chain. A timestamp bound requires at least one source able
 to resolve it.
+
+**WP-70 — Transport retry budget.** A source in a list retries a retryable transport
+failure a bounded number of times (`P-FB-SOURCE-RETRIES`) before the failure is reported
+to the machinery, rather than the unbounded retry a lone source performs (ADR-10). Both
+extremes are wrong here: retrying forever waits on a struggling source instead of using
+the standby that exists for it, and not retrying at all spends a switch on every transient
+status. Settings supplied for a specific source override this, and a pre-built transport
+client is used as given.
 
 ## Deliberately unspecified
 
@@ -299,3 +307,4 @@ surface remain individually observable.
 - [ADR-24 — a mixed source list reports itself hot](decisions/ADR-24-conservative-finality.md)
 - [ADR-25 — staleness measures unproductive wait](decisions/ADR-25-staleness-is-unproductive-wait.md)
 - [ADR-26 — reclaim is gated on why the source was left](decisions/ADR-26-reclaim-gating.md)
+- [ADR-27 — a source in a list retries less than a lone source](decisions/ADR-27-source-retry-budget.md)

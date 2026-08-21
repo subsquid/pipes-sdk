@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { FallbackClient } from '~/core/index.js'
 import { BlockStreamClient } from '~/portal-client/index.js'
+import { mockPortal } from '~/testing/index.js'
 
 import * as evmBarrel from './browser.js'
 import { createEvmFallbackClient, translateMissingRpcPeer } from './evm-fallback.js'
@@ -128,6 +129,60 @@ describe('createEvmFallbackClient — source specs', () => {
       /BlockStreamClient/,
     )
   })
+
+  it('rides out a transient transport failure instead of burning a switch', async () => {
+    // A lone portal retries a retryable status indefinitely (there is nothing else to read); the
+    // transport default is zero retries, which would hand over on every blip. Inside a list the
+    // budget is short but non-zero.
+    const flaky = await mockPortal([
+      { statusCode: 503 },
+      { statusCode: 503 },
+      { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
+    ])
+    const standby = await mockPortal([
+      { statusCode: 200, data: [{ header: { number: 1, hash: '0xbad', timestamp: 1000 } }] },
+    ])
+
+    try {
+      const fb = createEvmFallbackClient([flaky.url, standby.url], { detection: { capabilityProbe: false } })
+      const seen: string[] = []
+      for await (const batch of fb.getStream({ type: 'evm', fromBlock: 0 } as any)) {
+        seen.push(...batch.blocks.map((b: any) => b.header.hash))
+        break
+      }
+
+      expect(seen).toEqual(['0x1']) // served by the flaky primary, after its retries
+      expect(fb.switchCount).toBe(0)
+    } finally {
+      await flaky.close()
+      await standby.close()
+    }
+  }, 20_000)
+
+  it("lets a caller's own transport settings win", async () => {
+    // Opting out of the budget must actually opt out: the first failure hands over.
+    const flaky = await mockPortal([{ statusCode: 503 }, { statusCode: 503 }, { statusCode: 503 }])
+    const standby = await mockPortal([
+      { statusCode: 200, data: [{ header: { number: 1, hash: '0xstandby', timestamp: 1000 } }] },
+    ])
+
+    try {
+      const fb = createEvmFallbackClient([{ url: flaky.url, http: { retryAttempts: 0 } }, standby.url], {
+        detection: { capabilityProbe: false },
+      })
+      const seen: string[] = []
+      for await (const batch of fb.getStream({ type: 'evm', fromBlock: 0 } as any)) {
+        seen.push(...batch.blocks.map((b: any) => b.header.hash))
+        break
+      }
+
+      expect(seen).toEqual(['0xstandby'])
+      expect(fb.switchCount).toBe(1)
+    } finally {
+      await flaky.close()
+      await standby.close()
+    }
+  }, 20_000)
 
   it('applies a uniform `finalized` to every source', () => {
     const fb = createEvmFallbackClient(
