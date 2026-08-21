@@ -53,6 +53,20 @@ function rpcClient(): EvmRpcBlockClient {
 }
 
 describe.skipIf(!ENABLED)('EvmRpcBlockClient — Portal parity', () => {
+  it('reports a finalized head but never passes it off as the chain head', async () => {
+    // `latest` is the progress denominator; filling it from the finalized head would report an
+    // unbounded run complete ~a finality window early.
+    const query: any = { type: 'evm', fields: withRequiredFields(FIELDS), fromBlock: BLOCK, toBlock: BLOCK }
+
+    let batches = 0
+    for await (const batch of rpcClient().getStream(query, { finalized: true })) {
+      batches++
+      expect(batch.head.finalized?.number).toBeGreaterThanOrEqual(BLOCK)
+      expect(batch.head.latest).toBeUndefined()
+    }
+    expect(batches).toBeGreaterThan(0)
+  }, 120_000)
+
   it(`block ${BLOCK}: transactions + logs match the Portal output`, async () => {
     const request = { transactions: [{}], logs: [{}] }
     const [portal, rpc] = await Promise.all([

@@ -157,7 +157,13 @@ export class EvmRpcBlockClient {
 
         yield {
           blocks: data,
-          head: { finalized: head, latest: head ? { number: head.number } : undefined },
+          // `latest` is the CHAIN head (the portal fills it from its head header) and drives the
+          // progress denominator, so it must not be fabricated from the finalized head: that reads
+          // as "the chain ends here" and would report an unbounded run complete ~a finality window
+          // early. The stream gives no cheap latest head, so it is left absent — exactly what a
+          // portal response without a head header does. Freshness/lag come from `getHead()`, which
+          // the fallback polls independently.
+          head: { finalized: head },
           meta: {
             // A real measurement, deliberately: the serialize is a few ms per batch while the RPC
             // fetch it accompanies takes seconds, and 0 would render throughput as broken. The

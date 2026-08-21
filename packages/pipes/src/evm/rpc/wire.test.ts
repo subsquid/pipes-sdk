@@ -132,4 +132,21 @@ describe('createWireBlockMapper', () => {
     const withTraces = createWireBlockMapper({}, { traces: [{}] })
     expect(withTraces.requiredData.traces).toBe(true)
   })
+
+  it('serves a query that selects receipt-backed fields while requesting only logs', () => {
+    // Receipts are only fetched when transactions are *requested*, so `gasUsed`/`status` are absent
+    // from the normalized block here. Decoding the pre-filter block at the user's OUTPUT selection
+    // would throw on this perfectly valid query (a shared field preset + a logs-only request); the
+    // internal cast is scoped to what filtering reads, so it doesn't.
+    const mapper = createWireBlockMapper(
+      { transaction: { gasUsed: true, status: true }, log: { address: true } },
+      { logs: [{ address: [ADDR_A] }] },
+    )
+
+    const wire = mapper.map(rawBlock())
+
+    expect(mapper.requiredData.receipts).toBe(false)
+    expect(wire.logs).toHaveLength(1)
+    expect(wire.transactions).toHaveLength(0) // no transactions requested ⇒ none survive filtering
+  })
 })
