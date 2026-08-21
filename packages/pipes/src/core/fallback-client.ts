@@ -96,7 +96,11 @@ const FAILOVER = Symbol('failover')
  * - the finalized-head watermark is owned by the consuming `PortalStream`, which clamps every
  *   batch — a source switch can never un-finalize already-committed data.
  *
- * Supports one active `getStream` at a time (a `PortalStream` never runs more).
+ * Drives **one stream at a time**. The freshness bookkeeping (forced commitment, capability
+ * probes, head cache, tip latch) describes the stream in flight and the observable gauges describe
+ * the source being driven — neither is meaningful for two streams at once. A second concurrent
+ * `getStream` is refused rather than silently interleaved; build one client per stream, which is
+ * what `evmStream` already does.
  */
 export class FallbackClient implements BlockStreamClient {
   readonly #sources: FallbackClientSource[]
@@ -143,6 +147,8 @@ export class FallbackClient implements BlockStreamClient {
   #lagArmed = false
   /** The last source actually driven — survives the all-down gap so switch counting stays correct. */
   #lastActive: number | undefined
+  /** Guards the one-stream-at-a-time invariant that the per-stream state above depends on. */
+  #streaming = false
 
   constructor(options: FallbackClientOptions) {
     if (options.sources.length === 0) {
@@ -221,6 +227,25 @@ export class FallbackClient implements BlockStreamClient {
 
   /** The supervisor: switches sources internally; only `ForkException` (and completion) escape. */
   async *#run<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<GetBlock<Q>>> {
+    if (this.#streaming) {
+      throw new Error(
+        'FallbackClient drives one stream at a time: its freshness state and gauges describe the ' +
+          'stream in flight. Build a separate client (or `evmStream`) per concurrent stream.',
+      )
+    }
+
+    this.#streaming = true
+    try {
+      yield* this.#drive(query, options)
+    } finally {
+      this.#streaming = false
+    }
+  }
+
+  async *#drive<Q extends Query>(
+    query: Q,
+    options?: PortalBlockStreamOptions,
+  ): AsyncGenerator<StreamData<GetBlock<Q>>> {
     // Re-arm the lag trigger per stream: a reused instance starting a later (far-behind-head)
     // backfill must not inherit "reached the tip" from a previous run and false-fire on lag.
     this.#lagArmed = false

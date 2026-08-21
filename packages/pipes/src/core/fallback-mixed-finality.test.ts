@@ -236,3 +236,28 @@ describe('mixed finality — reported finality', () => {
     expect(build([hot, hot]).finalized).toBe(false)
   }, 20_000)
 })
+
+describe('mixed finality — one stream at a time', () => {
+  it('refuses a second concurrent stream instead of interleaving its freshness state', async () => {
+    // The per-stream state (forced commitment, probes, head cache, tip latch) describes the stream
+    // in flight; a second concurrent stream would silently reinterpret the first one's commitment.
+    portal = await finalizedBulkPortal([1, 2, 3])
+    const fb = new FallbackClient({
+      sources: [{ name: 'bulk', client: client(portal, true) }],
+      detection: { capabilityProbe: false },
+      logger: silent,
+    })
+
+    const first = fb.getStream(QUERY)[Symbol.asyncIterator]()
+    await first.next() // start it
+
+    const second = fb.getStream(QUERY)[Symbol.asyncIterator]()
+    await expect(second.next()).rejects.toThrowError(/one stream at a time/)
+
+    // Once the first stream is released, a new one is fine.
+    await first.return?.(undefined)
+    const third = fb.getStream(QUERY)[Symbol.asyncIterator]()
+    await expect(third.next()).resolves.toBeDefined()
+    await third.return?.(undefined)
+  }, 20_000)
+})
