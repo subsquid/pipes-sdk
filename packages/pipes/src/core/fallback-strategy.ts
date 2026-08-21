@@ -31,13 +31,15 @@ export type FallbackEvent =
    */
   | { type: 'select'; error?: SourceErrorInfo }
   /**
-   * A batch was just delivered — the only point where a *voluntary* switch is safe. `lagging` is
-   * the detection verdict: the active source has fallen behind an independent head by more than
-   * `maxLagBlocks` (armed only once the tip was first reached). Decide whether to stay (`hold`),
-   * reclaim/jump to another source (`use` — the active source stays healthy), or abandon the
-   * active one (`failover` — marks it unhealthy first).
+   * A batch was just delivered — the only point where a *voluntary* switch is safe. Two detection
+   * verdicts ride along: `lagging` (behind an independent head by more than `maxLagBlocks`, armed
+   * only once the tip was first reached) and `stale` (no block delivered for `maxStalenessMs` — a
+   * source can keep answering *without progressing*, e.g. a portal parked at its finality frontier
+   * returning empty batches). Decide whether to stay (`hold`), reclaim/jump to another source
+   * (`use` — the active source stays healthy), or abandon the active one (`failover` — marks it
+   * unhealthy first).
    */
-  | { type: 'batch'; lagging: boolean }
+  | { type: 'batch'; lagging: boolean; stale: boolean }
   /**
    * The active source has had a request outstanding for `pendingMs` (consulted every
    * `freshnessTickMs` while waiting). `stale` is the detection verdict: the request has been
@@ -110,6 +112,12 @@ export type FallbackCommand =
  */
 export type FallbackStrategy = (ctx: FallbackStrategyContext) => FallbackCommand | undefined | void
 
+/** Is a source other than the active one known to be ahead of the pipe's cursor? */
+function fresherSourceAhead(ctx: FallbackStrategyContext): boolean {
+  const cursorNumber = ctx.cursor?.number ?? -1
+  return ctx.sources.some((s) => !s.active && s.head != null && s.head > cursorNumber)
+}
+
 /** Tuning for the stock strategy — the plain-data alternative to a custom function. */
 export interface DefaultFallbackStrategyOptions {
   /** `eager` (default) reclaims a recovered higher-preference source at a batch boundary. */
@@ -123,9 +131,10 @@ export interface DefaultFallbackStrategyOptions {
  *
  * - `select`: drive the lowest-index `healthy` or `unknown` source; with none eligible, keep
  *   re-selecting until `allDownTimeoutMs` elapses (`null` ⇒ forever), then abort.
- * - `batch`: fail the active source over when the detection says it is `lagging`; otherwise,
- *   under `eager` preference, reclaim the lowest-index recovered (`healthy`) source above the
- *   active one.
+ * - `batch`: fail the active source over when the detection says it is `lagging`, or `stale` while
+ *   another source is ahead (a source that answers without progressing — a portal parked at its
+ *   finality frontier — is stalled too); otherwise, under `eager` preference, reclaim the
+ *   lowest-index recovered (`healthy`) source that can actually serve the cursor.
  * - `stall`: fail the active source over when the detection says it is `stale` **and** a fresher
  *   source is ahead — if everyone is equally stuck it is a chain stall, and churning sources
  *   would not help, so hold.
@@ -156,10 +165,21 @@ export function defaultFallbackStrategy(options?: DefaultFallbackStrategyOptions
         if (ctx.event.lagging) {
           return { action: 'failover' }
         }
+        // Answering without progressing is a stall too — hand off, but only to somewhere better.
+        // If nothing is ahead of us, everyone is equally stuck and churning would not help.
+        if (ctx.event.stale && fresherSourceAhead(ctx)) {
+          return { action: 'failover' }
+        }
         if (preferPrimary === 'eager' && ctx.activeIndex !== undefined) {
+          const cursorNumber = ctx.cursor?.number ?? -1
           for (const s of ctx.sources) {
             if (s.index >= ctx.activeIndex) break
-            if (s.health === 'healthy') return { action: 'use', index: s.index }
+            // Never reclaim a source that cannot serve where we are: an exhausted finalized-only
+            // source stays reachable and healthy-looking, and switching back into it would only
+            // stall the pipe again. `head == null` ⇒ unknown reach, so give it the benefit.
+            if (s.health === 'healthy' && (s.head == null || s.head >= cursorNumber)) {
+              return { action: 'use', index: s.index }
+            }
           }
         }
 
@@ -167,10 +187,8 @@ export function defaultFallbackStrategy(options?: DefaultFallbackStrategyOptions
       }
 
       case 'stall': {
-        if (ctx.event.stale) {
-          const cursorNumber = ctx.cursor?.number ?? -1
-          const fresherAhead = ctx.sources.some((s) => !s.active && s.head != null && s.head > cursorNumber)
-          if (fresherAhead) return { action: 'failover' }
+        if (ctx.event.stale && fresherSourceAhead(ctx)) {
+          return { action: 'failover' }
         }
 
         return { action: 'hold' }
