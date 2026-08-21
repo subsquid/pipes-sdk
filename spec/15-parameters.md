@@ -17,6 +17,25 @@ Target = ratified contract value; ⚠ = proposed, pending ADR-14.
 | P-RETRY-STATUS-SET | retryable statuses (WP-14, IB-7) | 429, 502, 503, 504, 521–524 | ⚠ + 529 (in-flight fix) |
 | P-STREAM-RETRY-LIMIT | streaming retry cap (WP-14, LIV-7; ADR-10) | unbounded (non-streaming default: 0) | same |
 
+## Multi-source fallback
+
+Detection thresholds (16). All configurable per pipe; observed values are the defaults.
+
+| Parameter | Role (where used) | Observed | Target |
+|---|---|---|---|
+| P-FB-MAX-STALENESS-MS | unproductive-wait window defining the `stale` verdict (WP-64, DEF-69, LIV-60) | 180000 ms | same |
+| P-FB-MAX-LAG-BLOCKS | distance behind the independent head defining `lagging`, and the reclaim allowance (WP-63, DEF-67, ADR-26) | 10 blocks | same |
+| P-FB-TICK-MS | stall re-check interval while a request is outstanding (WP-64) | 1000 ms | same |
+| P-FB-COOLDOWN-MS | how long an unhealthy source waits before returning to `unknown` (WP-67) | 30000 ms | same |
+| P-FB-LIVENESS-FAIL | consecutive liveness failures that flip a source unhealthy (WP-67) | 2 | same |
+| P-FB-LIVENESS-RECOVER | consecutive liveness passes required for `healthy` (WP-67) | 3 | same |
+| P-FB-PROBE-INTERVAL-MS | minimum gap between capability probes of one standby (WP-65) | 5000 ms | same |
+| P-FB-PROBE-TIMEOUT-MS | capability probe time-box (WP-65) | 30000 ms | same |
+| P-FB-HEAD-TTL-MS | head-poll cache lifetime (WP-66) | 5000 ms | same |
+| P-FB-HEAD-TIMEOUT-MS | head-poll time-box, including the aggregate lookup (WP-66, FM-64) | 500 ms | same |
+| P-FB-ALLDOWN-POLL-MS | gap between re-selections while every source is unhealthy (WP-60, LIV-64) | 1000 ms | same |
+| P-FB-ALLDOWN-TIMEOUT-MS | how long an all-down gap is tolerated before the read fails (LIV-64) | unbounded | same |
+
 ## Sink bindings
 
 | Parameter | Role | Observed | Target |
