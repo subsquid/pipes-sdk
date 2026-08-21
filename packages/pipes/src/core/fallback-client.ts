@@ -164,6 +164,14 @@ export class FallbackClient implements BlockStreamClient {
   #streaming = false
   /** Sources abandoned for not making progress — they must prove they can serve before a reclaim. */
   readonly #leftUnproductive: boolean[] = []
+  /**
+   * Bumped per stream. A capability probe is fire-and-forget and can outlive the stream that
+   * started it (its own timeout is 30s by default), so its verdict is stamped with the generation
+   * it was asked in — a late answer describes a query, and possibly a commitment, that is no
+   * longer being served, and must not be allowed to rule a source healthy or unhealthy for the
+   * stream that came after.
+   */
+  #streamGeneration = 0
 
   constructor(options: FallbackClientOptions) {
     if (options.sources.length === 0) {
@@ -294,7 +302,10 @@ export class FallbackClient implements BlockStreamClient {
     // different forced commitment) must not carry over into this one.
     this.#headCache.length = 0
     this.#leftUnproductive.length = 0
+    this.#capabilityProbing.length = 0
+    this.#lastProbeAt.length = 0
     this.#unproductiveMs = 0
+    this.#streamGeneration++
     const probeOptions = this.#detection.capabilityProbe
     this.#probes = this.#sources.map((s) => {
       if (s.probeCapability) return s.probeCapability
@@ -636,6 +647,7 @@ export class FallbackClient implements BlockStreamClient {
     const now = this.#detection.clock()
     if (now - (this.#lastProbeAt[i] ?? 0) < this.#detection.capabilityProbeIntervalMs) return
 
+    const generation = this.#streamGeneration
     this.#lastProbeAt[i] = now
     this.#capabilityProbing[i] = true
     // `Promise.resolve().then(...)` normalizes a *synchronously*-throwing probe into a rejection,
@@ -645,6 +657,7 @@ export class FallbackClient implements BlockStreamClient {
       .then(() => probe(last))
       .then(
         (r) => {
+          if (generation !== this.#streamGeneration) return // answers a stream that has ended
           if (r.ok) {
             this.#health[i].onLivenessPass()
             this.#health[i].onCapability(true)
@@ -652,10 +665,14 @@ export class FallbackClient implements BlockStreamClient {
             this.#failSource(i, r.cause ?? classifyError('capability', new Error('probe reported not-capable')))
           }
         },
-        (e) => this.#failSource(i, classifyError('capability', e)),
+        (e) => {
+          if (generation !== this.#streamGeneration) return
+          this.#failSource(i, classifyError('capability', e))
+        },
       )
       .finally(() => {
-        this.#capabilityProbing[i] = false
+        // Only release the slot this generation claimed; a later stream's probe owns its own.
+        if (generation === this.#streamGeneration) this.#capabilityProbing[i] = false
       })
   }
 

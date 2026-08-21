@@ -1121,6 +1121,35 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     await expect(collect(fb)).rejects.toThrowError('strategy says no')
   })
 
+  it('ignores a capability probe that answers after its stream has ended', async () => {
+    // Probes are fire-and-forget and outlive their stream (30s timeout by default). A late verdict
+    // describes the query — and possibly the commitment — of a stream that is no longer running,
+    // so letting it rule a source healthy or unhealthy would corrupt the next stream's view.
+    const resolvers: ((r: { ok: boolean; cause?: any }) => void)[] = []
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => cursor(50),
+      (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
+    )
+    const fb = fallback([s0, standby], { headTtlMs: 0, capabilityProbeIntervalMs: 0, maxLagBlocks: null })
+
+    await collect(fb) // stream 1: drives s0, fires the standby's probe, then ends
+    expect(resolvers).toHaveLength(1)
+    await collect(fb) // stream 2 fires its own probe; stream 1's is still pending
+
+    const before = fb.metrics().sources[1].health
+    // Answer stream 1's probe, long after stream 1 is gone.
+    resolvers[0]({ ok: false, cause: { check: 'capability', reason: 'http', code: 400, detail: 'stale verdict' } })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(fb.metrics().sources[1].health).toBe(before) // the late answer changed nothing
+    expect(fb.metrics().sources[1].cause).toBeUndefined()
+  }, 10_000)
+
   it('does not let one hung endpoint block the aggregate head lookup', async () => {
     // `from: 'latest'` resolves through getHead, so a source whose head poll never settles would
     // hang the pipe at startup even though another source can answer.
