@@ -12,6 +12,14 @@ export type StartContext = {
   state: { current?: BlockCursor; initial: number }
   logger: Logger
   metrics: Metrics
+  /**
+   * The client this pipe reads blocks through. Typed as the general contract because a pipe's
+   * source is not necessarily a portal any more: it may be an RPC-backed client, or a fallback
+   * multiplexing several. Narrow with `instanceof PortalClient` when you need portal-specific
+   * request options.
+   *
+   * (Type-level breaking change: this was `PortalClient` before multi-source streams existed.)
+   */
   portal: BlockStreamClient
 }
 export type StopContext = { logger: Logger }
