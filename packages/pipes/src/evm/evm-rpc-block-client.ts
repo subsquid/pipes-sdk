@@ -5,29 +5,11 @@ import { ApiDataset, BlockRef, PortalBlockStreamOptions } from '~/portal-client/
 import { ForkException, GetBlock, PortalBlockStream, Query, StreamData } from '~/portal-client/index.js'
 import { Query as EvmQuery } from '~/portal-client/query/evm.js'
 
+import { EvmRpcConnectionOptions, RpcMethodOptions } from './rpc/options.js'
 import { dropEmptyBlocks } from './rpc/project.js'
 import { createWireBlockMapper } from './rpc/wire.js'
 
-/** RPC method-selection toggles (the per-chain "C1" config) merged into the coarse fetch request. */
-export interface RpcMethodOptions {
-  useTraceApi?: boolean
-  useDebugTraceBlockByNumber?: boolean
-  useDebugApiForStateDiffs?: boolean
-  debugTraceTimeout?: string
-}
-
-/** Plain connection config for the JSON-RPC endpoint (no `@subsquid/evm-rpc` import needed). */
-export interface EvmRpcConnectionOptions {
-  url: string
-  /** Maximum number of concurrent in-flight requests. */
-  capacity?: number
-  /** Maximum requests per second. */
-  rateLimit?: number
-  /** Request timeout in ms. */
-  requestTimeout?: number
-  /** Whether HTTP 500 / RPC internal errors should be treated as retryable. */
-  retryInternalServerErrors?: boolean
-}
+export type { EvmRpcConnectionOptions, RpcMethodOptions } from './rpc/options.js'
 
 export interface EvmRpcBlockClientOptions {
   /** A ready `Rpc` instance, or plain connection options to build one from. */

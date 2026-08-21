@@ -21,12 +21,12 @@ import {
   isBlockStreamClient,
 } from '~/portal-client/index.js'
 
-import type { EvmRpcConnectionOptions, RpcMethodOptions } from './evm-rpc-block-client.js'
+import type { EvmRpcConnectionOptions, RpcMethodOptions } from './rpc/options.js'
 
 // Re-export the RPC config types so consumers can type an `rpc` source spec. Type-only, so they are
 // erased from the JS and never pull the optional peers at *runtime*; they also reference no
 // evm-rpc types, so a Portal-only TS consumer typechecks without the peers installed.
-export type { EvmRpcConnectionOptions, RpcMethodOptions } from './evm-rpc-block-client.js'
+export type { EvmRpcConnectionOptions, RpcMethodOptions } from './rpc/options.js'
 
 /**
  * One EVM source in a fallback list, in the order of preference (first entry is the primary).
