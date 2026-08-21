@@ -34,6 +34,7 @@ Detection thresholds (16). All configurable per pipe; observed values are the de
 | P-FB-HEAD-TTL-MS | head-poll cache lifetime (WP-66) | 5000 ms | same |
 | P-FB-HEAD-TIMEOUT-MS | head-poll time-box, including the aggregate lookup (WP-66, FM-64) | 500 ms | same |
 | P-FB-ALLDOWN-POLL-MS | gap between re-selections while every source is unhealthy (WP-60, LIV-64) | 1000 ms | same |
+| P-FB-SOURCE-RETRIES | transport retry budget for a source in a list, before the failure reaches the machinery (WP-70, ADR-27) | 3 attempts | same |
 | P-FB-ALLDOWN-TIMEOUT-MS | how long an all-down gap is tolerated before the read fails (LIV-64) | unbounded | same |
 
 ## Sink bindings

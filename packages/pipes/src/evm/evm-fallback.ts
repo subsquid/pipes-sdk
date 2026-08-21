@@ -7,6 +7,7 @@ import {
   Logger,
   redactUrl,
 } from '~/core/index.js'
+import { HttpClient } from '~/http-client/index.js'
 import {
   ApiDataset,
   BlockRef,
@@ -85,12 +86,31 @@ export interface EvmFallbackOptions {
  * a single portal client goes, all sources serving the same query so their output is
  * interchangeable.
  */
+/**
+ * Blocks of retrying a source's transport before the fallback is allowed to do its job. A lone
+ * portal retries a retryable status indefinitely because there is nothing else to read; inside a
+ * list there is, so the budget is short — long enough to ride out a blip, short enough that a
+ * struggling source is handed over rather than waited on (ADR-27).
+ */
+const SOURCE_RETRY_ATTEMPTS = 3 // P-FB-SOURCE-RETRIES
+
+/**
+ * Portal client settings for a source in a list: the pipe's logger and the bounded retry budget,
+ * with anything the caller specified winning. A ready-made client is passed through untouched —
+ * its owner has already configured it.
+ */
+function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http']): PortalClientOptions['http'] {
+  if (http instanceof HttpClient) return http
+
+  return { retryAttempts: SOURCE_RETRY_ATTEMPTS, ...(options.logger ? { logger: options.logger } : {}), ...http }
+}
+
 export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {
   const sources: FallbackClientSource[] = specs.map((spec, i) => {
     if (typeof spec === 'string') {
       return {
         name: `portal-${i}`,
-        client: new PortalClient({ url: spec, finalized: options.finalized }),
+        client: new PortalClient({ url: spec, finalized: options.finalized, http: portalHttp(options, undefined) }),
       }
     }
     if (spec.type === 'custom') {
@@ -117,7 +137,11 @@ export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFall
     const { type: _type, name, ...portalOptions } = spec
     return {
       name: name ?? `portal-${i}`,
-      client: new PortalClient({ finalized: options.finalized, ...portalOptions }),
+      client: new PortalClient({
+        finalized: options.finalized,
+        ...portalOptions,
+        http: portalHttp(options, portalOptions.http),
+      }),
     }
   })
 
