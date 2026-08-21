@@ -87,9 +87,9 @@ describe('defaultFallbackStrategy', () => {
     ).toEqual({ action: 'hold' })
   })
 
-  it('batch: never reclaims a preferred source that cannot serve the cursor', () => {
-    // The exhausted finalized-only source stays reachable and healthy-looking; switching back into
-    // it would only stall the pipe again.
+  it('batch: never reclaims a source detection has ruled behind', () => {
+    // Whether a source is too far behind to take over is a detection verdict (it owns the
+    // thresholds and the reason the source was abandoned); the strategy only acts on it.
     const strategy = defaultFallbackStrategy()
     const batch = {
       event: { type: 'batch', lagging: false, stale: false } as const,
@@ -101,16 +101,16 @@ describe('defaultFallbackStrategy', () => {
       strategy(
         ctx({
           ...batch,
-          sources: [snap(0, 'healthy', { head: 100 }), snap(1, 'healthy', { active: true, head: 130 })],
+          sources: [snap(0, 'healthy', { behind: true }), snap(1, 'healthy', { active: true })],
         }),
       ),
     ).toEqual({ action: 'hold' })
-    // Once it can serve where we are, it is reclaimed as usual.
+    // Not behind ⇒ reclaimed as usual, even while trailing the cursor by ordinary jitter.
     expect(
       strategy(
         ctx({
           ...batch,
-          sources: [snap(0, 'healthy', { head: 105 }), snap(1, 'healthy', { active: true, head: 130 })],
+          sources: [snap(0, 'healthy', { head: 104 }), snap(1, 'healthy', { active: true, head: 130 })],
         }),
       ),
     ).toEqual({ action: 'use', index: 0 })

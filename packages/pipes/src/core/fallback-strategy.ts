@@ -56,6 +56,12 @@ export interface FallbackSourceSnapshot {
   cause?: SourceErrorInfo
   /** Latest independently-polled head block number (TTL-cached); `undefined` when unknown. */
   head?: number
+  /**
+   * Detection's verdict that this source's reach has fallen structurally under the pipe, so taking
+   * over would only stall it. Ordinary ingestion jitter does not count — see the allowance in
+   * `FallbackDetectionOptions.maxLagBlocks`.
+   */
+  behind?: boolean
 }
 
 export interface FallbackStrategyContext {
@@ -115,7 +121,9 @@ export type FallbackStrategy = (ctx: FallbackStrategyContext) => FallbackCommand
 /** Is a source other than the active one known to be ahead of the pipe's cursor? */
 function fresherSourceAhead(ctx: FallbackStrategyContext): boolean {
   const cursorNumber = ctx.cursor?.number ?? -1
-  return ctx.sources.some((s) => !s.active && s.head != null && s.head > cursorNumber)
+  // An unhealthy source cannot be switched to, so its (frozen) head is no reason to abandon the
+  // active one — that only walks the pipe into an all-down gap.
+  return ctx.sources.some((s) => !s.active && s.health !== 'unhealthy' && s.head != null && s.head > cursorNumber)
 }
 
 /** Tuning for the stock strategy — the plain-data alternative to a custom function. */
@@ -171,13 +179,13 @@ export function defaultFallbackStrategy(options?: DefaultFallbackStrategyOptions
           return { action: 'failover' }
         }
         if (preferPrimary === 'eager' && ctx.activeIndex !== undefined) {
-          const cursorNumber = ctx.cursor?.number ?? -1
           for (const s of ctx.sources) {
             if (s.index >= ctx.activeIndex) break
-            // Never reclaim a source that cannot serve where we are: an exhausted finalized-only
-            // source stays reachable and healthy-looking, and switching back into it would only
-            // stall the pipe again. `head == null` ⇒ unknown reach, so give it the benefit.
-            if (s.health === 'healthy' && (s.head == null || s.head >= cursorNumber)) {
+            // Never reclaim a source that has fallen structurally behind: an exhausted
+            // finalized-only source stays reachable and healthy-looking, and switching back into it
+            // would only stall the pipe again. A source merely trailing by ingestion jitter is
+            // still a good source to hand back to, so only detection's `behind` verdict disqualifies.
+            if (s.health === 'healthy' && !s.behind) {
               return { action: 'use', index: s.index }
             }
           }
