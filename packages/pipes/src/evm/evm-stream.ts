@@ -95,11 +95,15 @@ export function evmStream<Out extends EvmOutputs>({
     )
   }
 
+  // One logger instance for the whole pipe. Resolving it here rather than letting the stream and
+  // the fallback each resolve the same level would leave the pipe logging through two instances.
+  const log = pipeLogger(id, logger)
+
   let source: string | PortalClientOptions | BlockStreamClient
   if (Array.isArray(portal)) {
     // The fallback logs source switches and health transitions; it is part of this pipe, so it
     // logs through the pipe's logger (and carries its id) unless the caller overrode it.
-    const client = createEvmFallbackClient(portal, { ...fallback, logger: fallback?.logger ?? pipeLogger(id, logger) })
+    const client = createEvmFallbackClient(portal, { ...fallback, logger: fallback?.logger ?? log })
     if (metrics) {
       registerFallbackMetrics(metrics.metrics, client, id)
     }
@@ -118,7 +122,7 @@ export function evmStream<Out extends EvmOutputs>({
     portal: source,
     query,
     cache,
-    logger,
+    logger: log,
     metrics,
     profiler,
     transformers: [
