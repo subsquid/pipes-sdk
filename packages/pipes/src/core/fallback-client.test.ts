@@ -23,6 +23,14 @@ function cursor(n: number, hash = `0x${n}`): BlockRef {
 
 type WireBlock = { header: { number: number; hash: string } }
 
+function emptyBatch(): StreamData<WireBlock> {
+  return {
+    blocks: [],
+    head: {},
+    meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
+  }
+}
+
 function batch(n: number, opts: { hash?: string; finalized?: number } = {}): StreamData<WireBlock> {
   return {
     blocks: [{ header: { number: n, hash: opts.hash ?? `0x${n}` } }],
@@ -707,6 +715,192 @@ describe('FallbackClient — freshness', () => {
 
     expect(await collect(fb, { ...QUERY, fromBlock: 50 })).toEqual([50, 51, 52])
     expect(fb.activeIndex).toBe(0) // never armed (was ahead of the reference) ⇒ no lag failover
+  })
+})
+
+describe('FallbackClient — reclaim and abort correctness', () => {
+  it('reclaims a recovered primary that trails the cursor by normal ingestion lag', async () => {
+    // The canonical topology: a portal primary blips, a hot standby takes over at the tip, the
+    // primary recovers. A portal's head always trails the block a hot source just delivered, so a
+    // reclaim rule demanding `head >= cursor` would strand the pipe on the expensive standby
+    // forever. Only a source that is *structurally* behind should be refused.
+    let now = 0
+    let attempts = 0
+    const primary = source(
+      'primary',
+      async function* () {
+        attempts++
+        if (attempts === 1) throw new Error('blip')
+        yield batch(500) // reclaimed
+      },
+      async () => cursor(97), // head trails the standby's cursor by a few blocks
+    )
+    const standby = source(
+      'standby',
+      async function* () {
+        for (let n = 98; n <= 103; n++) {
+          yield batch(n)
+          now += 50 // let the primary's cooldown elapse
+        }
+      },
+      async () => cursor(103),
+    )
+    const fb = fallback([primary, standby], {
+      clock: () => now,
+      cooldownMs: 20,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+      maxStalenessMs: null,
+      maxLagBlocks: 10,
+    })
+
+    const got = await collect(fb)
+
+    expect(got).toContain(500) // the primary was taken back
+    expect(fb.switchCount).toBe(2) // primary → standby → primary
+  })
+
+  it('refuses to reclaim a source that is structurally behind the pipe', async () => {
+    let now = 0
+    let attempts = 0
+    const exhausted = source(
+      'exhausted',
+      async function* () {
+        attempts++
+        if (attempts === 1) throw new Error('blip')
+        yield batch(500) // must NOT be reached
+      },
+      async () => cursor(3), // stuck far behind, e.g. a finalized-only source past its frontier
+    )
+    const tip = source(
+      'tip',
+      async function* () {
+        for (let n = 98; n <= 103; n++) {
+          yield batch(n)
+          now += 50
+        }
+      },
+      async () => cursor(103),
+    )
+    const fb = fallback([exhausted, tip], {
+      clock: () => now,
+      cooldownMs: 20,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+      maxStalenessMs: null,
+      maxLagBlocks: 10,
+    })
+
+    const got = await collect(fb)
+
+    expect(got).not.toContain(500)
+    expect(fb.switchCount).toBe(1) // handed off once and stayed
+  })
+
+  it("does not carry one source's unproductive wait into the next source it drives", async () => {
+    // A failover can re-select the SAME source (single source, or an all-down gap it recovers from
+    // first). Inheriting the previous run's stall clock judges it stale on its very first empty
+    // batch — before it has had any chance to deliver — and with nothing else eligible that is a
+    // livelock, not a failover.
+    let now = 0
+    let runs = 0
+    const only = source('only', async function* () {
+      runs++
+      if (runs === 1) {
+        for (let i = 0; i < 5; i++) {
+          yield emptyBatch()
+          now += 40
+        }
+        throw new Error('dropped')
+      }
+      // The fresh run also starts unproductive: it must get the full window of its own.
+      yield emptyBatch()
+      now += 10
+      yield batch(1)
+    })
+    const fb = fallback([only], {
+      clock: () => now,
+      cooldownMs: 0,
+      maxStalenessMs: 100,
+      freshnessTickMs: 10,
+      maxLagBlocks: null,
+      allDownPollMs: 1,
+    })
+
+    expect(await collect(fb)).toEqual([1])
+    expect(fb.switchCount).toBe(0)
+  })
+
+  it('ignores the cached head of an unhealthy source when deciding if anything is ahead', async () => {
+    // A source can report a head far ahead and then go unhealthy through its *capability* probe,
+    // which leaves that head sitting in the cache. Treating it as "fresher" fails the active source
+    // over towards a source the selector will refuse to pick — an all-down gap caused by a standby
+    // that was never eligible.
+    let now = 0
+    const active = source('active', async function* () {
+      yield batch(10)
+      for (let i = 0; i < 8; i++) {
+        yield emptyBatch() // answering, not progressing
+        now += 40
+      }
+      yield batch(11)
+    })
+    const poisoned = source(
+      'poisoned',
+      async function* () {},
+      async () => cursor(9_999), // always reachable, always looks far ahead
+      async () => ({
+        ok: false,
+        cause: { check: 'capability' as const, reason: 'http' as const, code: 400, detail: 'x' },
+      }),
+    )
+    const fb = fallback([active, poisoned], {
+      clock: () => now,
+      maxStalenessMs: 100,
+      freshnessTickMs: 10,
+      headTtlMs: 0,
+      capabilityProbeIntervalMs: 0,
+      maxLagBlocks: null,
+      cooldownMs: 60_000,
+    })
+
+    expect(await collect(fb)).toEqual([10, 11])
+    expect(fb.activeIndex).toBe(0) // never chased a source that could not be selected
+    expect(fb.switchCount).toBe(0)
+  })
+
+  it('aborts the stream when the strategy says so at a batch boundary', async () => {
+    // The abort must escape, not be caught by the supervisor's own source-error handler and
+    // retried forever.
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+    })
+    const fb = fallback(
+      [s0],
+      { maxLagBlocks: null, maxStalenessMs: null },
+      {
+        strategy: (ctx) => (ctx.event.type === 'batch' ? { action: 'abort', error: new Error('BOOM') } : undefined),
+      },
+    )
+
+    await expect(collect(fb)).rejects.toThrowError('BOOM')
+  })
+
+  it('surfaces an out-of-range index from a boundary decision as a programmer error', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+    })
+    const fb = fallback(
+      [s0],
+      { maxLagBlocks: null, maxStalenessMs: null },
+      {
+        strategy: (ctx) => (ctx.event.type === 'batch' ? { action: 'use', index: 7 } : undefined),
+      },
+    )
+
+    await expect(collect(fb)).rejects.toThrowError(/selected source index 7/)
   })
 })
 
