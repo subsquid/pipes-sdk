@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
+import { FallbackClient } from '~/core/index.js'
+import { BlockStreamClient } from '~/portal-client/index.js'
+
 import * as evmBarrel from './browser.js'
-import { translateMissingRpcPeer } from './evm-fallback.js'
+import { createEvmFallbackClient, translateMissingRpcPeer } from './evm-fallback.js'
 
 describe('public ./evm exports', () => {
   it('surfaces the fallback + facade through the evm barrel (reachable by consumers)', () => {
@@ -66,5 +69,81 @@ describe('translateMissingRpcPeer', () => {
   it('passes through a non-module-not-found fault (e.g. an init/syntax error) unchanged', () => {
     const original = new SyntaxError('Unexpected token in the RPC stack')
     expect(translateMissingRpcPeer(original)).toBe(original)
+  })
+})
+
+describe('createEvmFallbackClient — source specs', () => {
+  it('builds portal sources from strings and option objects, naming them by position or by `name`', () => {
+    const fb = createEvmFallbackClient([
+      'http://localhost:1/datasets/eth',
+      { url: 'http://localhost:2/datasets/eth', name: 'private' },
+    ])
+
+    expect(fb).toBeInstanceOf(FallbackClient)
+    expect(fb.metrics().sources.map((s) => s.name)).toEqual(['portal-0', 'private'])
+    expect(fb.getUrl()).toBe('http://localhost:1/datasets/eth')
+  })
+
+  it("builds an RPC source from a plain {type: 'rpc'} spec without touching the peer at build time", () => {
+    // Construction must not import @subsquid/evm-rpc: the lazy client resolves its URL and
+    // metadata surface up front, and only loads the stack when the endpoint is actually needed.
+    const fb = createEvmFallbackClient([
+      'http://localhost:1/datasets/eth',
+      { type: 'rpc', url: 'https://rpc.example/eth/verysecretapikeyvalue1234567890', rateLimit: 10 },
+    ])
+
+    const names = fb.metrics().sources.map((s) => s.name)
+    expect(names).toEqual(['portal-0', 'rpc-1'])
+  })
+
+  it('redacts credentials in the lazy RPC source URL', async () => {
+    const fb = createEvmFallbackClient([
+      { type: 'rpc', name: 'rpc', url: 'https://rpc.example/eth/verysecretapikeyvalue1234567890' },
+    ])
+
+    expect(fb.getUrl()).not.toContain('verysecretapikeyvalue1234567890')
+    expect(fb.getUrl()).toContain('rpc.example')
+  })
+
+  it('loads the RPC stack lazily on first use — getMetadata answers without any network', async () => {
+    const fb = createEvmFallbackClient([{ type: 'rpc', name: 'standby', url: 'http://localhost:1' }])
+
+    expect(await fb.getMetadata()).toMatchObject({ dataset: 'standby', real_time: true })
+  })
+
+  it('accepts a custom BlockStreamClient and validates its shape', () => {
+    const custom = {
+      finalized: false,
+      getUrl: () => 'custom://x',
+      getMetadata: async () => ({ dataset: 'x', aliases: [], real_time: true, start_block: 0 }),
+      getHead: async () => undefined,
+      resolveTimestamp: async () => 0,
+      getStream: () => ({ [Symbol.asyncIterator]: async function* () {} }),
+    } as unknown as BlockStreamClient
+
+    const fb = createEvmFallbackClient([{ type: 'custom', name: 'mine', client: custom }])
+    expect(fb.metrics().sources[0].name).toBe('mine')
+
+    expect(() => createEvmFallbackClient([{ type: 'custom', client: {} as BlockStreamClient }])).toThrowError(
+      /BlockStreamClient/,
+    )
+  })
+
+  it('applies a uniform `finalized` to every source', () => {
+    const fb = createEvmFallbackClient(
+      ['http://localhost:1/datasets/eth', { type: 'rpc', url: 'http://localhost:2' }],
+      { finalized: true },
+    )
+
+    expect(fb.finalized).toBe(true)
+  })
+
+  it('rejects sources that disagree on finality', () => {
+    expect(() =>
+      createEvmFallbackClient([
+        { url: 'http://localhost:1/datasets/eth', finalized: true },
+        { type: 'rpc', url: 'http://localhost:2' }, // defaults to finalized: false
+      ]),
+    ).toThrowError(/agree on `finalized`/)
   })
 })
