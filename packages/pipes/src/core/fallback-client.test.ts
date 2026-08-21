@@ -1121,6 +1121,55 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     await expect(collect(fb)).rejects.toThrowError('strategy says no')
   })
 
+  it('does not let one hung endpoint block the aggregate head lookup', async () => {
+    // `from: 'latest'` resolves through getHead, so a source whose head poll never settles would
+    // hang the pipe at startup even though another source can answer.
+    const hung = source(
+      'hung',
+      async function* () {},
+      () => new Promise<BlockRef | undefined>(() => {}),
+    )
+    const good = source(
+      'good',
+      async function* () {},
+      async () => cursor(77),
+    )
+    const fb = fallback([hung, good], { headPollTimeoutMs: 20 })
+
+    expect((await fb.getHead())?.number).toBe(77)
+  }, 5000)
+
+  it('throws rather than reporting "no head" when every source failed to answer', async () => {
+    // Reporting `undefined` here would resolve `from: 'latest'` to block 0 and silently backfill
+    // the entire chain — "we could not ask" must not be passed off as "there is no head".
+    const hung = source(
+      'hung',
+      async function* () {},
+      () => new Promise<BlockRef | undefined>(() => {}),
+    )
+    const broken = source(
+      'broken',
+      async function* () {},
+      async () => {
+        throw new Error('head down')
+      },
+    )
+    const fb = fallback([hung, broken], { headPollTimeoutMs: 20 })
+
+    await expect(fb.getHead()).rejects.toThrowError(/no fallback source could report a chain head/)
+  }, 5000)
+
+  it('still reports "no head" when a source genuinely answers that it has none', async () => {
+    const empty = source(
+      'empty',
+      async function* () {},
+      async () => undefined,
+    )
+    const fb = fallback([empty], { headPollTimeoutMs: 20 })
+
+    await expect(fb.getHead()).resolves.toBeUndefined()
+  }, 5000)
+
   it('rejects an out-of-range source index from the strategy', async () => {
     const s0 = source('s0', async function* () {
       yield batch(1)
