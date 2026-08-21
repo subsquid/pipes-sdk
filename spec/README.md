@@ -31,6 +31,7 @@ interchangeable mid-stream — an implementation may resume from state written b
 | [13-conformance-tdd.md](13-conformance-tdd.md) | reference model, CT taxonomy, matrix, gap register | **Mutable** |
 | [14-interface-binding.md](14-interface-binding.md) | wire protocol, state formats, HTTP surface IB-n | Yes |
 | [15-parameters.md](15-parameters.md) | parameter registry P-* | **Mutable** |
+| [16-fallback.md](16-fallback.md) | multi-source fallback: model, driving, safety, liveness DEF/WP/INV/LIV/FM/OB-60… | Yes |
 | decisions/ | ADR log (append-only; index = folder listing) | Yes |
 
 ## Sink bindings

@@ -106,6 +106,46 @@ export interface PortalBlockStreamOptions {
  */
 export interface PortalBlockStream<B> extends AsyncIterable<StreamData<B>> {}
 
+/**
+ * The client contract a `PortalStream` reads blocks through — exactly the surface it (and the
+ * query builder's range resolution) consume from {@link PortalClient}. Anything that can serve
+ * portal-wire-shaped block batches can implement it and slot in where a portal client goes:
+ * the RPC-backed EVM client and the fallback (multi-source) client both do.
+ *
+ * `getStream` must yield blocks in the portal wire shape for the given query (the downstream
+ * normalize/cast step decodes them), throw a `ForkException` when `parentBlockHash` mismatches,
+ * and honour `fromBlock`/`toBlock` bounds.
+ */
+export interface BlockStreamClient {
+  /** Whether this client serves finalized blocks only, i.e. never sees a fork. */
+  readonly finalized: boolean
+  getUrl(): string
+  getMetadata(): Promise<ApiDataset>
+  getHead(options?: { finalized: boolean }): Promise<BlockRef | undefined>
+  /** Resolve a unix timestamp (seconds) to a block number — used for `Date` range bounds. */
+  resolveTimestamp(seconds: number): Promise<number>
+  getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>>
+}
+
+/**
+ * True for anything satisfying the full {@link BlockStreamClient} contract. Every member is
+ * checked so a partial object fails classification here — immediately and clearly — rather than
+ * deep inside a stream when the missing method is first called.
+ */
+export function isBlockStreamClient(value: unknown): value is BlockStreamClient {
+  if (typeof value !== 'object' || value == null) return false
+  const client = value as BlockStreamClient
+
+  return (
+    typeof client.finalized === 'boolean' &&
+    typeof client.getUrl === 'function' &&
+    typeof client.getMetadata === 'function' &&
+    typeof client.getHead === 'function' &&
+    typeof client.resolveTimestamp === 'function' &&
+    typeof client.getStream === 'function'
+  )
+}
+
 /** The portal can answer 409 with the error envelope alone, leaving no chain to walk back to. */
 function isForkHttpError(err: unknown): err is HttpError {
   if (!(err instanceof HttpError)) return false

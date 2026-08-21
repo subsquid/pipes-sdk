@@ -1,11 +1,13 @@
 import {
   ApiDataset,
+  BlockStreamClient,
   GetBlock,
   PortalBlockStream,
   PortalBlockStreamOptions,
   PortalClient,
   PortalClientOptions,
   Query,
+  isBlockStreamClient,
   isForkException,
 } from '~/portal-client/index.js'
 
@@ -17,7 +19,7 @@ import {
   TargetForkNotSupportedError,
 } from './errors.js'
 import { FinalizedWatermark } from './finalized-watermark.js'
-import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
+import { LogLevel, Logger, defaultLogger, formatWarning, pipeLogger } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
@@ -55,8 +57,8 @@ const FORCED_FINALIZED_STREAM_WARNING = formatWarning({
  * head still gets it — `start` hands this view to transformer hooks, and a transformer measuring
  * head lag must be able to see the block the chain is actually on.
  */
-function finalizedPortalView(portal: PortalClient): PortalClient {
-  const getHead: PortalClient['getHead'] = async (options) => {
+function finalizedPortalView(portal: BlockStreamClient): BlockStreamClient {
+  const getHead: BlockStreamClient['getHead'] = async (options) => {
     if (options?.finalized === false) return portal.getHead(options)
 
     // A dataset that finalizes nothing still streams (its files just aren't reorg-safe), and an
@@ -65,7 +67,7 @@ function finalizedPortalView(portal: PortalClient): PortalClient {
 
     return head ?? portal.getHead({ ...options, finalized: false })
   }
-  const getStream: PortalClient['getStream'] = <Q extends Query>(query: Q, options?: PortalBlockStreamOptions) =>
+  const getStream: BlockStreamClient['getStream'] = <Q extends Query>(query: Q, options?: PortalBlockStreamOptions) =>
     portal.getStream(query, { ...options, finalized: true })
 
   return new Proxy(portal, {
@@ -74,7 +76,8 @@ function finalizedPortalView(portal: PortalClient): PortalClient {
       if (property === 'getHead') return getHead
       if (property === 'getStream') return getStream
 
-      // PortalClient uses private fields, so methods/getters must keep the real client as `this`.
+      // PortalClient (and other client impls) use private fields, so methods/getters must keep
+      // the real client as `this`.
       const value = Reflect.get(target, property, target)
       return typeof value === 'function' ? value.bind(target) : value
     },
@@ -164,7 +167,12 @@ export type PortalStreamOptions<Query> = {
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions | PortalClient
+  /**
+   * Where to read blocks from: a portal URL, portal client options, a ready `PortalClient`, or any
+   * custom {@link BlockStreamClient} (e.g. the RPC-backed EVM client or a fallback client
+   * multiplexing several sources).
+   */
+  portal: string | PortalClientOptions | BlockStreamClient
   query: Query
   logger?: Logger | LogLevel
   profiler?: boolean | SpanHooks
@@ -186,7 +194,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
   }
   readonly #queryBuilder: Q
   readonly #logger: Logger
-  readonly #portal: PortalClient
+  readonly #portal: BlockStreamClient
   readonly #metricServer: MetricsServer
   readonly #transformers: Transformer<any, any>[] = []
   // Single monotonic finalized high-watermark for the whole pipe. Owned here (not
@@ -205,35 +213,40 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     }
 
     this.#id = id
-    this.#logger = logger && typeof logger !== 'string' ? logger : defaultLogger({ id: this.#id, level: logger })
+    this.#logger = pipeLogger(this.#id, logger)
 
-    this.#portal =
-      portal instanceof PortalClient
-        ? portal
-        : new PortalClient(
-            typeof portal === 'string'
-              ? {
-                  url: portal,
-                  http: {
-                    logger: this.#logger,
-                    retryAttempts: Number.MAX_SAFE_INTEGER,
-                  },
-                }
-              : {
-                  ...portal,
-                  http: {
-                    logger: this.#logger,
-                    retryAttempts: Number.MAX_SAFE_INTEGER,
-                    ...portal.http,
-                  },
+    this.#portal = isBlockStreamClient(portal)
+      ? portal
+      : new PortalClient(
+          typeof portal === 'string'
+            ? {
+                url: portal,
+                http: {
+                  logger: this.#logger,
+                  retryAttempts: Number.MAX_SAFE_INTEGER,
                 },
-          )
+              }
+            : {
+                ...portal,
+                http: {
+                  logger: this.#logger,
+                  retryAttempts: Number.MAX_SAFE_INTEGER,
+                  ...portal.http,
+                },
+              },
+        )
 
     this.#queryBuilder = query
 
     this.#options = {
       cache: options.cache,
       profiler: typeof options.profiler === 'undefined' ? process.env.NODE_ENV !== 'production' : options.profiler,
+    }
+
+    if (this.#options.cache && !(this.#portal instanceof PortalClient)) {
+      // The cache both keys and *fetches* through a real portal client; a custom client
+      // (RPC-backed, fallback) has no portal to fetch through, so this cannot silently no-op.
+      throw new Error('portal cache requires a single Portal source; it cannot wrap a custom block stream client')
     }
 
     this.#metricServer = options.metrics ?? noopMetricsServer()
@@ -304,7 +317,12 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       const source = this.#options.cache
         ? // use cache if available
           this.#options.cache.getStream({
-            portal,
+            // Deliberately the *effective* client, which under forced finality is a view over the
+            // real one rather than the instance itself: a cache that ignores the explicit flag
+            // below must still be unable to serve hot data into a finalized-only pipe. The cast
+            // records that this view satisfies the client contract without being that class — a
+            // cache must therefore not test its concrete identity.
+            portal: portal as PortalClient,
             logger: this.#logger,
             query,
             perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
@@ -475,7 +493,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     )
   }
 
-  private async start(state: { initial: number; current?: BlockCursor }, portal: PortalClient) {
+  private async start(state: { initial: number; current?: BlockCursor }, portal: BlockStreamClient) {
     if (this.#started) {
       this.#logger.debug(`stream has been already started, skipping "start" hook...`)
       return

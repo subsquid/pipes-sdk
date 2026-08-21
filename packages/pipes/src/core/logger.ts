@@ -44,6 +44,15 @@ export function defaultLogger({ id, level }: { level?: LogLevel; id?: string } =
   })
 }
 
+/**
+ * The logger a pipe runs with: a caller's own logger as given, or one built for this pipe id at
+ * the requested level. Shared so everything a pipe owns — the stream and the fallback that feeds
+ * it — logs through the same instance and carries the same id.
+ */
+export function pipeLogger(id: string, logger?: Logger | LogLevel): Logger {
+  return logger && typeof logger !== 'string' ? logger : defaultLogger({ id, level: logger })
+}
+
 export function formatWarning({ title, content }: { content: string | string[]; title: string }): string {
   return `
 ==================================================================

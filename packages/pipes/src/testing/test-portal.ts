@@ -57,15 +57,27 @@ export type MockPortal = {
   close(): Promise<void>
 }
 
-export async function finalizedMockPortal(mockResponses: MockResponse[]) {
+export type MockPortalOptions = {
+  finalized?: boolean
+  /**
+   * Served from `/head` and `/finalized-head`. Without it those endpoints 404, which a source
+   * health model reads as an unreachable source — set it whenever the test drives head polling.
+   */
+  head?: { number: number; hash: string }
+  /** Served from `/finalized-head` when it should differ from {@link MockPortalOptions.head}. */
+  finalizedHead?: { number: number; hash: string }
+}
+
+export async function finalizedMockPortal(mockResponses: MockResponse[], options: MockPortalOptions = {}) {
   return mockPortal(mockResponses, {
+    ...options,
     finalized: true,
   })
 }
 
 export async function mockPortal(
   mockResponses: MockResponse[],
-  { finalized = false }: { finalized?: boolean } = {},
+  { finalized = false, head, finalizedHead }: MockPortalOptions = {},
 ): Promise<MockPortal> {
   const promise = new Promise<Server>((resolve, reject) => {
     let requestCount = 0
@@ -73,6 +85,19 @@ export async function mockPortal(
     const streamUrl = finalized ? '/finalized-stream' : '/stream'
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const headFor = req.url?.startsWith('/finalized-head') ? (finalizedHead ?? head) : head
+      if (req.url?.startsWith('/head') || req.url?.startsWith('/finalized-head')) {
+        if (!headFor) {
+          res.statusCode = 404
+          res.end()
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.write(JSON.stringify(headFor))
+        res.end()
+        return
+      }
+
       if (req.url?.startsWith('/metadata')) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.write(
