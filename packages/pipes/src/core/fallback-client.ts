@@ -205,13 +205,31 @@ export class FallbackClient implements BlockStreamClient {
     throw lastError
   }
 
-  /** The highest head any source reports — the best independent view of the chain tip. */
+  /**
+   * The highest head any source reports — the best independent view of the chain tip.
+   *
+   * Each poll is time-boxed by `headPollTimeoutMs`, the same guard the internal polls use: one
+   * unresponsive endpoint must not hang a lookup the others can answer. Resolving `from: 'latest'`
+   * runs through here, and a silent `undefined` there would resolve to block 0 and backfill the
+   * whole chain — so if *nothing* answered, this throws rather than passing off "we could not ask"
+   * as "there is no head".
+   */
   async getHead(options?: { finalized: boolean }): Promise<BlockRef | undefined> {
-    const heads = await Promise.allSettled(this.#sources.map((s) => s.client.getHead(options)))
+    const heads = await Promise.allSettled(this.#sources.map((s) => this.#headWithTimeout(s.client.getHead(options))))
+
     let best: BlockRef | undefined
+    let answered = false
     for (const h of heads) {
-      if (h.status !== 'fulfilled' || !h.value) continue
-      if (!best || h.value.number > best.number) best = h.value
+      if (h.status !== 'fulfilled') continue
+      answered = true
+      if (h.value && (!best || h.value.number > best.number)) best = h.value
+    }
+
+    if (!answered) {
+      throw new AggregateError(
+        heads.map((h) => (h.status === 'rejected' ? h.reason : undefined)).filter(Boolean),
+        'no fallback source could report a chain head',
+      )
     }
 
     return best
