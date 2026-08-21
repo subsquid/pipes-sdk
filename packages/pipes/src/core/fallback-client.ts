@@ -117,6 +117,8 @@ export class FallbackClient implements BlockStreamClient {
   /** Set when every source is stuck at the same head (no fresher alternative to switch to). */
   chainStalled = false
 
+  /** Finality forced on the current stream by the consumer, if any (see `#run`). */
+  #streamFinalized: boolean | undefined
   /** Per-source capability probes for the *current* stream's query (built per `getStream`). */
   #probes: (((atCursor?: BlockCursor) => Promise<ProbeResult>) | undefined)[] = []
   /** Guards against firing a second capability probe for a source while one is still in flight. */
@@ -134,17 +136,11 @@ export class FallbackClient implements BlockStreamClient {
     if (options.sources.length === 0) {
       throw new Error('FallbackClient requires at least one source')
     }
-    const finalized = options.sources[0].client.finalized
-    for (const s of options.sources) {
-      if (s.client.finalized !== finalized) {
-        // Mixed finality would make the resume cursor ambiguous: a switch from an unfinalized
-        // stream to a finalized-only one (or back) changes what the cursor can point at.
-        throw new Error(
-          'all fallback sources must agree on `finalized` (mixing hot and finalized-only sources is not supported)',
-        )
-      }
-    }
-    this.finalized = finalized
+    // "No fork can arrive" only holds if EVERY source is finalized-only: one hot source is enough
+    // to make a fork reachable, and the flag gates whether a target keeps its rollback machinery
+    // (and whether a finalized-requiring target forces the finalized stream). Conservative by
+    // construction — mixing is allowed, claiming finality for a mixed set is not.
+    this.finalized = options.sources.every((s) => s.client.finalized)
 
     this.#sources = options.sources
     this.#detection = resolveFallbackDetection(options.detection)
@@ -216,11 +212,15 @@ export class FallbackClient implements BlockStreamClient {
     // Re-arm the lag trigger per stream: a reused instance starting a later (far-behind-head)
     // backfill must not inherit "reached the tip" from a previous run and false-fire on lag.
     this.#lagArmed = false
+    this.#streamFinalized = options?.finalized
+    // Heads are commitment-specific, so a cache filled by a previous stream (possibly at a
+    // different forced commitment) must not carry over into this one.
+    this.#headCache.length = 0
     const probeOptions = this.#detection.capabilityProbe
     this.#probes = this.#sources.map((s) => {
       if (s.probeCapability) return s.probeCapability
       if (probeOptions === false) return undefined
-      return makeCapabilityProbe(s.client, query, probeOptions === true ? undefined : probeOptions)
+      return makeCapabilityProbe(s.client, query, probeOptions === true ? undefined : probeOptions, options)
     })
 
     let cursor: BlockCursor | undefined
@@ -457,7 +457,15 @@ export class FallbackClient implements BlockStreamClient {
     if (cached && now - cached.at < this.#detection.headTtlMs) return cached.value
 
     try {
-      const head = await this.#headWithTimeout(this.#sources[i].client.getHead({ finalized: this.finalized }))
+      // Poll each source at its OWN commitment (a finalized-only portal reports its finalized
+      // head, a hot source the chain tip) — the reference we want is "how far can this source
+      // serve", which is what both the lag and the "is anything fresher" checks mean. When the
+      // stream is forced to a single commitment, that wins for every source.
+      const head = await this.#headWithTimeout(
+        this.#sources[i].client.getHead(
+          this.#streamFinalized != null ? { finalized: this.#streamFinalized } : undefined,
+        ),
+      )
       const value = head?.number
       this.#headCache[i] = { value, at: now }
       if (value != null) this.#health[i].onLivenessPass()
