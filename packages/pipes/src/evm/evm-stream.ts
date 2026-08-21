@@ -10,6 +10,7 @@ import {
   Transformer,
   createTransformer,
   mergeOutputs,
+  pipeLogger,
   registerFallbackMetrics,
 } from '~/core/index.js'
 import { MetricsServer } from '~/core/metrics-server.js'
@@ -96,7 +97,9 @@ export function evmStream<Out extends EvmOutputs>({
 
   let source: string | PortalClientOptions | BlockStreamClient
   if (Array.isArray(portal)) {
-    const client = createEvmFallbackClient(portal, fallback)
+    // The fallback logs source switches and health transitions; it is part of this pipe, so it
+    // logs through the pipe's logger (and carries its id) unless the caller overrode it.
+    const client = createEvmFallbackClient(portal, { ...fallback, logger: fallback?.logger ?? pipeLogger(id, logger) })
     if (metrics) {
       registerFallbackMetrics(metrics.metrics, client, id)
     }

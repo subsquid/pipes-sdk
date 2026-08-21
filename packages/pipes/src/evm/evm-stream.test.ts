@@ -1,6 +1,7 @@
+import { pino } from 'pino'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { FallbackStrategy } from '~/core/index.js'
+import { FallbackStrategy, Logger } from '~/core/index.js'
 
 import { MockPortal, mockPortal } from '../testing/index.js'
 import { evmQuery } from './evm-query-builder.js'
@@ -153,6 +154,33 @@ describe('evmStream', () => {
     }
 
     expect(numbers).toEqual([1])
+  })
+
+  it("routes the pipe's logger into the fallback so it cannot log outside the caller's control", async () => {
+    const lines: { level: string; message: string; id?: string }[] = []
+    const captured = pino(
+      { level: 'warn' },
+      { write: (line: string) => lines.push(JSON.parse(line)) },
+    ) as unknown as Logger
+
+    portal = await mockPortal([{ statusCode: 500 }, { statusCode: 500 }, { statusCode: 500 }])
+    portal2 = await mockPortal([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
+
+    const stream = evmStream({
+      id: 'logged-pipe',
+      logger: captured,
+      portal: [portal.url, portal2.url],
+      fallback: { detection: { capabilityProbe: false, maxLagBlocks: null, maxStalenessMs: null } },
+      outputs: evmQuery()
+        .addFields({ block: { number: true, hash: true } })
+        .addRange({ from: 1, to: 1 }),
+    })
+
+    for await (const b of stream) void b
+
+    // Before this, the fallback logged through a logger of its own, so a pipe set to `silent` still
+    // printed its switches and a caller's logger never saw them.
+    expect(lines.some((l) => (l.message ?? l.msg)?.includes('marked unhealthy'))).toBe(true)
   })
 
   it('rejects `fallback` with a single (non-array) source', () => {

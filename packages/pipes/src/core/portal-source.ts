@@ -19,7 +19,7 @@ import {
   TargetForkNotSupportedError,
 } from './errors.js'
 import { FinalizedWatermark } from './finalized-watermark.js'
-import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
+import { LogLevel, Logger, defaultLogger, formatWarning, pipeLogger } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
@@ -213,7 +213,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     }
 
     this.#id = id
-    this.#logger = logger && typeof logger !== 'string' ? logger : defaultLogger({ id: this.#id, level: logger })
+    this.#logger = pipeLogger(this.#id, logger)
 
     this.#portal = isBlockStreamClient(portal)
       ? portal
