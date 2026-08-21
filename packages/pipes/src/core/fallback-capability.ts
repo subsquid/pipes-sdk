@@ -1,4 +1,4 @@
-import { BlockStreamClient, PortalQuery, isForkException } from '~/portal-client/index.js'
+import { BlockStreamClient, PortalBlockStreamOptions, PortalQuery, isForkException } from '~/portal-client/index.js'
 
 import { safeReturn, withTimeout } from './fallback-async.js'
 import { SourceErrorInfo, capabilityFailure, classifyError } from './fallback-diagnostics.js'
@@ -38,6 +38,13 @@ export function makeCapabilityProbe(
   client: BlockStreamClient,
   query: PortalQuery,
   options: CapabilityProbeOptions = {},
+  /**
+   * The stream options the probe must mirror, so it exercises what the real stream will do. It
+   * matters when a consumer forces a commitment the source would not pick itself (a finalized-only
+   * target driving a hot source): probing the source's own stream would confirm a capability the
+   * forced stream does not have.
+   */
+  streamOptions?: PortalBlockStreamOptions,
 ): (atCursor?: BlockCursor) => Promise<ProbeResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
@@ -47,7 +54,7 @@ export function makeCapabilityProbe(
     // active stream's job, and a probe faulting a 409 would misreport a reorg as incapability.
     const probeQuery = { ...query, fromBlock: from, toBlock: from, parentBlockHash: undefined }
 
-    const iterator = client.getStream(probeQuery as never)[Symbol.asyncIterator]()
+    const iterator = client.getStream(probeQuery as never, streamOptions)[Symbol.asyncIterator]()
     try {
       // One batch (or a clean stream end) is enough: it proves the source served the slice. The
       // timeout rejects with a ready-made cause (a `SourceErrorInfo`, not a bare Error).

@@ -138,12 +138,15 @@ describe('createEvmFallbackClient — source specs', () => {
     expect(fb.finalized).toBe(true)
   })
 
-  it('rejects sources that disagree on finality', () => {
-    expect(() =>
-      createEvmFallbackClient([
-        { url: 'http://localhost:1/datasets/eth', finalized: true },
-        { type: 'rpc', url: 'http://localhost:2' }, // defaults to finalized: false
-      ]),
-    ).toThrowError(/agree on `finalized`/)
+  it('allows a finalized-only primary with a hot standby, and reports the set as hot', () => {
+    // The "cheap bulk, then follow the tip" topology: backfill from a finalized portal, hand off to
+    // an RPC at the finality frontier. The pipe must report hot so the target keeps fork handling.
+    const fb = createEvmFallbackClient([
+      { url: 'http://localhost:1/datasets/eth', name: 'bulk', finalized: true },
+      { type: 'rpc', url: 'http://localhost:2', name: 'tip' }, // defaults to finalized: false
+    ])
+
+    expect(fb.finalized).toBe(false)
+    expect(fb.metrics().sources.map((s) => s.name)).toEqual(['bulk', 'tip'])
   })
 })

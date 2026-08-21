@@ -66,7 +66,15 @@ export interface EvmFallbackOptions {
    * `ctx.defaultCommand`; returning `undefined` lets it stand).
    */
   strategy?: FallbackStrategy | DefaultFallbackStrategyOptions
-  /** Stream finalized blocks only. Applied to every source that doesn't set it itself. */
+  /**
+   * Stream finalized blocks only. Applied to every source that doesn't set it itself — sources may
+   * differ, which enables the "cheap bulk, then follow the tip" topology: a finalized-only portal
+   * first, a hot RPC behind it. The portal serves until its finalized head, its request then sits
+   * outstanding at the frontier, and `detection.maxStalenessMs` hands off to the source that is
+   * genuinely ahead. (Lag cannot do this — it is only evaluated when a batch arrives, and an
+   * exhausted source delivers none.) A set containing any hot source reports itself as hot, so the
+   * target keeps its fork handling.
+   */
   finalized?: boolean
   logger?: Logger
 }
