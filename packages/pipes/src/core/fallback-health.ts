@@ -1,32 +1,33 @@
 /**
- * Health + selection for the {@link FallbackSource}. This mirrors the Squid SDK's fallback
+ * Failure/recovery detection for the {@link FallbackClient}: the detection knobs, and the
+ * per-source trinary health state machine they configure. This mirrors the Squid SDK's fallback
  * health model (the two SDKs deliberately share no code — only test scenarios), ported onto the
  * Pipes cursor model.
  */
+import { CapabilityProbeOptions } from './fallback-capability.js'
 import { SourceErrorInfo } from './fallback-diagnostics.js'
 
 /** Trinary health (§4): `unknown` lets the first batch ship before any probe completes. */
 export type FallbackHealth = 'healthy' | 'unhealthy' | 'unknown'
 
 /**
- * Declarative tuning for the fallback — pure data, no behavior of its own. Two groups of knobs:
- *
- * - **Measurement/machinery** (always in effect): liveness thresholds, cooldowns, probe cadence,
- *   head-poll TTL/timeout, the stall tick — these shape the health states and freshness numbers
- *   the engine produces.
- * - **Stock-decision thresholds** (`preferPrimary`, `maxStalenessMs`, `maxLagBlocks`,
- *   `allDownTimeoutMs`): what {@link defaultFallbackStrategy} derives its decisions from. A custom
- *   `strategy` can override those decisions; the measurements still follow this policy. (The
- *   engine also reads `maxLagBlocks` to latch "reached the tip" and `maxStalenessMs` for the
- *   `chainStalled` gauge and stall-poll gating — sensing concerns that keep meaning under a custom
- *   strategy.)
+ * How the fallback engine *detects* failure and recovery — and nothing else. These knobs
+ * configure the sensors (capability probes, head polls, liveness bookkeeping, cooldowns) and
+ * define the freshness conditions whose verdicts are delivered to the strategy as events
+ * (`stall.stale`, `batch.lagging`). What to *do* about a verdict is the strategy's job — the
+ * stock decisions are tuned via `strategy: {…}` ({@link DefaultFallbackStrategyOptions}) or
+ * replaced with a function.
  */
-export interface FallbackPolicy {
-  /** `eager` (default) reclaims a recovered higher-preference source at a batch boundary. */
-  preferPrimary?: 'eager' | 'onFailureOnly'
-  /** All sources down: `null` (default) polls forever; a finite value throws after waiting. */
-  allDownTimeoutMs?: number | null
-  /** Backoff between all-down poll attempts. */
+export interface FallbackDetectionOptions {
+  /**
+   * Probe every source's actual capability (default `true`): a source counts as `healthy` only
+   * once a one-block slice of the configured query succeeds at the indexing frontier — catching a
+   * reachable-but-incapable source (trace/`debug_` disabled, pruned state, a Portal answering
+   * HTTP 400 to a type-valid query) before a switch-up promotes it. Pass `false` to detect by
+   * liveness alone, or `{timeoutMs}` to tune the probe.
+   */
+  capabilityProbe?: boolean | CapabilityProbeOptions
+  /** Backoff between re-checks while every source is down. */
   allDownPollMs?: number
   /** Cooldown an `unhealthy` source waits before returning to `unknown`. */
   cooldownMs?: number
@@ -42,12 +43,17 @@ export interface FallbackPolicy {
    */
   capabilityProbeIntervalMs?: number
   /**
-   * Staleness/lag detection needs an independent chain-head reference, so it only runs for sources
-   * that implement `getHead`. `null` disables each check.
+   * Defines the *stalled* condition: a request outstanding longer than this makes the active
+   * source count as stale (`stall` events carry the verdict; the stock strategy fails a stale
+   * source over when a fresher one is ahead). Default 3min; `null` disables the condition.
    */
-  /** Fail a stalled source over (to a fresher one) if a batch stays outstanding this long. Default 3min. */
   maxStalenessMs?: number | null
-  /** Fail the active over once it falls this many blocks behind the independent head. Default 10. */
+  /**
+   * Defines the *lagging* condition: falling more than this many blocks behind an independent
+   * head makes the active source count as lagging — armed only once the stream first reaches the
+   * tip, so a backfill never trips it (`batch` events carry the verdict; the stock strategy fails
+   * a lagging source over). Default 10; `null` disables the condition.
+   */
   maxLagBlocks?: number | null
   /** How often, while a request is outstanding, to re-check staleness. Default 1s. */
   freshnessTickMs?: number
@@ -64,9 +70,8 @@ export interface FallbackPolicy {
   clock?: () => number
 }
 
-export interface ResolvedFallbackPolicy {
-  preferPrimary: 'eager' | 'onFailureOnly'
-  allDownTimeoutMs: number | null
+export interface ResolvedFallbackDetection {
+  capabilityProbe: boolean | CapabilityProbeOptions
   allDownPollMs: number
   cooldownMs: number
   livenessFailThreshold: number
@@ -80,9 +85,8 @@ export interface ResolvedFallbackPolicy {
   clock: () => number
 }
 
-const DEFAULTS: ResolvedFallbackPolicy = {
-  preferPrimary: 'eager',
-  allDownTimeoutMs: null,
+const DEFAULTS: ResolvedFallbackDetection = {
+  capabilityProbe: true,
   allDownPollMs: 1000,
   cooldownMs: 30_000,
   livenessFailThreshold: 2,
@@ -100,10 +104,9 @@ function orDefault<T>(value: T | undefined, fallback: T): T {
   return value === undefined ? fallback : value
 }
 
-export function resolveFallbackPolicy(p?: FallbackPolicy): ResolvedFallbackPolicy {
+export function resolveFallbackDetection(p?: FallbackDetectionOptions): ResolvedFallbackDetection {
   return {
-    preferPrimary: p?.preferPrimary ?? DEFAULTS.preferPrimary,
-    allDownTimeoutMs: orDefault(p?.allDownTimeoutMs, DEFAULTS.allDownTimeoutMs),
+    capabilityProbe: p?.capabilityProbe ?? DEFAULTS.capabilityProbe,
     allDownPollMs: p?.allDownPollMs ?? DEFAULTS.allDownPollMs,
     cooldownMs: p?.cooldownMs ?? DEFAULTS.cooldownMs,
     livenessFailThreshold: p?.livenessFailThreshold ?? DEFAULTS.livenessFailThreshold,
@@ -146,7 +149,7 @@ export class SourceHealth {
   #cause: SourceErrorInfo | undefined
 
   constructor(
-    private policy: ResolvedFallbackPolicy,
+    private detection: ResolvedFallbackDetection,
     hasCapabilityProbe: boolean,
   ) {
     this.#hasCapabilityProbe = hasCapabilityProbe
@@ -154,7 +157,7 @@ export class SourceHealth {
   }
 
   get state(): FallbackHealth {
-    if (this.#state === 'unhealthy' && this.policy.clock() >= this.#cooldownUntil) {
+    if (this.#state === 'unhealthy' && this.detection.clock() >= this.#cooldownUntil) {
       this.#toUnknown()
     }
 
@@ -192,7 +195,7 @@ export class SourceHealth {
 
     this.#livenessPass = 0
     this.#livenessFail++
-    if (this.#livenessFail >= this.policy.livenessFailThreshold) {
+    if (this.#livenessFail >= this.detection.livenessFailThreshold) {
       this.#toUnhealthy(cause)
     }
   }
@@ -209,7 +212,7 @@ export class SourceHealth {
   }
 
   #maybeHealthy(): void {
-    if (this.#capabilityOk && this.#livenessPass >= this.policy.livenessRecoverThreshold) {
+    if (this.#capabilityOk && this.#livenessPass >= this.detection.livenessRecoverThreshold) {
       this.#state = 'healthy'
       this.#cause = undefined
     }
@@ -217,7 +220,7 @@ export class SourceHealth {
 
   #toUnhealthy(cause?: SourceErrorInfo): void {
     this.#state = 'unhealthy'
-    this.#cooldownUntil = this.policy.clock() + this.policy.cooldownMs
+    this.#cooldownUntil = this.detection.clock() + this.detection.cooldownMs
     this.#livenessPass = 0
     this.#livenessFail = 0
     this.#cause = cause
@@ -232,31 +235,5 @@ export class SourceHealth {
     this.#livenessPass = 0
     this.#livenessFail = 0
     this.#cause = undefined
-  }
-}
-
-/**
- * Picks the active source: failover tries the lowest-index `healthy` or `unknown` source
- * (optimistically — the stream is the fastest health test); switch-up only ever promotes to a
- * `healthy` source of higher preference (lower index) than the active one.
- */
-export class Selector {
-  constructor(private health: SourceHealth[]) {}
-
-  pickForFailover(): number | undefined {
-    for (let i = 0; i < this.health.length; i++) {
-      const s = this.health[i].state
-      if (s === 'healthy' || s === 'unknown') return i
-    }
-
-    return undefined
-  }
-
-  pickSwitchUp(active: number): number | undefined {
-    for (let i = 0; i < active; i++) {
-      if (this.health[i].state === 'healthy') return i
-    }
-
-    return undefined
   }
 }

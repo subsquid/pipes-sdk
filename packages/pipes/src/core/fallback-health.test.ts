@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { Selector, SourceHealth, resolveFallbackPolicy } from './fallback-health.js'
+import { SourceHealth, resolveFallbackDetection } from './fallback-health.js'
 
 function setup(opts: { hasCapabilityProbe?: boolean; cooldownMs?: number } = {}) {
   let now = 0
-  const policy = resolveFallbackPolicy({
+  const policy = resolveFallbackDetection({
     clock: () => now,
     cooldownMs: opts.cooldownMs ?? 1000,
     livenessFailThreshold: 2,
@@ -129,24 +129,5 @@ describe('SourceHealth', () => {
     health.onLivenessPass()
     health.onLivenessPass()
     expect(health.state).toBe('healthy')
-  })
-})
-
-describe('Selector', () => {
-  it('failover picks the lowest healthy/unknown; switch-up only healthy above active', () => {
-    const policy = resolveFallbackPolicy({ livenessRecoverThreshold: 1 })
-    const health = [new SourceHealth(policy, false), new SourceHealth(policy, false), new SourceHealth(policy, false)]
-    const selector = new Selector(health)
-
-    // all unknown → failover picks index 0
-    expect(selector.pickForFailover()).toBe(0)
-    expect(selector.pickSwitchUp(2)).toBeUndefined() // none healthy yet
-
-    health[0].onStreamError() // s0 unhealthy
-    expect(selector.pickForFailover()).toBe(1)
-
-    health[0].onLivenessPass() // s0 still cooling down → stays unhealthy
-    health[1].onLivenessPass() // s1 → healthy (M=1)
-    expect(selector.pickSwitchUp(2)).toBe(1)
   })
 })

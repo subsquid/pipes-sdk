@@ -61,8 +61,9 @@ export interface EvmStreamOptions<Out extends EvmOutputs> {
   portal: string | PortalClientOptions | BlockStreamClient | EvmSourceSpec[]
   outputs: Out
   /**
-   * Fallback behavior when `portal` is a source list: policy knobs, capability probing, and/or a
-   * custom {@link FallbackStrategy} deciding which source to drive. Rejected for a single source.
+   * Fallback behavior when `portal` is a source list — two halves: `detection` senses failure and
+   * recovery (probes, head polls, thresholds — it defines the events), `strategy` decides what to
+   * do about it (stock-strategy options, or a custom function). Rejected for a single source.
    */
   fallback?: EvmFallbackOptions
   cache?: PortalCache

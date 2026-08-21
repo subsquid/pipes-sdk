@@ -111,7 +111,7 @@ describe('evmStream', () => {
       ],
       // Probing is on by default; the probe slice would consume the standby's scripted response,
       // so turn it off for the deterministic mock script.
-      fallback: { capabilityProbe: false, policy: { maxLagBlocks: null, maxStalenessMs: null } },
+      fallback: { detection: { capabilityProbe: false, maxLagBlocks: null, maxStalenessMs: null } },
       outputs: evmQuery()
         .addFields({ block: { number: true, hash: true } })
         .addRange({ from: 1, to: 3 }),
@@ -140,8 +140,7 @@ describe('evmStream', () => {
       portal: [portal.url, portal2.url],
       fallback: {
         strategy: pinToStandby,
-        capabilityProbe: false,
-        policy: { maxLagBlocks: null, maxStalenessMs: null },
+        detection: { capabilityProbe: false, maxLagBlocks: null, maxStalenessMs: null },
       },
       outputs: evmQuery()
         .addFields({ block: { number: true, hash: true } })

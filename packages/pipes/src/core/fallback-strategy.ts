@@ -1,26 +1,24 @@
 /**
- * Code-as-config for the fallback's *decisions*.
+ * The deciding half of the fallback. Responsibilities are split in two:
  *
- * Responsibilities are split in two:
- *
- * - **`policy` is data** ({@link FallbackPolicy}): it tunes what the engine *measures* — probe
- *   cadence, head-poll TTL/timeout, liveness thresholds, cooldowns — and the thresholds the
- *   *stock decisions* are derived from (`preferPrimary`, `maxLagBlocks`, `maxStalenessMs`,
- *   `allDownTimeoutMs`). With no strategy installed, the policy fully determines behavior.
- * - **`strategy` is code** ({@link FallbackStrategy}): a function consulted at every decision
- *   point — which source to drive, whether to abandon the active one, whether to reclaim a
- *   recovered one. The measurements still follow the policy; the strategy only replaces what is
- *   *decided* about them. For every event the stock decision is precomputed and handed to the
- *   strategy as {@link FallbackStrategyContext.defaultCommand}, so a custom strategy can inspect,
- *   veto, or amend it — and returning `undefined` simply lets it stand.
+ * - **`detection` is sensing** ({@link FallbackDetectionOptions}): it configures how failure and
+ *   recovery are *detected* — capability probes, head polls, liveness thresholds, cooldowns — and
+ *   defines the freshness conditions whose verdicts arrive on the events here (`stall.stale`,
+ *   `batch.lagging`).
+ * - **`strategy` is deciding**: what to *do* about the detected state — which source to drive,
+ *   whether to abandon the active one, whether to reclaim a recovered one. Configure the stock
+ *   decisions with plain options ({@link DefaultFallbackStrategyOptions}), or replace them with a
+ *   {@link FallbackStrategy} function. A custom function receives the measurements *and* the stock
+ *   decision ({@link FallbackStrategyContext.defaultCommand}), so it can inspect, veto, or amend
+ *   it — returning `undefined` lets it stand.
  *
  * The engine ({@link FallbackClient}) keeps the machinery nobody should have to rewrite — health
- * bookkeeping, liveness/capability probes, head polling, error classification, staleness clocks —
- * and its safety invariants are NOT delegated: fork propagation, resume-from-cursor and never
- * switching mid-batch hold regardless of the strategy.
+ * bookkeeping, probes, head polling, error classification, staleness clocks — and its safety
+ * invariants are NOT delegated: fork propagation, resume-from-cursor and never switching mid-batch
+ * hold regardless of the strategy.
  */
 import { SourceErrorInfo } from './fallback-diagnostics.js'
-import { AllSourcesDownError, FallbackHealth, FallbackPolicy, resolveFallbackPolicy } from './fallback-health.js'
+import { AllSourcesDownError, FallbackHealth } from './fallback-health.js'
 import { BlockCursor } from './types.js'
 
 /** Why the strategy is being consulted. */
@@ -33,16 +31,19 @@ export type FallbackEvent =
    */
   | { type: 'select'; error?: SourceErrorInfo }
   /**
-   * A batch was just delivered — the only point where a *voluntary* switch is safe. Decide whether
-   * to stay (`hold`), reclaim/jump to another source (`use` — the active source stays healthy), or
-   * abandon the active one (`failover` — marks it unhealthy first).
+   * A batch was just delivered — the only point where a *voluntary* switch is safe. `lagging` is
+   * the detection verdict: the active source has fallen behind an independent head by more than
+   * `maxLagBlocks` (armed only once the tip was first reached). Decide whether to stay (`hold`),
+   * reclaim/jump to another source (`use` — the active source stays healthy), or abandon the
+   * active one (`failover` — marks it unhealthy first).
    */
-  | { type: 'batch' }
+  | { type: 'batch'; lagging: boolean }
   /**
    * The active source has had a request outstanding for `pendingMs` (consulted every
-   * `freshnessTickMs` while waiting). `failover` abandons it; `hold` keeps waiting.
+   * `freshnessTickMs` while waiting). `stale` is the detection verdict: the request has been
+   * pending longer than `maxStalenessMs`. `failover` abandons the source; `hold` keeps waiting.
    */
-  | { type: 'stall'; pendingMs: number }
+  | { type: 'stall'; pendingMs: number; stale: boolean }
 
 export interface FallbackSourceSnapshot {
   index: number
@@ -68,15 +69,14 @@ export interface FallbackStrategyContext {
    * reference — never the active source's own head). `undefined` when not computable.
    */
   lagBlocks?: number
-  /** Latched true once the stream first reaches the chain tip (lag failover arms only then). */
+  /** Latched true once the stream first reaches the chain tip (the lagging verdict arms then). */
   atTip: boolean
   /** ms since every source went unhealthy; only set on `select` when no source is eligible. */
   allDownMs?: number
   /**
-   * What the stock strategy ({@link defaultFallbackStrategy} over the configured policy) decides
-   * for this event — always set when a custom strategy is consulted. Inspect it to veto or amend
-   * the stock behavior instead of re-deriving it; returning `undefined` (or `defaultCommand`
-   * itself) lets it stand.
+   * What the stock strategy decides for this event — always set when a custom strategy is
+   * consulted. Inspect it to veto or amend the stock behavior instead of re-deriving it;
+   * returning `undefined` (or `defaultCommand` itself) lets it stand.
    */
   defaultCommand?: FallbackCommand
 }
@@ -110,25 +110,34 @@ export type FallbackCommand =
  */
 export type FallbackStrategy = (ctx: FallbackStrategyContext) => FallbackCommand | undefined | void
 
+/** Tuning for the stock strategy — the plain-data alternative to a custom function. */
+export interface DefaultFallbackStrategyOptions {
+  /** `eager` (default) reclaims a recovered higher-preference source at a batch boundary. */
+  preferPrimary?: 'eager' | 'onFailureOnly'
+  /** All sources down: `null` (default) keeps re-selecting forever; a finite value aborts after waiting this long. */
+  allDownTimeoutMs?: number | null
+}
+
 /**
- * The stock algorithm, expressed as a {@link FallbackStrategy} over the policy's decision knobs:
+ * The stock algorithm, expressed as a {@link FallbackStrategy} over the detection verdicts:
  *
- * - `select`: drive the lowest-index `healthy` or `unknown` source; with none eligible, poll until
- *   `allDownTimeoutMs` elapses (`null` ⇒ forever), then abort.
- * - `batch`: fail the active source over once it lags more than `maxLagBlocks` behind an
- *   independent head (armed only after first reaching the tip); otherwise, under `eager`
- *   preference, reclaim the lowest-index recovered (`healthy`) source above the active one.
- * - `stall`: fail the active source over once its request has been outstanding longer than
- *   `maxStalenessMs` **and** a fresher source is ahead — if everyone is equally stuck it is a
- *   chain stall, and churning sources would not help, so hold.
+ * - `select`: drive the lowest-index `healthy` or `unknown` source; with none eligible, keep
+ *   re-selecting until `allDownTimeoutMs` elapses (`null` ⇒ forever), then abort.
+ * - `batch`: fail the active source over when the detection says it is `lagging`; otherwise,
+ *   under `eager` preference, reclaim the lowest-index recovered (`healthy`) source above the
+ *   active one.
+ * - `stall`: fail the active source over when the detection says it is `stale` **and** a fresher
+ *   source is ahead — if everyone is equally stuck it is a chain stall, and churning sources
+ *   would not help, so hold.
  *
  * This is what runs when no custom strategy is configured, and what produces
  * {@link FallbackStrategyContext.defaultCommand} when one is. It is a pure function of the
- * context, so a custom strategy can also instantiate its own (e.g. with different thresholds) and
- * delegate to it: `defaultFallbackStrategy({ maxLagBlocks: 100 })(ctx)`.
+ * context, so a custom strategy can also instantiate its own (e.g. with a different preference
+ * mode) and delegate to it: `defaultFallbackStrategy({ preferPrimary: 'onFailureOnly' })(ctx)`.
  */
-export function defaultFallbackStrategy(policyOptions?: FallbackPolicy): FallbackStrategy {
-  const policy = resolveFallbackPolicy(policyOptions)
+export function defaultFallbackStrategy(options?: DefaultFallbackStrategyOptions): FallbackStrategy {
+  const preferPrimary = options?.preferPrimary ?? 'eager'
+  const allDownTimeoutMs = options?.allDownTimeoutMs === undefined ? null : options.allDownTimeoutMs
 
   return (ctx: FallbackStrategyContext): FallbackCommand => {
     switch (ctx.event.type) {
@@ -136,7 +145,7 @@ export function defaultFallbackStrategy(policyOptions?: FallbackPolicy): Fallbac
         for (const s of ctx.sources) {
           if (s.health === 'healthy' || s.health === 'unknown') return { action: 'use', index: s.index }
         }
-        if (policy.allDownTimeoutMs != null && (ctx.allDownMs ?? 0) >= policy.allDownTimeoutMs) {
+        if (allDownTimeoutMs != null && (ctx.allDownMs ?? 0) >= allDownTimeoutMs) {
           return { action: 'abort', error: new AllSourcesDownError() }
         }
 
@@ -144,10 +153,10 @@ export function defaultFallbackStrategy(policyOptions?: FallbackPolicy): Fallbac
       }
 
       case 'batch': {
-        if (policy.maxLagBlocks != null && ctx.atTip && (ctx.lagBlocks ?? 0) > policy.maxLagBlocks) {
+        if (ctx.event.lagging) {
           return { action: 'failover' }
         }
-        if (policy.preferPrimary === 'eager' && ctx.activeIndex !== undefined) {
+        if (preferPrimary === 'eager' && ctx.activeIndex !== undefined) {
           for (const s of ctx.sources) {
             if (s.index >= ctx.activeIndex) break
             if (s.health === 'healthy') return { action: 'use', index: s.index }
@@ -158,7 +167,7 @@ export function defaultFallbackStrategy(policyOptions?: FallbackPolicy): Fallbac
       }
 
       case 'stall': {
-        if (policy.maxStalenessMs != null && ctx.event.pendingMs > policy.maxStalenessMs) {
+        if (ctx.event.stale) {
           const cursorNumber = ctx.cursor?.number ?? -1
           const fresherAhead = ctx.sources.some((s) => !s.active && s.head != null && s.head > cursorNumber)
           if (fresherAhead) return { action: 'failover' }
