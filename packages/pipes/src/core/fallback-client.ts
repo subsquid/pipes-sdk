@@ -44,11 +44,18 @@ export interface FallbackClientSource {
 export interface FallbackClientOptions {
   /** Underlying sources in preference order — index 0 is the primary. */
   sources: FallbackClientSource[]
-  /** Machinery knobs (probe cadence, cooldowns, thresholds the default strategy reads). */
+  /**
+   * Configuration **data**: tunes what the engine measures (probe cadence, head-poll TTL/timeout,
+   * liveness thresholds, cooldowns) and the thresholds the stock decisions are derived from
+   * (`preferPrimary`, `maxLagBlocks`, `maxStalenessMs`, `allDownTimeoutMs`). With no `strategy`,
+   * the policy fully determines behavior.
+   */
   policy?: FallbackPolicy
   /**
-   * Decision function consulted at every decision point; events it does not answer (returns
-   * `undefined`) fall back to the default strategy over `policy`. See {@link FallbackStrategy}.
+   * Decision **code**: consulted at every decision point with the measurements *and* the stock
+   * decision (`ctx.defaultCommand`); whatever it returns wins, and `undefined` lets the stock
+   * decision stand — so it overrides exactly the decisions it cares about. See
+   * {@link FallbackStrategy}.
    */
   strategy?: FallbackStrategy
   /**
@@ -334,7 +341,13 @@ export class FallbackClient implements BlockStreamClient {
       allDownMs,
     }
 
-    return this.#strategy?.(ctx) ?? this.#defaultStrategy(ctx) ?? { action: 'hold' }
+    // The stock decision is always computed first and handed to the custom strategy as
+    // `ctx.defaultCommand`, so it can inspect/veto it instead of re-deriving the algorithm.
+    const defaultCommand = this.#defaultStrategy(ctx) ?? { action: 'hold' }
+    if (!this.#strategy) return defaultCommand
+
+    ctx.defaultCommand = defaultCommand
+    return this.#strategy(ctx) ?? defaultCommand
   }
 
   /**

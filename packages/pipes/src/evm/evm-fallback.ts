@@ -54,9 +54,16 @@ export type EvmSourceSpec =
   | { type: 'custom'; name?: string; client: BlockStreamClient }
 
 export interface EvmFallbackOptions {
-  /** Machinery knobs and the default strategy's thresholds. */
+  /**
+   * Configuration data: measurement knobs (probe cadence, health thresholds, cooldowns) plus the
+   * thresholds the stock switching decisions are derived from. Fully determines behavior when no
+   * `strategy` is given.
+   */
   policy?: FallbackPolicy
-  /** Custom decision function; events it leaves unanswered use the default strategy. */
+  /**
+   * Decision code: overrides the stock switching decisions per event; the stock decision arrives
+   * as `ctx.defaultCommand`, and returning `undefined` lets it stand.
+   */
   strategy?: FallbackStrategy
   /** Capability probing for standby sources (default on); `false` for liveness-only health. */
   capabilityProbe?: boolean | CapabilityProbeOptions

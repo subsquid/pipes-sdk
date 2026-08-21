@@ -8,6 +8,19 @@ import { SourceErrorInfo } from './fallback-diagnostics.js'
 /** Trinary health (§4): `unknown` lets the first batch ship before any probe completes. */
 export type FallbackHealth = 'healthy' | 'unhealthy' | 'unknown'
 
+/**
+ * Declarative tuning for the fallback — pure data, no behavior of its own. Two groups of knobs:
+ *
+ * - **Measurement/machinery** (always in effect): liveness thresholds, cooldowns, probe cadence,
+ *   head-poll TTL/timeout, the stall tick — these shape the health states and freshness numbers
+ *   the engine produces.
+ * - **Stock-decision thresholds** (`preferPrimary`, `maxStalenessMs`, `maxLagBlocks`,
+ *   `allDownTimeoutMs`): what {@link defaultFallbackStrategy} derives its decisions from. A custom
+ *   `strategy` can override those decisions; the measurements still follow this policy. (The
+ *   engine also reads `maxLagBlocks` to latch "reached the tip" and `maxStalenessMs` for the
+ *   `chainStalled` gauge and stall-poll gating — sensing concerns that keep meaning under a custom
+ *   strategy.)
+ */
 export interface FallbackPolicy {
   /** `eager` (default) reclaims a recovered higher-preference source at a batch boundary. */
   preferPrimary?: 'eager' | 'onFailureOnly'
