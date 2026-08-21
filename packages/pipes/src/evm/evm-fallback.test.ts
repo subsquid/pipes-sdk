@@ -159,6 +159,38 @@ describe('createEvmFallbackClient — source specs', () => {
     }
   }, 20_000)
 
+  it('lets the retry budget be tuned for the whole list', async () => {
+    // The budget is a parameter of the fallback, so a caller using bare URL specs can raise or
+    // lower it without rewriting every source into an options object.
+    const flaky = await mockPortal([
+      { statusCode: 503 },
+      { statusCode: 503 },
+      { statusCode: 503 },
+      { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
+    ])
+    const standby = await mockPortal([
+      { statusCode: 200, data: [{ header: { number: 1, hash: '0xstandby', timestamp: 1000 } }] },
+    ])
+
+    try {
+      const fb = createEvmFallbackClient([flaky.url, standby.url], {
+        sourceRetries: 0, // opt out entirely: hand over on the first failure
+        detection: { capabilityProbe: false },
+      })
+      const seen: string[] = []
+      for await (const batch of fb.getStream({ type: 'evm', fromBlock: 0 } as any)) {
+        seen.push(...batch.blocks.map((b: any) => b.header.hash))
+        break
+      }
+
+      expect(seen).toEqual(['0xstandby'])
+      expect(fb.switchCount).toBe(1)
+    } finally {
+      await flaky.close()
+      await standby.close()
+    }
+  }, 20_000)
+
   it("lets a caller's own transport settings win", async () => {
     // Opting out of the budget must actually opt out: the first failure hands over.
     const flaky = await mockPortal([{ statusCode: 503 }, { statusCode: 503 }, { statusCode: 503 }])

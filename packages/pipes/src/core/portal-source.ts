@@ -317,6 +317,11 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       const source = this.#options.cache
         ? // use cache if available
           this.#options.cache.getStream({
+            // Deliberately the *effective* client, which under forced finality is a view over the
+            // real one rather than the instance itself: a cache that ignores the explicit flag
+            // below must still be unable to serve hot data into a finalized-only pipe. The cast
+            // records that this view satisfies the client contract without being that class — a
+            // cache must therefore not test its concrete identity.
             portal: portal as PortalClient,
             logger: this.#logger,
             query,

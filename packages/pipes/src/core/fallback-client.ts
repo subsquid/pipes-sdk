@@ -68,8 +68,13 @@ export interface FallbackClientOptions {
 export interface FallbackMetrics {
   activeIndex: number | undefined
   switchCount: number
-  /** Blocks the active source is behind the independent head; ms its current request has been pending. */
-  lag: number
+  /**
+   * Blocks the active source is behind the independent head, or absent when that is not
+   * computable — no independent reference, or no delivered block to measure from. Absent is not
+   * zero: reporting "0 blocks behind" for "we cannot tell" misleads a dashboard and a strategy
+   * alike.
+   */
+  lag: number | undefined
   staleness: number
   chainHead: number | undefined
   /** Set when every source is stuck at the same head (no fresher alternative to switch to). */
@@ -127,8 +132,8 @@ export class FallbackClient implements BlockStreamClient {
   /** Observable state (for metrics). */
   activeIndex: number | undefined
   switchCount = 0
-  /** Freshness gauges. */
-  lag = 0
+  /** Freshness gauges. `lag` is absent while it cannot be computed (see {@link FallbackMetrics}). */
+  lag: number | undefined
   staleness = 0
   chainHead: number | undefined
   /** Set when every source is stuck at the same head (no fresher alternative to switch to). */
@@ -540,7 +545,7 @@ export class FallbackClient implements BlockStreamClient {
     const known = [others, lastNumber].filter((n): n is number => n != null)
     this.chainHead = known.length ? Math.max(...known) : undefined
     if (others == null || lastNumber == null) {
-      this.lag = 0 // no independent reference, or no position yet ⇒ lag is not computable
+      this.lag = undefined // no independent reference, or no position yet ⇒ not computable
     } else {
       const lag = others - lastNumber
       this.lag = Math.max(0, lag)
@@ -556,7 +561,11 @@ export class FallbackClient implements BlockStreamClient {
     // The detection verdicts ride on the event: the strategy decides what to do about them. A
     // boundary carries `stale` as well as `lagging`, because a source can keep answering without
     // making progress (empty batches at a finality frontier) — that never reaches the stall ticker.
-    const lagging = this.#detection.maxLagBlocks != null && this.#lagArmed && this.lag > this.#detection.maxLagBlocks
+    const lagging =
+      this.#detection.maxLagBlocks != null &&
+      this.#lagArmed &&
+      this.lag != null &&
+      this.lag > this.#detection.maxLagBlocks
     const stale = this.#isStale()
     this.staleness = this.#unproductiveMs
     this.chainStalled = stale && !this.#fresherThanCursor(cursor)
@@ -827,7 +836,7 @@ export class FallbackClient implements BlockStreamClient {
       // The freshness gauges describe the *active* source; on a switch the previous source's
       // values are stale, so clear them until the new source's next batch/head poll repopulates.
       this.#unproductiveMs = 0
-      this.lag = 0
+      this.lag = undefined
       this.staleness = 0
       this.chainStalled = false
       this.chainHead = undefined
@@ -840,7 +849,7 @@ export class FallbackClient implements BlockStreamClient {
   #clearActive(): void {
     this.activeIndex = undefined
     this.#unproductiveMs = 0
-    this.lag = 0
+    this.lag = undefined
     this.staleness = 0
     this.chainStalled = false
     this.chainHead = undefined
