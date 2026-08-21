@@ -52,16 +52,68 @@ describe('defaultFallbackStrategy', () => {
     const strategy = defaultFallbackStrategy()
     const base = { activeIndex: 0, sources: [snap(0, 'healthy', { active: true })] }
 
-    expect(strategy(ctx({ ...base, event: { type: 'batch', lagging: false } }))).toEqual({ action: 'hold' })
-    expect(strategy(ctx({ ...base, event: { type: 'batch', lagging: true } }))).toEqual({ action: 'failover' })
+    expect(strategy(ctx({ ...base, event: { type: 'batch', lagging: false, stale: false } }))).toEqual({
+      action: 'hold',
+    })
+    expect(strategy(ctx({ ...base, event: { type: 'batch', lagging: true, stale: false } }))).toEqual({
+      action: 'failover',
+    })
   })
 
   it('batch: eagerly reclaims a recovered higher-preference source; onFailureOnly does not', () => {
     const sources = [snap(0, 'healthy'), snap(1, 'healthy', { active: true })]
-    const batch = { event: { type: 'batch', lagging: false } as const, activeIndex: 1, sources }
+    const batch = { event: { type: 'batch', lagging: false, stale: false } as const, activeIndex: 1, sources }
 
     expect(defaultFallbackStrategy()(ctx(batch))).toEqual({ action: 'use', index: 0 })
     expect(defaultFallbackStrategy({ preferPrimary: 'onFailureOnly' })(ctx(batch))).toEqual({ action: 'hold' })
+  })
+
+  it('batch: a source that answers without progressing is stale too — hand off if anything is ahead', () => {
+    // A finalized-only source parked at its frontier keeps answering (empty batches), so the stall
+    // ticker never fires; the boundary verdict is what catches it.
+    const strategy = defaultFallbackStrategy()
+    const stalled = {
+      event: { type: 'batch', lagging: false, stale: true } as const,
+      activeIndex: 0,
+      cursor: { number: 50, hash: '0x50' },
+    }
+
+    expect(
+      strategy(ctx({ ...stalled, sources: [snap(0, 'healthy', { active: true }), snap(1, 'healthy', { head: 60 })] })),
+    ).toEqual({ action: 'failover' })
+    // Nothing ahead ⇒ everyone is equally stuck; churning would not help.
+    expect(
+      strategy(ctx({ ...stalled, sources: [snap(0, 'healthy', { active: true }), snap(1, 'healthy', { head: 50 })] })),
+    ).toEqual({ action: 'hold' })
+  })
+
+  it('batch: never reclaims a preferred source that cannot serve the cursor', () => {
+    // The exhausted finalized-only source stays reachable and healthy-looking; switching back into
+    // it would only stall the pipe again.
+    const strategy = defaultFallbackStrategy()
+    const batch = {
+      event: { type: 'batch', lagging: false, stale: false } as const,
+      activeIndex: 1,
+      cursor: { number: 105, hash: '0x105' },
+    }
+
+    expect(
+      strategy(
+        ctx({
+          ...batch,
+          sources: [snap(0, 'healthy', { head: 100 }), snap(1, 'healthy', { active: true, head: 130 })],
+        }),
+      ),
+    ).toEqual({ action: 'hold' })
+    // Once it can serve where we are, it is reclaimed as usual.
+    expect(
+      strategy(
+        ctx({
+          ...batch,
+          sources: [snap(0, 'healthy', { head: 105 }), snap(1, 'healthy', { active: true, head: 130 })],
+        }),
+      ),
+    ).toEqual({ action: 'use', index: 0 })
   })
 
   it('stall: fails over on the stale verdict only when a fresher source is ahead', () => {
@@ -86,7 +138,7 @@ describe('defaultFallbackStrategy', () => {
     // The documented composition path: different decision options, same algorithm.
     const sticky = defaultFallbackStrategy({ preferPrimary: 'onFailureOnly' })
     const batch = {
-      event: { type: 'batch', lagging: false } as const,
+      event: { type: 'batch', lagging: false, stale: false } as const,
       activeIndex: 1,
       sources: [snap(0, 'healthy'), snap(1, 'healthy', { active: true })],
     }

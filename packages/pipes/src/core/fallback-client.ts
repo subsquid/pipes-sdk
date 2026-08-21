@@ -119,6 +119,18 @@ export class FallbackClient implements BlockStreamClient {
 
   /** Finality forced on the current stream by the consumer, if any (see `#run`). */
   #streamFinalized: boolean | undefined
+  /**
+   * Time the active source has spent answering *without delivering a block*, accumulated across
+   * consecutive empty batches and reset by the first batch that carries one.
+   *
+   * Neither simpler measure works. Timing a single outstanding request misses a source that keeps
+   * answering but never progresses — a portal parked at its finalized head returns 204 in a tight
+   * loop, and each empty batch would restart the clock. Timing from the last delivered block
+   * instead would count the time a *slow consumer* spends between yields, spuriously failing over
+   * a perfectly healthy source because the target is slow. Only the source's own unproductive wait
+   * counts here.
+   */
+  #unproductiveMs = 0
   /** Per-source capability probes for the *current* stream's query (built per `getStream`). */
   #probes: (((atCursor?: BlockCursor) => Promise<ProbeResult>) | undefined)[] = []
   /** Guards against firing a second capability probe for a source while one is still in flight. */
@@ -212,15 +224,23 @@ export class FallbackClient implements BlockStreamClient {
     // Re-arm the lag trigger per stream: a reused instance starting a later (far-behind-head)
     // backfill must not inherit "reached the tip" from a previous run and false-fire on lag.
     this.#lagArmed = false
-    this.#streamFinalized = options?.finalized
+    // A consumer may only ever *raise* finality, never lower it. `PortalStream` forwards its own
+    // effective commitment as a plain boolean, which for a mixed set is `false` — and a source
+    // client lets that option win over its own config, so forwarding it verbatim would silently
+    // put a source the user declared finalized-only onto the hot stream. Only `true` forces;
+    // anything else leaves each source at its own commitment.
+    this.#streamFinalized = options?.finalized === true ? true : undefined
+    const sourceOptions: PortalBlockStreamOptions | undefined =
+      options == null ? undefined : { ...options, finalized: this.#streamFinalized }
     // Heads are commitment-specific, so a cache filled by a previous stream (possibly at a
     // different forced commitment) must not carry over into this one.
     this.#headCache.length = 0
+    this.#unproductiveMs = 0
     const probeOptions = this.#detection.capabilityProbe
     this.#probes = this.#sources.map((s) => {
       if (s.probeCapability) return s.probeCapability
       if (probeOptions === false) return undefined
-      return makeCapabilityProbe(s.client, query, probeOptions === true ? undefined : probeOptions, options)
+      return makeCapabilityProbe(s.client, query, probeOptions === true ? undefined : probeOptions, sourceOptions)
     })
 
     let cursor: BlockCursor | undefined
@@ -240,7 +260,7 @@ export class FallbackClient implements BlockStreamClient {
       }
 
       try {
-        const iterator = this.#sources[active].client.getStream(q, options)[Symbol.asyncIterator]()
+        const iterator = this.#sources[active].client.getStream(q, sourceOptions)[Symbol.asyncIterator]()
         try {
           while (true) {
             const next = await this.#nextWithStallTicks(iterator, active, cursor)
@@ -278,7 +298,7 @@ export class FallbackClient implements BlockStreamClient {
               break
             }
             if (command.action === 'failover') {
-              this.#failSource(active, this.#boundaryFailoverCause(event.lagging))
+              this.#failSource(active, this.#boundaryFailoverCause(event))
               break
             }
             if (command.action === 'abort') {
@@ -297,6 +317,13 @@ export class FallbackClient implements BlockStreamClient {
         // re-select and resume from `cursor` on the next iteration
       }
     }
+  }
+
+  /** The *stalled* verdict: unproductive wait past the window, optionally plus an open request. */
+  #isStale(outstandingMs = 0): boolean {
+    return (
+      this.#detection.maxStalenessMs != null && this.#unproductiveMs + outstandingMs > this.#detection.maxStalenessMs
+    )
   }
 
   /** Consult the strategy (custom first, default for unanswered events). */
@@ -397,15 +424,32 @@ export class FallbackClient implements BlockStreamClient {
       }
     }
 
-    // The detection verdict rides on the event: the strategy decides what to do about it.
+    // The detection verdicts ride on the event: the strategy decides what to do about them. A
+    // boundary carries `stale` as well as `lagging`, because a source can keep answering without
+    // making progress (empty batches at a finality frontier) — that never reaches the stall ticker.
     const lagging = this.#detection.maxLagBlocks != null && this.#lagArmed && this.lag > this.#detection.maxLagBlocks
+    const stale = this.#isStale()
+    this.staleness = this.#unproductiveMs
+    this.chainStalled = stale && !this.#fresherThanCursor(cursor)
 
-    return { type: 'batch', lagging }
+    return { type: 'batch', lagging, stale }
   }
 
-  /** Why the active source was failed over at a boundary — lag when the detection said so. */
-  #boundaryFailoverCause(lagging: boolean): SourceErrorInfo {
-    if (lagging) {
+  /** Is any *other* eligible source known to be ahead of where we are? */
+  #fresherThanCursor(cursor: BlockCursor | undefined): boolean {
+    const lastNumber = cursor?.number ?? -1
+    return this.#sources.some((_, i) => {
+      const head = this.#headCache[i]?.value
+      return i !== this.activeIndex && head != null && head > lastNumber
+    })
+  }
+
+  /** Why the active source was failed over at a boundary — the detection verdict that tripped. */
+  #boundaryFailoverCause(event: Extract<FallbackEvent, { type: 'batch' }>): SourceErrorInfo {
+    if (event.stale) {
+      return freshnessFailure('stream', 'stale', 'stopped making progress while a fresher source was ahead')
+    }
+    if (event.lagging) {
       return freshnessFailure(
         'stream',
         'lag',
@@ -533,6 +577,8 @@ export class FallbackClient implements BlockStreamClient {
       return iterator.next()
     }
 
+    // The clock starts when the request goes out and stops when it settles, so time the *consumer*
+    // spends between yields is never counted against the source.
     const start = this.#detection.clock()
     const nextP = iterator.next()
     nextP.catch(() => {}) // a later abandon must not surface as an unhandled rejection
@@ -547,21 +593,25 @@ export class FallbackClient implements BlockStreamClient {
       tick.cancel()
 
       if (r.type === 'next') {
-        this.staleness = 0
+        const delivered = !r.v.done && (r.v.value as StreamData<any>).blocks.length > 0
+        // An empty batch is an answer, not progress: keep the wait on the clock instead of
+        // restarting it, so a source that only ever answers empty is still seen as stalled.
+        this.#unproductiveMs = delivered ? 0 : this.#unproductiveMs + (this.#detection.clock() - start)
+        this.staleness = this.#unproductiveMs
         this.chainStalled = false
         return r.v
       }
       if (r.type === 'error') {
+        this.#unproductiveMs = 0
         this.staleness = 0
         this.chainStalled = false
         throw r.e
       }
 
-      const pendingMs = this.#detection.clock() - start
+      const outstandingMs = this.#detection.clock() - start
+      const pendingMs = this.#unproductiveMs + outstandingMs
       this.staleness = pendingMs
-
-      // The detection verdict: the request has been outstanding past the stalled threshold.
-      const stale = this.#detection.maxStalenessMs != null && pendingMs > this.#detection.maxStalenessMs
+      const stale = this.#isStale(outstandingMs)
 
       // Re-polling the other sources both feeds the stall decision and (re)probes their
       // liveness/capability, so a held source keeps noticing when the chain comes back. Polls are
@@ -576,6 +626,7 @@ export class FallbackClient implements BlockStreamClient {
 
       const command = this.#decide({ type: 'stall', pendingMs, stale }, cursor)
       if (command.action === 'failover') {
+        this.#unproductiveMs = 0
         this.staleness = 0
         return FAILOVER
       }
@@ -621,6 +672,7 @@ export class FallbackClient implements BlockStreamClient {
       this.switchCount++
       // The freshness gauges describe the *active* source; on a switch the previous source's
       // values are stale, so clear them until the new source's next batch/head poll repopulates.
+      this.#unproductiveMs = 0
       this.lag = 0
       this.staleness = 0
       this.chainStalled = false
