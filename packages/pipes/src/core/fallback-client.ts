@@ -376,10 +376,15 @@ export class FallbackClient implements BlockStreamClient {
     cursor: BlockCursor | undefined,
   ): Promise<Extract<FallbackEvent, { type: 'batch' }>> {
     const others = await this.#chainHeadOthers(active, cursor)
-    const lastNumber = cursor?.number ?? -1
-    this.chainHead = others != null ? Math.max(others, lastNumber) : lastNumber
-    if (others == null) {
-      this.lag = 0 // no independent reference ⇒ lag is not computable; don't report a stale value
+    // A boundary can be reached before any block has been delivered — a source may yield an empty
+    // batch (the portal answers 204 that way) — so there is not always a position to measure from.
+    // Both gauges stay unset rather than falling back to a `-1` sentinel, which would surface as a
+    // chain-height-sized lag on the metrics and in a strategy's `ctx.lagBlocks`.
+    const lastNumber = cursor?.number
+    const known = [others, lastNumber].filter((n): n is number => n != null)
+    this.chainHead = known.length ? Math.max(...known) : undefined
+    if (others == null || lastNumber == null) {
+      this.lag = 0 // no independent reference, or no position yet ⇒ lag is not computable
     } else {
       const lag = others - lastNumber
       this.lag = Math.max(0, lag)

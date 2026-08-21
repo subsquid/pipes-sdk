@@ -651,6 +651,43 @@ describe('FallbackClient — freshness', () => {
     expect(fb.activeIndex).toBe(0) // stayed on s0 — no spurious failover
   })
 
+  it('(j) reports no lag/head before the first block, even at a boundary after an empty batch', async () => {
+    // A source may yield an empty batch (the portal answers HTTP 204 that way), so a boundary can
+    // be reached with nothing delivered yet. Measuring from a `-1` sentinel would publish a
+    // chain-height-sized lag on the gauges and in a strategy's `ctx.lagBlocks`.
+    const seen: { lag: number; chainHead: number | undefined }[] = []
+    const s0 = source('s0', async function* () {
+      yield {
+        blocks: [],
+        head: {},
+        meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
+      }
+      yield batch(1_000)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(1_000),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    for await (const b of fb.getStream(QUERY)) {
+      void b
+      seen.push({ lag: fb.lag, chainHead: fb.chainHead })
+    }
+
+    // A batch is yielded *before* its boundary is observed, so each entry shows the state left by
+    // the PREVIOUS boundary: nothing has been observed yet at [0], and [1] is the boundary that
+    // followed the empty batch — the one with no cursor to measure from. Measuring from `-1` there
+    // would have reported a 1,001-block lag against s1's head.
+    expect(seen[0]).toEqual({ lag: 0, chainHead: undefined })
+    expect(seen[1]).toEqual({ lag: 0, chainHead: 1_000 })
+    // The final boundary, with a real cursor at s1's head: caught up, still no lag.
+    expect(fb.lag).toBe(0)
+    expect(fb.chainHead).toBe(1_000)
+    expect(fb.activeIndex).toBe(0) // never failed over
+  })
+
   it('(i) does not arm lag while the reference is behind us (stale standby) — no spurious failover', async () => {
     // The standby is first *behind* the active (negative lag), then jumps to the real tip while the
     // active is still backfilling. Arming on the negative lag would let that jump trip a spurious
