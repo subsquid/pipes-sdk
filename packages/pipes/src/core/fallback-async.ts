@@ -16,12 +16,16 @@ export function withTimeout<T>(
   if (ms == null) return promise
 
   promise.catch(() => {}) // an abandoned (timed-out) promise must not surface as unhandled
-  let timer: ReturnType<typeof setTimeout>
+  // The timer handle stays inside the executor and is reached only through `cancelTimer`, which
+  // starts as a no-op — so the cleanup can never run against an unassigned handle, whatever this
+  // grows into later.
+  let cancelTimer = () => {}
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(makeError()), ms)
+    const timer = setTimeout(() => reject(makeError()), ms)
+    cancelTimer = () => clearTimeout(timer)
   })
 
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+  return Promise.race([promise, timeout]).finally(() => cancelTimer())
 }
 
 /**
@@ -46,9 +50,11 @@ export function safeReturn(it: AsyncIterator<unknown>): void {
  * abandoned ticks don't accumulate.
  */
 export function delay(ms: number): { promise: Promise<void>; cancel: () => void } {
-  let timer: ReturnType<typeof setTimeout>
+  let cancel = () => {}
   const promise = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, ms)
+    const timer = setTimeout(resolve, ms)
+    cancel = () => clearTimeout(timer)
   })
-  return { promise, cancel: () => clearTimeout(timer) }
+
+  return { promise, cancel: () => cancel() }
 }
