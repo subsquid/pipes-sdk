@@ -414,7 +414,7 @@ describe('FallbackClient — supervisor', () => {
     expect(fb.metrics().sources.every((s) => !s.active)).toBe(true)
     expect(fb.chainStalled).toBe(false)
     expect(fb.staleness).toBe(0)
-    expect(fb.lag).toBe(0)
+    expect(fb.lag).toBeUndefined() // nothing is being driven ⇒ nothing to measure
     expect(fb.chainHead).toBeUndefined()
   }, 5000)
 })
@@ -628,7 +628,7 @@ describe('FallbackClient — freshness', () => {
 
     expect(await collect(fb)).toEqual([90, 91])
     expect(fb.activeIndex).toBe(1)
-    expect(fb.lag).toBe(0) // not the stale 19 the lag trigger recorded against s0
+    expect(fb.lag).toBeUndefined() // not the stale 19 the lag trigger recorded against s0
   })
 
   it('(h) re-arms lag per stream: a reused instance does not inherit "at tip" for a backfill', async () => {
@@ -663,7 +663,7 @@ describe('FallbackClient — freshness', () => {
     // A source may yield an empty batch (the portal answers HTTP 204 that way), so a boundary can
     // be reached with nothing delivered yet. Measuring from a `-1` sentinel would publish a
     // chain-height-sized lag on the gauges and in a strategy's `ctx.lagBlocks`.
-    const seen: { lag: number; chainHead: number | undefined }[] = []
+    const seen: { lag: number | undefined; chainHead: number | undefined }[] = []
     const s0 = source('s0', async function* () {
       yield {
         blocks: [],
@@ -687,10 +687,11 @@ describe('FallbackClient — freshness', () => {
     // A batch is yielded *before* its boundary is observed, so each entry shows the state left by
     // the PREVIOUS boundary: nothing has been observed yet at [0], and [1] is the boundary that
     // followed the empty batch — the one with no cursor to measure from. Measuring from `-1` there
-    // would have reported a 1,001-block lag against s1's head.
-    expect(seen[0]).toEqual({ lag: 0, chainHead: undefined })
-    expect(seen[1]).toEqual({ lag: 0, chainHead: 1_000 })
-    // The final boundary, with a real cursor at s1's head: caught up, still no lag.
+    // would have reported a 1,001-block lag against s1's head; reporting `0` would claim we are
+    // level with the chain, which is equally untrue. Not computable ⇒ absent.
+    expect(seen[0]).toEqual({ lag: undefined, chainHead: undefined })
+    expect(seen[1]).toEqual({ lag: undefined, chainHead: 1_000 })
+    // The final boundary, with a real cursor at s1's head: caught up, and now measurable.
     expect(fb.lag).toBe(0)
     expect(fb.chainHead).toBe(1_000)
     expect(fb.activeIndex).toBe(0) // never failed over

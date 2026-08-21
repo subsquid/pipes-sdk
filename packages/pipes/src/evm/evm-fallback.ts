@@ -68,6 +68,13 @@ export interface EvmFallbackOptions {
    */
   strategy?: FallbackStrategy | DefaultFallbackStrategyOptions
   /**
+   * How many times a source retries a retryable transport failure before the failure reaches the
+   * fallback machinery. A lone source retries indefinitely because there is nothing else to read;
+   * inside a list the budget is short, so a struggling source is handed over rather than waited on.
+   * Per-source transport settings still win over this.
+   */
+  sourceRetries?: number
+  /**
    * Stream finalized blocks only. Applied to every source that doesn't set it itself — sources may
    * differ, which enables the "cheap bulk, then follow the tip" topology: a finalized-only portal
    * first, a hot RPC behind it. The portal serves until its finalized head, its request then sits
@@ -92,7 +99,7 @@ export interface EvmFallbackOptions {
  * list there is, so the budget is short — long enough to ride out a blip, short enough that a
  * struggling source is handed over rather than waited on (ADR-27).
  */
-const SOURCE_RETRY_ATTEMPTS = 3 // P-FB-SOURCE-RETRIES
+const DEFAULT_SOURCE_RETRIES = 3
 
 /**
  * Portal client settings for a source in a list: the pipe's logger and the bounded retry budget,
@@ -102,7 +109,11 @@ const SOURCE_RETRY_ATTEMPTS = 3 // P-FB-SOURCE-RETRIES
 function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http']): PortalClientOptions['http'] {
   if (http instanceof HttpClient) return http
 
-  return { retryAttempts: SOURCE_RETRY_ATTEMPTS, ...(options.logger ? { logger: options.logger } : {}), ...http }
+  return {
+    retryAttempts: options.sourceRetries ?? DEFAULT_SOURCE_RETRIES,
+    ...(options.logger ? { logger: options.logger } : {}),
+    ...http,
+  }
 }
 
 export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {

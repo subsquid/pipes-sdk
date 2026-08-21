@@ -123,8 +123,9 @@ silently backfills the entire chain. A timestamp bound requires at least one sou
 to resolve it.
 
 **WP-70 — Transport retry budget.** A source in a list retries a retryable transport
-failure a bounded number of times (`P-FB-SOURCE-RETRIES`) before the failure is reported
-to the machinery, rather than the unbounded retry a lone source performs (ADR-10). Both
+failure a bounded number of times (`P-FB-SOURCE-RETRIES`, configurable for the list)
+before the failure is reported to the machinery, rather than the unbounded retry a lone
+source performs (ADR-10). Both
 extremes are wrong here: retrying forever waits on a struggling source instead of using
 the standby that exists for it, and not retrying at all spends a switch on every transient
 status. Settings supplied for a specific source override this, and a pre-built transport
@@ -285,9 +286,10 @@ field, never a metric label.
 
 **OB-62 — Switch count.** Cumulative switches, per pipe.
 
-**OB-63 — Lag.** Blocks the pipe is behind the independent chain-head reference, or
-absent when no reference is available. It MUST NOT be reported before the pipe has a
-position to measure from.
+**OB-63 — Lag.** Blocks the pipe is behind the independent chain-head reference. It MUST
+be *absent* — not zero — whenever it cannot be computed: before the pipe has a position to
+measure from, when no reference is available, and while no source is being read. Zero
+means "level with the chain", which is a different claim from "unknown".
 
 **OB-64 — Staleness.** The active source's current unproductive wait (DEF-69).
 

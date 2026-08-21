@@ -97,8 +97,11 @@ export function registerFallbackMetrics(
     },
   })
 
-  /** One scalar gauge per pipe, read straight off the snapshot. */
-  const scalar = (name: string, help: string, read: (m: FallbackMetrics) => number) => {
+  /**
+   * One scalar gauge per pipe, read straight off the snapshot. A reading of `undefined` publishes
+   * no series for that pipe at all: a gauge that cannot be computed must be absent, not zero.
+   */
+  const scalar = (name: string, help: string, read: (m: FallbackMetrics) => number | undefined) => {
     metrics.gauge<'id'>({
       name: `${prefix}_${name}`,
       help,
@@ -106,7 +109,8 @@ export function registerFallbackMetrics(
       collect() {
         this.reset?.()
         for (const [id, fallback] of sources) {
-          this.set({ id }, read(fallback.metrics()))
+          const value = read(fallback.metrics())
+          if (value != null) this.set({ id }, value)
         }
       },
     })
@@ -115,7 +119,11 @@ export function registerFallbackMetrics(
   // No `_total` suffix on the switch count — that suffix is reserved for Counters by Prometheus
   // convention, and this is a pull-based gauge set to the current cumulative value.
   scalar('switches', 'Cumulative number of fallback source switches', (m) => m.switchCount)
-  scalar('lag_blocks', 'Blocks the active source is behind the independent chain-head reference', (m) => m.lag)
+  scalar(
+    'lag_blocks',
+    'Blocks the active source is behind the independent chain-head reference; absent while not computable',
+    (m) => m.lag,
+  )
   scalar('staleness_ms', 'Duration the active source has had a batch request outstanding (ms)', (m) => m.staleness)
   scalar('chain_stalled', 'Whether every source is stuck at the same head (1 = stalled)', (m) =>
     m.chainStalled ? 1 : 0,
