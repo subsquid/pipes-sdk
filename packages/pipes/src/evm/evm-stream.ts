@@ -98,7 +98,7 @@ export function evmStream<Out extends EvmOutputs>({
   if (Array.isArray(portal)) {
     const client = createEvmFallbackClient(portal, fallback)
     if (metrics) {
-      registerFallbackMetrics(metrics.metrics, client)
+      registerFallbackMetrics(metrics.metrics, client, id)
     }
     source = client
   } else {
