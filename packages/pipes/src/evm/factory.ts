@@ -16,7 +16,7 @@ import {
   getNormalizedEventParams,
   isEventWithArgs,
 } from './evm-decoder.js'
-import { evmPortalStream } from './evm-stream.js'
+import { evmStream } from './evm-stream.js'
 
 export type EventArgs = {
   [key: string]: Codec<any> & { indexed?: boolean }
@@ -192,9 +192,9 @@ export class Factory<T extends EventArgs> {
 
     logger.info(`Starting ${name}`)
 
-    await evmPortalStream({
+    await evmStream({
       id: name,
-      portal,
+      source: portal,
       logger,
       outputs: evmEventDecoder({
         profiler: { name },

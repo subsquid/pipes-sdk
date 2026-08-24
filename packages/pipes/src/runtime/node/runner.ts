@@ -118,7 +118,7 @@ class Runner<T extends SerializableObject = any> {
  *     id: 'transfers',
  *     params: { portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet' },
  *     handler: async ({ id, params, logger, metrics }) => {
- *       const stream = evmPortalStream({ id, portal: params.portal, outputs: evmEventDecoder({ ... }) })
+ *       const stream = evmStream({ id, source: params.portal, outputs: evmEventDecoder({ ... }) })
  *       for await (const { data } of stream) { ... }
  *     },
  *   },

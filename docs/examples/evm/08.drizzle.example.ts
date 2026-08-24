@@ -38,7 +38,7 @@
 
 import { ApolloServer } from '@apollo/server'
 import { startStandaloneServer } from '@apollo/server/standalone'
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { metricsServer } from '@subsquid/pipes/metrics/node'
 import { chunkForInsert, drizzleTarget } from '@subsquid/pipes/targets/drizzle/node-postgres'
 import { buildSchema } from 'drizzle-graphql'
@@ -69,9 +69,9 @@ const DB_URL = 'postgresql://postgres:postgres@localhost:5432/postgres'
 
 async function main() {
   // Configure Portal API source to fetch data from Ethereum mainnet
-  await evmPortalStream({
+  await evmStream({
     id: 'ethereum-transfers',
-    portal: {
+    source: {
       url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     },
     // Configure decoder to extract ERC20 Transfer events from raw blockchain data

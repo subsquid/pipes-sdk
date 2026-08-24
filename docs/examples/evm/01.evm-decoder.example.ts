@@ -1,4 +1,4 @@
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { metricsServer } from '@subsquid/pipes/metrics/node'
 
 /**
@@ -10,9 +10,9 @@ import { metricsServer } from '@subsquid/pipes/metrics/node'
  */
 
 async function cli() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'evm-decoder',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: {
         from: 'latest',

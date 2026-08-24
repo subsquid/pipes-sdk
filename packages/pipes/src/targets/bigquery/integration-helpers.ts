@@ -68,7 +68,7 @@ export async function setupIntegrationClients(): Promise<{
 
 /**
  * Builds a synthetic `BatchContext` for tests that drive `target.write()` directly (i.e.
- * without `evmPortalStream`). Includes the `id` + `metrics` slots the BigQuery target reads
+ * without `evmStream`). Includes the `id` + `metrics` slots the BigQuery target reads
  * for Track-2 commit-stage metrics — without them, the first batch crashes on
  * `registerBqTargetMetrics(ctx.metrics)`.
  */

@@ -34,7 +34,7 @@ describe('EVM Template Builder', () => {
 
     expect(indexerContent).toMatchInlineSnapshot(`
       "import "dotenv/config";
-      import { commonAbis, evmEventDecoder, evmPortalStream } from "@subsquid/pipes/evm";
+      import { commonAbis, evmEventDecoder, evmStream } from "@subsquid/pipes/evm";
       import { z } from "zod";
       import path from "node:path";
       import { clickhouseTarget } from "@subsquid/pipes/targets/clickhouse";
@@ -71,9 +71,9 @@ describe('EVM Template Builder', () => {
       )
 
       export async function main() {
-        await evmPortalStream({
+        await evmStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             erc20Transfers,
           },
@@ -138,7 +138,7 @@ describe('EVM Template Builder', () => {
 
     expect(indexerContent).toMatchInlineSnapshot(`
       "import "dotenv/config";
-      import { commonAbis, contractFactory, contractFactorySqliteStore, evmEventDecoder, evmPortalStream } from "@subsquid/pipes/evm";
+      import { commonAbis, contractFactory, contractFactorySqliteStore, evmEventDecoder, evmStream } from "@subsquid/pipes/evm";
       import { z } from "zod";
       import path from "node:path";
       import { clickhouseTarget } from "@subsquid/pipes/targets/clickhouse";
@@ -205,9 +205,9 @@ describe('EVM Template Builder', () => {
       )
 
       export async function main() {
-        await evmPortalStream({
+        await evmStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             erc20Transfers,
             uniswapV3Swaps,
@@ -299,7 +299,7 @@ describe('EVM Template Builder', () => {
 
     expect(indexerContent).toMatchInlineSnapshot(`
       "import "dotenv/config";
-      import { evmEventDecoder, evmPortalStream } from "@subsquid/pipes/evm";
+      import { evmEventDecoder, evmStream } from "@subsquid/pipes/evm";
       import { z } from "zod";
       import { chunkForInsert, drizzleTarget } from "@subsquid/pipes/targets/drizzle/node-postgres";
       import { drizzle } from "drizzle-orm/node-postgres";
@@ -329,9 +329,9 @@ describe('EVM Template Builder', () => {
       }).pipe(enrichEvents)
 
       export async function main() {
-        await evmPortalStream({
+        await evmStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             custom,
           },

@@ -11,8 +11,8 @@ and how to initially transform it.
 An output is built with the `query().build().pipe()` chain:
 
 ```ts
-evmPortalStream({
-  portal: '...',
+evmStream({
+  source: '...',
   outputs: evmQuery()
     .addLogRequest({
       range: { from: 'latest' },
@@ -33,8 +33,8 @@ They are also chainable:
 
 ```ts
 // decoder is a shorthand for query().build().pipe()
-evmPortalStream({
-  portal: '...',
+evmStream({
+  source: '...',
   outputs: evmEventDecoder({
     range: { from: 'latest' },
     events: { transfers: erc20.events.Transfer },
@@ -53,8 +53,8 @@ evmPortalSource({ portal: '...' })
   })
 
 // after
-evmPortalStream({
-  portal: '...',
+evmStream({
+  source: '...',
   outputs: {
     transfers: erc20Transfers({ range }),
     swaps:     uniswapV3Decoder({ range }),
@@ -80,8 +80,8 @@ for await (const { data } of stream) {
 }
 
 // after
-const stream = evmPortalStream({
-  portal: '...',
+const stream = evmStream({
+  source: '...',
   // evmQuery() is a shorthand for new EvmQueryBuilder()
   outputs: evmQuery()
     .addLogRequest({ range: { from: 0 }, request: { topic0: [erc20.events.Transfer.topic] } })
@@ -114,7 +114,7 @@ evmPortalSource({ portal: '...' })
   .pipeTo(myTarget)
 
 // after — id is required
-evmPortalStream({ id: 'eth-transfers', portal: '...', outputs: evmEventDecoder({ ... }) })
+evmStream({ id: 'eth-transfers', source: '...', outputs: evmEventDecoder({ ... }) })
   .pipeTo(myTarget) // cursor stored under key "eth-transfers"
 
 solanaPortalStream({ id: 'sol-swaps', portal: '...', outputs: solanaInstructionDecoder({ ... }) })
@@ -129,7 +129,7 @@ Functions and types have been renamed for clarity and consistency. These are **h
 
 | Before | After |
 |---|---|
-| `createEvmPortalSource` / `evmPortalSource` | `evmPortalStream` |
+| `createEvmPortalSource` / `evmPortalSource` | `evmStream` |
 | `solanaPortalSource` | `solanaPortalStream` |
 | `hyperliquidFillsPortalSource` | `hyperliquidFillsPortalStream` |
 | `evmDecoder` | `evmEventDecoder` |
@@ -237,7 +237,7 @@ evmPortalSource({
 })
 
 // after
-evmPortalStream({
+evmStream({
   progress: {
     onStart:    (e: StartEvent)    => console.log(e.state.initial),
     onProgress: (e: ProgressEvent) => console.log(e.progress.state.current),
@@ -370,8 +370,8 @@ that lives in a different project than the topic, and the limits that come with 
 Ranges now accept ISO date strings and `Date` objects in addition to block numbers. Dates are automatically resolved to the corresponding block numbers via the portal API.
 
 ```ts
-evmPortalStream({
-  portal: '...',
+evmStream({
+  source: '...',
   outputs: evmEventDecoder({
     range: { from: '2024-01-01' },              // date string
     events: { transfers: erc20.events.Transfer },
@@ -490,9 +490,9 @@ import { mockPortal, testLogger, mockMetricsServer, readAll } from '@subsquid/pi
 const portal = await mockPortal(mockResponses)
 
 // Use portal.url with any portal stream in your test
-const stream = evmPortalStream({
+const stream = evmStream({
   id: 'test',
-  portal: portal.url,
+  source: portal.url,
   logger: testLogger(),
   metrics: mockMetricsServer(),
   outputs: evmEventDecoder({ ... }),
@@ -535,7 +535,7 @@ const portal = await mockEvmPortalStream({
   ],
 })
 
-// Use portal.url with evmPortalStream in your test
+// Use portal.url with evmStream in your test
 ```
 
 Works end-to-end with `evmEventDecoder` and `contractFactory()` for testing Uniswap-style factory/child event patterns. Requires `viem` as an optional peer dependency.
@@ -547,8 +547,8 @@ Export profiler spans to Jaeger, Tempo, or any OTEL-compatible backend:
 ```ts
 import { opentelemetryProfiler } from '@subsquid/pipes/opentelemetry'
 
-evmPortalStream({
-  portal: '...',
+evmStream({
+  source: '...',
   profiler: opentelemetryProfiler(), // drop-in for profiler: true
   outputs: evmEventDecoder({ ... }),
 })
@@ -565,9 +565,9 @@ import { devRunner } from '@subsquid/pipes/runtime/node'
 
 // one pipe function, reused across chains
 async function indexTransfers({ id, params, logger, metrics }: PipeContext<{ portal: string }>) {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id,
-    portal: params.portal,
+    source: params.portal,
     logger,
     metrics,
     outputs: evmEventDecoder({
@@ -674,7 +674,7 @@ There are **no deprecated aliases** in this release — every rename in breaking
 
 - `CompositeTransformer` / `compositeTransformer` / `composite-transformer.ts` removed — use named `outputs`
 - `.pipeComposite()` removed — use named `outputs`
-- `query` option removed from `evmPortalStream` and `solanaPortalStream`
+- `query` option removed from `evmStream` and `solanaPortalStream`
 - Deprecated aliases removed: `evmPortalSource` / `createEvmPortalSource`, `solanaPortalSource` / `createSolanaPortalSource`, `hyperliquidFillsPortalSource`, `factory`, `factorySqliteDatabase`, `chunk`, `createClickhouseTarget`
 - `createSolanaInstructionDecoder` removed — use `solanaInstructionDecoder`
 - `ResultOf<T>` removed — use `OutputOf<T>`

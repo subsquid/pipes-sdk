@@ -3,7 +3,7 @@ import type { managedwriter } from '@google-cloud/bigquery-storage'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 import type { BlockCursor } from '~/core/index.js'
-import { evmPortalStream } from '~/evm/evm-stream.js'
+import { evmStream } from '~/evm/evm-stream.js'
 import { type MockPortal, type MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
 
 import { type BigQueryWriter } from './bigquery-store.js'
@@ -176,7 +176,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
   // Fork scenarios driven through the full pipeTo() path with a mock portal.
   //
   // These mirror the ClickHouse / Postgres reorg suites: rather than calling target.resolveFork()
-  // directly, we let evmPortalStream replay 409 reorg responses and observe BQ table /
+  // directly, we let evmStream replay 409 reorg responses and observe BQ table /
   // sync-table state after the framework drives target.resolveFork() and re-stream automatically.
   //
   // Each test creates a fresh tracked + sync table pair so writes / DELETEs from one test
@@ -304,9 +304,9 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
 
       let beforeRollbacks = 0
       let afterRollbacks = 0
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         buildTarget(events, sync, {
@@ -389,9 +389,9 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       ])
 
       const rollbackCursors: BlockCursor[] = []
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         buildTarget(events, sync, {
@@ -474,9 +474,9 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       let finished = false
       while (!finished) {
         try {
-          await evmPortalStream({
+          await evmStream({
             id: 'test',
-            portal: portal.url,
+            source: portal.url,
             outputs: blockDecoder({ from: 0, to: 7 }),
           }).pipeTo(
             buildTarget(events, sync, {
@@ -569,9 +569,9 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       ])
 
       const rollbackCursors: BlockCursor[] = []
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         buildTarget(events, sync, {
@@ -619,18 +619,18 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       ])
 
       // First run: ingest block 1 and stop cleanly.
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(buildTarget(events, sync))
 
       // Second run with a fresh stream: the BigQuery sync table holds the previous cursor,
       // so getCursor() must read it back and the new stream must request block 2 with the
       // expected parentBlockHash. validateRequest in the mock asserts that.
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 1, to: 2 }),
       }).pipeTo(buildTarget(events, sync))
 
@@ -655,13 +655,13 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(buildTarget(events, sync))
 
-      // `evmPortalStream` may split a single portal response into multiple per-batch
+      // `evmStream` may split a single portal response into multiple per-batch
       // emissions; assert on the FINAL committed cursor rather than counting rows. What
       // matters for resumption correctness is that the latest commit reflects the last
       // block we processed, with the finalized pointer the portal advertised.

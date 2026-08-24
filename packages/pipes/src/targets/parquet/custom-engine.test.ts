@@ -5,7 +5,7 @@ import path from 'node:path'
 import { ParquetReader, ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { evmPortalStream } from '~/evm/index.js'
+import { evmStream } from '~/evm/index.js'
 import { type MockPortal, type MockResponse, blockDecoder, finalizedMockPortal } from '~/testing/index.js'
 
 import type { ParquetEngine } from './engine.js'
@@ -131,7 +131,7 @@ describe('parquetTarget with a custom engine', () => {
     portal = await finalizedMockPortal([blocksResponse([1, 2, 3], 3)])
     const calls: string[] = []
 
-    await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+    await evmStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
       parquetTarget({
         dir,
         tables: [
@@ -177,7 +177,7 @@ describe('parquetTarget with a custom engine', () => {
     portal = await finalizedMockPortal([blocksResponse([1, 2, 3], 3)])
 
     await expect(
-      evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      evmStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({
           dir,
           tables: [{ table: 'blocks', schema: { blockNumber: { type: 'INT64' } } }],

@@ -1,5 +1,5 @@
 import { OutputOf, Transformer, createTransformer } from '@subsquid/pipes'
-import { evmPortalStream, evmQuery } from '@subsquid/pipes/evm'
+import { evmQuery, evmStream } from '@subsquid/pipes/evm'
 
 function myDecoder() {
   return evmQuery()
@@ -41,9 +41,9 @@ function wholePipeTransform(): Transformer<FullOutputs, FullOutputs> {
 }
 
 async function cli() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'simple-decoder',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs,
   }).pipe(wholePipeTransform())
 

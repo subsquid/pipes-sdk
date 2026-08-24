@@ -5,7 +5,7 @@ import { PortalCache } from '~/core/portal-source.js'
 import { SpanHooks } from '~/core/profiling.js'
 import { Target, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
-import { evmPortalStream, evmQuery } from '~/evm/index.js'
+import { evmQuery, evmStream } from '~/evm/index.js'
 import { PortalBlockStreamOptions, PortalClient, PortalRequestOptions, Query } from '~/portal-client/index.js'
 import { MockPortal, blockDecoder, finalizedMockPortal, mockPortal, readAll } from '~/testing/index.js'
 
@@ -61,9 +61,9 @@ describe('Portal abstract stream', () => {
       // Targets key their persisted cursor by the source id, and an empty id would silently fall
       // back to the shared legacy "stream" key — reintroducing cross-pipe cursor collisions.
       expect(() =>
-        evmPortalStream({
+        evmStream({
           id: '  ',
-          portal: 'http://localhost:1',
+          source: 'http://localhost:1',
           outputs: blockDecoder({ from: 0, to: 1 }),
         }),
       ).toThrow(/non-empty "id"/)
@@ -81,9 +81,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       })
 
@@ -129,9 +129,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       })
 
@@ -182,9 +182,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       })
 
@@ -212,9 +212,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       })
 
@@ -249,9 +249,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: {
+        source: {
           url: portal.url,
           http: { retrySchedule: [0] },
         },
@@ -285,9 +285,9 @@ describe('Portal abstract stream', () => {
         ...new Array(2).fill({ statusCode: 503 }),
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: {
+        source: {
           url: portal.url,
           http: {
             retryAttempts: 1,
@@ -339,9 +339,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: {
+        source: {
           url: portal.url,
           http: { retryAttempts: 0, retrySchedule: [0] },
         },
@@ -390,9 +390,9 @@ describe('Portal abstract stream', () => {
         .build()
         .pipe((d) => d.flatMap((b) => b.header))
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs,
       })
 
@@ -421,9 +421,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       })
 
@@ -438,9 +438,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       })
 
@@ -464,9 +464,9 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({
+      const stream = evmStream({
         id: 'test',
-        portal: {
+        source: {
           url: portal.url,
           finalized: true,
         },
@@ -502,7 +502,7 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 6 }) })
+      const stream = evmStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 6 }) })
 
       const seen: unknown[] = []
       const target = createTarget({
@@ -532,7 +532,7 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 6 }) })
+      const stream = evmStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 6 }) })
 
       const seen: unknown[] = []
       const target = createTarget({
@@ -563,7 +563,7 @@ describe('Portal abstract stream', () => {
         },
       ])
 
-      const stream = evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) })
+      const stream = evmStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) })
 
       const finalizedPerBatch = []
       for await (const { ctx } of stream) {
@@ -596,9 +596,9 @@ describe('stop lifecycle', () => {
 
     const stopSpy = vi.fn()
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockDecoder({ from: 0, to: 2 }),
     }).pipe(
       createTransformer({
@@ -623,9 +623,9 @@ describe('stop lifecycle', () => {
 
     const stopSpy = vi.fn()
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockDecoder({ from: 0, to: 1 }),
     })
       .pipe(
@@ -665,9 +665,9 @@ describe('stop lifecycle', () => {
     const spans = spanCounter()
 
     await readAll(
-      evmPortalStream({
+      evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         profiler: spans.hooks,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }),
@@ -697,9 +697,9 @@ describe('stop lifecycle', () => {
     const spans = spanCounter()
 
     const blocks = await readAll(
-      evmPortalStream({
+      evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         profiler: spans.hooks,
         outputs: blockDecoder({ from: 0, to: 2 }),
       }),
@@ -718,9 +718,9 @@ describe('stop lifecycle', () => {
 
     const spans = spanCounter()
 
-    for await (const _ of evmPortalStream({
+    for await (const _ of evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       profiler: spans.hooks,
       outputs: blockDecoder({ from: 0, to: 3 }),
     })) {
@@ -738,9 +738,9 @@ describe('stop lifecycle', () => {
 
     await expect(
       (async () => {
-        for await (const _ of evmPortalStream({
+        for await (const _ of evmStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           profiler: spans.hooks,
           outputs: blockDecoder({ from: 0, to: 3 }),
         })) {
@@ -759,9 +759,9 @@ describe('stop lifecycle', () => {
     const spans = spanCounter()
 
     let seen = 0
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       profiler: spans.hooks,
       outputs: blockDecoder({ from: 0, to: 3 }),
     }).pipe(
@@ -831,9 +831,9 @@ describe('finalized-only targets', () => {
     const warn = vi.spyOn(logger, 'warn')
     const seen: { finalized?: boolean } = {}
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: { url: portal.url, finalized: false },
+      source: { url: portal.url, finalized: false },
       logger,
       outputs: blockDecoder({ from: 1, to: 1 }),
     }).pipeTo(recordingTarget(true, seen) as any)
@@ -852,9 +852,9 @@ describe('finalized-only targets', () => {
     ])
     const resolveFork = vi.fn(async () => ({ number: 0, hash: '0x0' }))
 
-    const run = evmPortalStream({
+    const run = evmStream({
       id: 'test',
-      portal: { url: portal.url, finalized: false },
+      source: { url: portal.url, finalized: false },
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     }).pipeTo(
@@ -893,9 +893,9 @@ describe('finalized-only targets', () => {
 
     const client = new RecordingPortalClient({ url: portal.url, finalized: false })
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: client,
+      source: client,
       logger: 'silent',
       outputs: blockDecoder({ from: 'latest', to: 1 }),
     }).pipeTo(recordingTarget(true, {}) as any)
@@ -919,9 +919,9 @@ describe('finalized-only targets', () => {
       }
     }
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: new NoFinalityPortalClient({ url: portal.url, finalized: false }),
+      source: new NoFinalityPortalClient({ url: portal.url, finalized: false }),
       logger: 'silent',
       outputs: blockDecoder({ from: 'latest', to: 1 }),
     }).pipeTo(recordingTarget(true, {}) as any)
@@ -939,9 +939,9 @@ describe('finalized-only targets', () => {
       }
     }
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: new TwoHeadPortalClient({ url: portal.url, finalized: false }),
+      source: new TwoHeadPortalClient({ url: portal.url, finalized: false }),
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     })
@@ -976,9 +976,9 @@ describe('finalized-only targets', () => {
       }
     }
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: new RecordingPortalClient({ url: portal.url, finalized: false }),
+      source: new RecordingPortalClient({ url: portal.url, finalized: false }),
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     })
@@ -1004,9 +1004,9 @@ describe('finalized-only targets', () => {
       },
     }
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: { url: portal.url, finalized: false },
+      source: { url: portal.url, finalized: false },
       cache,
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
@@ -1021,9 +1021,9 @@ describe('finalized-only targets', () => {
     const warn = vi.spyOn(logger, 'warn')
     const seen: { finalized?: boolean } = {}
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: { url: portal.url, finalized: true },
+      source: { url: portal.url, finalized: true },
       logger,
       outputs: blockDecoder({ from: 1, to: 1 }),
     }).pipeTo(recordingTarget(true, seen) as any)
@@ -1037,9 +1037,9 @@ describe('finalized-only targets', () => {
     portal = await mockPortal([response])
     const seen: { finalized?: boolean } = {}
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test',
-      portal: { url: portal.url, finalized: false },
+      source: { url: portal.url, finalized: false },
       outputs: blockDecoder({ from: 1, to: 1 }),
     }).pipeTo(recordingTarget(false, seen) as any)
 
