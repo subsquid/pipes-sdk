@@ -75,6 +75,11 @@ export interface FallbackMetrics {
    * alike.
    */
   lag: number | undefined
+  /**
+   * The active source's accumulated unproductive wait (ms): time it spends answering without
+   * delivering a block, excluding time the consumer holds the stream (ADR-25). Not a per-request
+   * clock — a source that promptly answers "nothing yet" forever still accrues it.
+   */
   staleness: number
   chainHead: number | undefined
   /** Set when every source is stuck at the same head (no fresher alternative to switch to). */

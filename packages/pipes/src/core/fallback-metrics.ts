@@ -124,7 +124,11 @@ export function registerFallbackMetrics(
     'Blocks the active source is behind the independent chain-head reference; absent while not computable',
     (m) => m.lag,
   )
-  scalar('staleness_ms', 'Duration the active source has had a batch request outstanding (ms)', (m) => m.staleness)
+  scalar(
+    'staleness_ms',
+    "Active source's unproductive wait: accumulated time spent answering without delivering a block, excluding time the consumer holds the stream (ms)",
+    (m) => m.staleness,
+  )
   scalar('chain_stalled', 'Whether every source is stuck at the same head (1 = stalled)', (m) =>
     m.chainStalled ? 1 : 0,
   )
