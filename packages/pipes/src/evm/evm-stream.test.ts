@@ -5,7 +5,7 @@ import { FallbackStrategy, Logger } from '~/core/index.js'
 
 import { MockPortal, mockPortal } from '../testing/index.js'
 import { evmQuery } from './evm-query-builder.js'
-import { evmPortalStream, evmStream } from './evm-stream.js'
+import { evmStream } from './evm-stream.js'
 
 describe('evmStream', () => {
   let portal: MockPortal | undefined
@@ -37,9 +37,9 @@ describe('evmStream', () => {
       trace: { error: true },
     }
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmQuery().addFields(fields).addRange({ from: 0, to: 2 }),
     })
 
@@ -66,7 +66,7 @@ describe('evmStream', () => {
 
     const stream = evmStream({
       id: 'test',
-      portal: [portal.url],
+      source: [portal.url],
       outputs: evmQuery()
         .addFields({ block: { number: true, hash: true } })
         .addRange({ from: 0, to: 2 }),
@@ -106,7 +106,7 @@ describe('evmStream', () => {
 
     const stream = evmStream({
       id: 'test',
-      portal: [
+      source: [
         { url: portal.url, name: 'primary' },
         { url: portal2.url, name: 'standby' },
       ],
@@ -138,7 +138,7 @@ describe('evmStream', () => {
 
     const stream = evmStream({
       id: 'test',
-      portal: [portal.url, portal2.url],
+      source: [portal.url, portal2.url],
       fallback: {
         strategy: pinToStandby,
         detection: { capabilityProbe: false, maxLagBlocks: null, maxStalenessMs: null },
@@ -171,7 +171,7 @@ describe('evmStream', () => {
     const stream = evmStream({
       id: 'logged-pipe',
       logger: captured,
-      portal: [portal.url, portal2.url],
+      source: [portal.url, portal2.url],
       fallback: { detection: { capabilityProbe: false, maxLagBlocks: null, maxStalenessMs: null } },
       outputs: evmQuery()
         .addFields({ block: { number: true, hash: true } })
@@ -185,11 +185,41 @@ describe('evmStream', () => {
     expect(lines.some((l) => (l.message ?? l.msg)?.includes('marked unhealthy'))).toBe(true)
   })
 
+  it('still accepts the deprecated `portal` spelling of `source`', async () => {
+    portal = await mockPortal([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
+
+    const stream = evmStream({
+      id: 'test',
+      portal: portal.url,
+      outputs: evmQuery()
+        .addFields({ block: { number: true, hash: true } })
+        .addRange({ from: 0, to: 1 }),
+    })
+
+    const numbers: number[] = []
+    for await (const { data } of stream) {
+      for (const block of data) numbers.push(block.header.number)
+    }
+
+    expect(numbers).toEqual([1])
+  })
+
+  it('rejects a config with neither `source` nor `portal`', () => {
+    expect(() =>
+      evmStream({
+        id: 'test',
+        outputs: evmQuery()
+          .addFields({ block: { number: true, hash: true } })
+          .addRange({ from: 0, to: 1 }),
+      } as any),
+    ).toThrow(/`source` is required/)
+  })
+
   it('rejects `fallback` with a single (non-array) source', () => {
     expect(() =>
       evmStream({
         id: 'test',
-        portal: 'http://localhost:1',
+        source: 'http://localhost:1',
         fallback: {},
         outputs: evmQuery()
           .addFields({ block: { number: true, hash: true } })
@@ -205,7 +235,7 @@ describe('evmStream', () => {
     expect(() =>
       evmStream({
         id: 'test',
-        portal: [url],
+        source: [url],
         cache: { getStream: () => ({}) as any },
         outputs: evmQuery()
           .addFields({ block: { number: true, hash: true } })
