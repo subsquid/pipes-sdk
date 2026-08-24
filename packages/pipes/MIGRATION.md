@@ -18,7 +18,7 @@ Other silent-at-compile-time changes to check: the ClickHouse `onRollback` callb
 
 ## 1. Rename portal sources to portal streams
 
-All portal source functions have been renamed to portal streams. The old names are removed — there are no compatibility aliases.
+All portal source functions have been renamed to portal streams. The old `*PortalSource` names are removed without compatibility aliases.
 
 The EVM entry point went one step further: it is now `evmStream`, and its `portal` option is
 renamed to `source` — the stream also accepts an ordered fallback list of sources there, so the
