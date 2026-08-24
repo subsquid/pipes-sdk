@@ -20,6 +20,11 @@ Other silent-at-compile-time changes to check: the ClickHouse `onRollback` callb
 
 All portal source functions have been renamed to portal streams. The old names are removed — there are no compatibility aliases.
 
+The EVM entry point went one step further: it is now `evmStream`, and its `portal` option is
+renamed to `source` — the stream also accepts an ordered fallback list of sources there, so the
+old name no longer described it. `evmPortalStream` remains as a deprecated alias of `evmStream`,
+and the `portal` option spelling is still accepted but deprecated.
+
 ```ts
 // before
 import { evmPortalSource } from '@subsquid/pipes/evm'
@@ -27,7 +32,7 @@ import { solanaPortalSource } from '@subsquid/pipes/solana'
 import { hyperliquidFillsPortalSource } from '@subsquid/pipes/hyperliquid'
 
 // after
-import { evmPortalStream } from '@subsquid/pipes/evm'
+import { evmStream } from '@subsquid/pipes/evm'
 import { solanaPortalStream } from '@subsquid/pipes/solana'
 import { hyperliquidFillsPortalStream } from '@subsquid/pipes/hyperliquid'
 ```
@@ -52,8 +57,8 @@ const stream = evmPortalSource({
 )
 
 // after
-const stream = evmPortalStream({
-  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+const stream = evmStream({
+  source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
   outputs: evmEventDecoder({
     range: { from: 'latest' },
     events: { transfers: commonAbis.erc20.events.Transfer },
@@ -73,8 +78,8 @@ const stream = evmPortalSource({
 })
 
 // after
-const stream = evmPortalStream({
-  portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+const stream = evmStream({
+  source: 'https://portal.sqd.dev/datasets/base-mainnet',
   outputs: {
     transfers: erc20Transfers({ range }),
     swaps:     uniswapV3Decoder({ range }),
@@ -99,9 +104,9 @@ await evmPortalSource({ portal: '...' })
   .pipeTo(clickhouseTarget({ ... }))
 
 // after
-await evmPortalStream({
+await evmStream({
   id: 'eth-transfers',     // globally unique, stable ID for cursor persistence
-  portal: '...',
+  source: '...',
   outputs: evmEventDecoder({ ... }),
 }).pipeTo(clickhouseTarget({ ... }))
 ```
@@ -286,8 +291,8 @@ evmPortalSource({
 // after
 import { StartEvent, ProgressEvent } from '@subsquid/pipes'
 
-evmPortalStream({
-  portal: '...',
+evmStream({
+  source: '...',
   outputs: evmEventDecoder({ ... }),
   progress: {
     onStart:    (event: StartEvent)    => console.log(`starting from block ${event.state.initial}`),
@@ -382,7 +387,7 @@ The `PortalClientOptions` duration keys are unit-suffixed: `maxIdleTime` → `ma
 
 | Before | After | Notes |
 |---|---|---|
-| `createEvmPortalSource` | `evmPortalStream` | Alias removed |
+| `createEvmPortalSource` | `evmStream` | Alias removed |
 | `createSolanaPortalSource` | `solanaPortalStream` | Alias removed |
 | `createSolanaInstructionDecoder` | `solanaInstructionDecoder` | Renamed, no alias |
 | `evmDecoder` | `evmEventDecoder` | Renamed, no alias |
@@ -572,7 +577,7 @@ new feed. Reusing the old namespace or destination state can make new CDC change
 
 ## Quick checklist
 
-- [ ] `evmPortalSource` → `evmPortalStream`
+- [ ] `evmPortalSource` → `evmStream` (and its `portal` option → `source`)
 - [ ] `solanaPortalSource` → `solanaPortalStream`
 - [ ] `hyperliquidFillsPortalSource` → `hyperliquidFillsPortalStream`
 - [ ] `.pipe(decoder)` → `outputs: decoder`

@@ -19,7 +19,7 @@ import {
   evmEventDecoder,
 } from './evm-decoder.js'
 import { EvmQueryBuilder } from './evm-query-builder.js'
-import { evmPortalStream } from './evm-stream.js'
+import { evmStream } from './evm-stream.js'
 import { contractFactory } from './factory.js'
 import { contractFactorySqliteStore } from './factory-adapters/sqlite.js'
 
@@ -898,9 +898,9 @@ describe('evmEventDecoder transform', () => {
   ]
 
   it('should decode the events when passed AbiEvent', async () => {
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -976,9 +976,9 @@ describe('evmEventDecoder transform', () => {
     { contracts: ['0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'], expected: 2 },
     { contracts: ['0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'.toUpperCase()], expected: 2 },
   ])(`should filter events by specified contracts $contracts -> $expected`, async ({ contracts, expected }) => {
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         contracts: contracts, // No contracts should filter out all events
@@ -994,9 +994,9 @@ describe('evmEventDecoder transform', () => {
   })
 
   it('should decode the events when passed an EventWithArgs', async () => {
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -1070,9 +1070,9 @@ describe('evmEventDecoder transform', () => {
   })
 
   it('should decode the events when mixed EventWithArgs and AbiEvent', async () => {
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -1231,9 +1231,9 @@ describe('evmEventDecoder multi-output isolation', () => {
   it('should isolate events between two evmEventDecoders with different contracts', async () => {
     const results: { decoderA: { transfers: any[] }; decoderB: { transfers: any[] } }[] = []
 
-    for await (const batch of evmPortalStream({
+    for await (const batch of evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: {
         decoderA: evmEventDecoder({
           range: { from: 0, to: 1 },
@@ -1309,9 +1309,9 @@ describe('evmEventDecoder decode errors', () => {
   })
 
   function stream(metrics: ReturnType<typeof mockMetricsServer>, onError?: (ctx: any, error: any) => unknown) {
-    return evmPortalStream({
+    return evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       metrics: metrics.server,
       outputs: evmEventDecoder({
@@ -1480,9 +1480,9 @@ describe('evmEventDecoder factory decode errors', () => {
       database: contractFactorySqliteStore({ path: ':memory:' }),
     })
 
-    return evmPortalStream({
+    return evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       metrics: metrics.server,
       outputs: evmEventDecoder({

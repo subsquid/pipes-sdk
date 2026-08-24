@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { evmPortalStream } from '~/evm/evm-stream.js'
+import { evmStream } from '~/evm/evm-stream.js'
 import { MockPortal, mockMetricsServer, mockPortal, testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES } from './errors.js'
@@ -165,9 +165,9 @@ describe('pubsubTarget signals', () => {
       const publisher = new FakePublisher()
       portal = await mockPortal(shallowFork as never)
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test-pipe',
-        portal: portal.url,
+        source: portal.url,
         outputs: keyedBlockDecoder({ from: 0, to: 3 }),
         metrics: metrics?.server,
       }).pipeTo(

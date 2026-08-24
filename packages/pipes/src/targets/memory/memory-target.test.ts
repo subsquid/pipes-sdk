@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
-import { evmPortalStream } from '~/evm/evm-stream.js'
+import { evmStream } from '~/evm/evm-stream.js'
 import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
 import { MockPortal, finalizedMockPortal } from '~/testing/index.js'
 
@@ -30,11 +30,11 @@ function blockWithTransfer(number: number) {
 type Row = { blockNumber: number; value: bigint }
 
 function streamTo(portal: MockPortal, to: number, emitted: Row[][]) {
-  return evmPortalStream({
+  return evmStream({
     id: 'memory-target-test',
     // `maxBytes: 1` keeps each mock response its own batch; without it they coalesce and a target
     // that only emitted once at stream end would pass the arrival-order assertions unchanged.
-    portal: { url: portal.url, maxBytes: 1 },
+    source: { url: portal.url, maxBytes: 1 },
     outputs: evmEventDecoder({
       range: { from: 1, to },
       events: {

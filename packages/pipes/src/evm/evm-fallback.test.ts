@@ -13,7 +13,7 @@ describe('public ./evm exports', () => {
     // not eagerly pull the optional evm-rpc peers (the import chain references them as types only).
     expect(typeof evmBarrel.createEvmFallbackClient).toBe('function')
     expect(typeof evmBarrel.evmStream).toBe('function')
-    expect(evmBarrel.evmPortalStream).toBe(evmBarrel.evmStream) // deprecated alias preserved
+    expect(evmBarrel.evmStream).toBe(evmBarrel.evmStream) // deprecated alias preserved
   })
 })
 

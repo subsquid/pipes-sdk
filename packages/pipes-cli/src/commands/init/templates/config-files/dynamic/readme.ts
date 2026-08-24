@@ -77,12 +77,12 @@ In order to track pipeline metrics the Pipes SDK provides a metrics server along
 #### 1. Enable the metrics server in the pipeline's Portal source
 Enable the metrics server in the pipeline's Portal source.
 \`\`\`ts
-import { evmPortalStream, evmEventDecoder } from '@subsquid/pipes/evm'
+import { evmStream, evmEventDecoder } from '@subsquid/pipes/evm'
 import { metricsServer } from '@subsquid/pipes/metrics/node'
 
-const pipeline = evmPortalStream({
+const pipeline = evmStream({
     id: 'my-pipe',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     /**
      * Enables the metrics server.
      * Default port is 9090, but you can change it by passing a custom port.

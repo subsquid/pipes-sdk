@@ -34,12 +34,12 @@ pnpm dlx @subsquid/pipes-cli init
 Stream ERC-20 transfers from Ethereum Mainnet and print them:
 
 ```ts
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 
 async function main() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'erc20-transfers',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: '12,000,000' },
       events: {
@@ -79,9 +79,9 @@ the stream `id`, and rolls back cleanly on chain reorgs.
 import { createClient } from '@clickhouse/client'
 import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
 
-await evmPortalStream({
+await evmStream({
   id: 'erc20-transfers',
-  portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+  source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
   outputs: evmEventDecoder({
     range: { from: '12,000,000' },
     events: { transfers: commonAbis.erc20.events.Transfer },

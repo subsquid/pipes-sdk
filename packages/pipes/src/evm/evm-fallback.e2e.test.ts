@@ -73,7 +73,7 @@ describe.skipIf(!ENABLED)('EVM fallback — live', () => {
     // wire blocks → the facade's normalize cast → typed output. No portal involved at all.
     const stream = evmStream({
       id: 'e2e-rpc-only',
-      portal: [{ type: 'rpc', url: RPC_URL, capacity: 5, finalized: true }],
+      source: [{ type: 'rpc', url: RPC_URL, capacity: 5, finalized: true }],
       outputs: evmQuery()
         .addFields({ block: { number: true, hash: true, timestamp: true }, transaction: { from: true, to: true } })
         .addTransactionRequest({ range: { from: FROM, to: TO }, request: {} })

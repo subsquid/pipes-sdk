@@ -1,5 +1,5 @@
 import { createClient } from '@clickhouse/client'
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
 
 /**
@@ -16,9 +16,9 @@ async function cli() {
     url: 'http://localhost:10123',
   })
 
-  await evmPortalStream({
+  await evmStream({
     id: 'base-erc20-transfers',
-    portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+    source: 'https://portal.sqd.dev/datasets/base-mainnet',
     outputs: evmEventDecoder({
       range: { from: 'latest' },
       events: {

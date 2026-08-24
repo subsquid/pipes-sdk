@@ -56,7 +56,7 @@ For long-running jobs, guard against forks:
 - Treat the cursor as the source of truth for safety
 
 ## EVM-specific notes
-- Use \`evmPortalStream\` + \`evmEventDecoder\`
+- Use \`evmStream\` + \`evmEventDecoder\`
 - \`commonAbis.erc20\` is available for ERC20 transfers
 - For custom contracts, generate ABIs into \`src/contracts/\`
 - Use \`contractFactory\` + \`contractFactorySqliteStore\` for dynamic contract sets
@@ -96,12 +96,12 @@ npx @subsquid/evm-typegen@latest src/contracts \\
 Creates a Portal source, decodes ERC20 transfers with the built-in ABI, and logs the batch size.
 
 \`\`\`ts
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 
 async function main() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'erc20-transfers',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: 'latest' },
       events: {
@@ -123,14 +123,14 @@ Tracks pools created by a factory contract, then decodes swap events only for th
 This is the standard approach for protocols with dynamic contract creation (e.g., Uniswap V3).
 
 \`\`\`ts
-import { contractFactory, contractFactorySqliteStore, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { contractFactory, contractFactorySqliteStore, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { events as factoryAbi } from './abi/uniswap.v3/factory'
 import { events as swapsAbi } from './abi/uniswap.v3/swaps'
 
 async function main() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'uniswap-v3-swaps',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: '12,369,621' },
       contracts: contractFactory({
@@ -158,13 +158,13 @@ Decodes ERC20 transfers, maps them to rows, and writes them to ClickHouse with r
 
 \`\`\`ts
 import { createClient } from '@clickhouse/client'
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
 
 async function main() {
-  await evmPortalStream({
+  await evmStream({
     id: 'erc20-transfers-clickhouse',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: 'latest' },
       events: {
