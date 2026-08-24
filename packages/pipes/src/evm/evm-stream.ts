@@ -155,6 +155,3 @@ export function evmStream<Out extends EvmOutputs>(options: EvmStreamOptions<Out>
 
 /** @deprecated Use {@link evmStream} instead. */
 export const evmPortalStream = evmStream
-
-/** @deprecated Use {@link evmStream} instead. */
-export const evmPortalSource = evmStream

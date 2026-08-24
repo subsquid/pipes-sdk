@@ -670,7 +670,7 @@ Solana `DecodedInstruction` exposes a `block` object with both `number` and `has
 
 ## Removals
 
-There are **no deprecated aliases** in this release — every rename in breaking change 4 is a hard rename, and all previously deprecated APIs are gone:
+With one exception, there are **no deprecated aliases** in this release — every rename in breaking change 4 is a hard rename, and all previously deprecated APIs are gone. The exception: `evmPortalStream` remains as a deprecated alias of `evmStream` (and `evmStream`'s `portal` option spelling is still accepted, deprecated in favor of `source`), since that rename landed after the 1.0 betas shipped.
 
 - `CompositeTransformer` / `compositeTransformer` / `composite-transformer.ts` removed — use named `outputs`
 - `.pipeComposite()` removed — use named `outputs`
