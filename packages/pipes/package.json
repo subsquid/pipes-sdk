@@ -1,7 +1,7 @@
 {
   "name": "@subsquid/pipes",
   "type": "module",
-  "version": "1.0.0-beta.4",
+  "version": "1.0.0-alpha.22",
   "description": "TypeScript SDK for streaming blockchain data: tap SQD Portal sources, decode EVM/Solana/Bitcoin/Tron/Hyperliquid onchain data, handle reorgs, write to Postgres, ClickHouse, BigQuery, Parquet, or Google PubSub.",
   "keywords": [
     "typescript",
