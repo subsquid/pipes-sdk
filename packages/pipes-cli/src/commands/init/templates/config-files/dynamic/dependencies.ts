@@ -1,7 +1,11 @@
 import type { NetworkType, Target } from '~/types/init.js'
 
 const baseDependencies: Record<string, string> = {
-  '@subsquid/pipes': '^1.0.0',
+  // Exact pin, deliberately. The generated code uses `evmStream({ source })`, which only the
+  // alpha line has so far — a range like '^1.0.0-alpha.22' would resolve to the highest 1.0.0
+  // prerelease (currently a beta without `source`) and the project would not compile. Widen to a
+  // range once a beta or the stable 1.0.0 carries the option.
+  '@subsquid/pipes': '1.0.0-alpha.22',
   dotenv: '^16.4.5',
   zod: '^4.3.4',
 }
