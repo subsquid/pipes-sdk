@@ -50,6 +50,23 @@ _If starting a new project using the Pipes CLI, this step is already handled for
 {{packageManager}} run dev
 \`\`\`
 {{/hasPostgresScripts}}
+{{#hasRpcFallback}}
+
+
+## RPC fallback
+
+This pipe is generated with an RPC fallback source: SQD's Portal is the primary
+data source, and your RPC endpoint takes over automatically while the Portal is
+unavailable. Set the endpoint in \`.env\`:
+
+\`\`\`bash
+RPC_URL=https://your-rpc-endpoint.example.com/v2/YOUR_KEY
+\`\`\`
+
+\`RPC_URL\` is required — the pipeline refuses to start until it is set. When
+running with Docker Compose the variable is passed through to the indexer
+container from your shell or the \`.env\` file.
+{{/hasRpcFallback}}
 
 
 ## Build and deploy
@@ -118,6 +135,7 @@ interface ReadmeTemplateValues {
   packageManager: string
   projectName: string
   hasPostgresScripts: boolean
+  hasRpcFallback: boolean
 }
 
 export function renderReadme(values: ReadmeTemplateValues): string {

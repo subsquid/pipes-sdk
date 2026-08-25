@@ -18,6 +18,10 @@ export function serializePipeConfig(config: Config<NetworkType>): string {
     // Written back so a regenerate keeps the same stream id, and with it the
     // target's cursor.
     ...(config.pipeId !== undefined ? { pipeId: config.pipeId } : {}),
+    // The fallback flag is committed; the RPC URL itself never is (it may
+    // embed an API key) — it lives only in the generated .env. Omitted when
+    // off so saved configs stay parseable by older CLIs (schemas are strict).
+    ...(config.rpcFallback ? { rpcFallback: true } : {}),
     templates: config.templates.map((configured) => ({
       templateId: configured.template.id,
       ...(configured.params !== undefined ? { params: configured.params } : {}),

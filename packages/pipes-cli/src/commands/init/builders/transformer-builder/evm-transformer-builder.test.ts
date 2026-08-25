@@ -265,6 +265,27 @@ describe('EVM Template Builder', () => {
     `)
   })
 
+  it('renders a portal + RPC source list and a required RPC_URL when rpcFallback is on', async () => {
+    const config: Config<'evm'> = {
+      projectFolder: 'mock-folder',
+      networkType: 'evm',
+      defaultNetwork: 'ethereum-mainnet',
+      templates: [fixtures.erc20Transfers()],
+      target: 'clickhouse',
+      packageManager: 'pnpm',
+      rpcFallback: true,
+    }
+
+    const indexerContent = await new TransformerBuilder(config, projectWriter).render()
+
+    expect(indexerContent).toContain(`source: [
+      'https://portal.sqd.dev/datasets/ethereum-mainnet',
+      { type: 'rpc', url: env.RPC_URL, name: 'rpc-fallback' },
+    ],`)
+    expect(indexerContent).not.toContain("source: 'https://portal.sqd.dev")
+    expect(indexerContent).toContain('RPC_URL: z.string().min(1),')
+  })
+
   it('disambiguates overloaded events with unique keys + warning comment', async () => {
     const config: Config<'evm'> = {
       projectFolder: 'mock-folder',

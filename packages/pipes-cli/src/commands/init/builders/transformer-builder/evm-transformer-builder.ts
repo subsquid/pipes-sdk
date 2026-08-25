@@ -13,7 +13,15 @@ export const template = `{{#deduplicatedImports}}
 export async function main() {
   await evmStream({
     id: '{{pipeId}}',
+{{^rpcFallback}}
     source: 'https://portal.sqd.dev/datasets/{{network}}',
+{{/rpcFallback}}
+{{#rpcFallback}}
+    source: [
+      'https://portal.sqd.dev/datasets/{{network}}',
+      { type: 'rpc', url: env.RPC_URL, name: 'rpc-fallback' },
+    ],
+{{/rpcFallback}}
     outputs: {
 {{#transformerTemplates}}
 {{#templateId}}

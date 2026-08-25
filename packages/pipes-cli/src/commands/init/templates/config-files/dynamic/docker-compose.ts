@@ -37,6 +37,9 @@ const indexerService = `{{projectName}}:
       CLICKHOUSE_USER: {{user}}
       CLICKHOUSE_PASSWORD: {{password}}
     {{/isPostgres}}
+    {{#hasRpcFallback}}
+      RPC_URL: \${RPC_URL:-}
+    {{/hasRpcFallback}}
     command: ["sh", "-lc", "{{#isPostgres}}{{packageManager}} run db:generate && {{packageManager}} run db:migrate && {{/isPostgres}}node dist/index.js"]
     depends_on:
       {{#isPostgres}}postgres{{/isPostgres}}{{^isPostgres}}clickhouse{{/isPostgres}}:
@@ -82,6 +85,7 @@ interface DockerComposeTemplateValues {
   projectName: string
   target: Target
   packageManager: PackageManager
+  hasRpcFallback: boolean
 }
 
 export function renderDockerCompose(values: DockerComposeTemplateValues): string {

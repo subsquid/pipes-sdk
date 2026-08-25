@@ -18,7 +18,10 @@ export class InitHandler {
   private readonly projectName: string
   private readonly projectWriter: ProjectWriter
 
-  constructor(private config: Config<NetworkType>) {
+  constructor(
+    private config: Config<NetworkType>,
+    private readonly options: { rpcUrl?: string } = {},
+  ) {
     this.projectName = deriveProjectName(config.projectFolder)
     this.projectWriter = new ProjectWriter(this.config.projectFolder)
   }
@@ -36,6 +39,7 @@ export class InitHandler {
       // A re-run against an existing pipes project (identified by its saved
       // config) regenerates in place rather than erroring on the existing folder.
       regenerate: existsSync(path.join(projectPath, PIPE_CONFIG_FILENAME)),
+      rpcUrl: this.options.rpcUrl,
     }
 
     let failures: StageFailure[]
