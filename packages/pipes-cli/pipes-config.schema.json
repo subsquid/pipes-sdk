@@ -27,6 +27,13 @@
           ],
           "description": "Storage target for the pipeline data."
         },
+        "pipeId": {
+          "description": "Stream id of the generated pipe, and the key its target cursor is stored under. Letters, digits, dots, underscores and hyphens; up to 64 characters. Generated when omitted; keep the value written to pipes.config.json so regenerating reuses the same cursor.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
         "networkType": {
           "type": "string",
           "const": "evm"
@@ -408,6 +415,10 @@
               }
             ]
           }
+        },
+        "rpcFallback": {
+          "description": "Generate the pipe with an RPC fallback source: the SQD Portal stays primary and an RPC endpoint takes over while the Portal is unavailable. The endpoint URL is never stored in this file — set RPC_URL in the generated .env. EVM only.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -443,6 +454,13 @@
             "postgresql"
           ],
           "description": "Storage target for the pipeline data."
+        },
+        "pipeId": {
+          "description": "Stream id of the generated pipe, and the key its target cursor is stored under. Letters, digits, dots, underscores and hyphens; up to 64 characters. Generated when omitted; keep the value written to pipes.config.json so regenerating reuses the same cursor.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
         },
         "networkType": {
           "type": "string",

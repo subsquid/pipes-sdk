@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { evmPortalStream } from '~/evm/evm-portal-source.js'
+import { evmStream } from '~/evm/evm-stream.js'
 import { MockPortal, mockMetricsServer, mockPortal, testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES } from './errors.js'
@@ -112,9 +112,9 @@ async function runPipe({
 }) {
   portal = await mockPortal(responses)
 
-  await evmPortalStream({
+  await evmStream({
     id,
-    portal: portal.url,
+    source: portal.url,
     outputs: keyedBlockDecoder({ from: 0, to }),
     metrics: metrics?.server,
   }).pipeTo(
@@ -322,9 +322,9 @@ describe('pubsubTarget', () => {
       },
     ])
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test-pipe',
-      portal: portal.url,
+      source: portal.url,
       outputs: keyedBlockDecoder({ from: 0, to: 3 }),
     }).pipeTo(
       pubsubTarget<Blocks>({
@@ -389,9 +389,9 @@ describe('pubsubTarget', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test-pipe',
-        portal: portal.url,
+        source: portal.url,
         outputs: keyedBlockDecoder({ from: 0, to: 4 }),
       }).pipeTo(
         pubsubTarget<Blocks>({

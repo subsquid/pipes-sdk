@@ -45,7 +45,7 @@
  */
 
 import { PubSub } from '@google-cloud/pubsub'
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { pubsubTarget } from '@subsquid/pipes/targets/pubsub'
 
 const PROJECT = process.env['GOOGLE_CLOUD_PROJECT'] ?? 'demo'
@@ -53,9 +53,9 @@ const TRANSFERS_TOPIC = process.env['PUBSUB_TRANSFERS_TOPIC'] ?? 'evm.base.erc20
 const STATE = process.env['PUBSUB_STATE'] ?? './state/base-erc20-signals.sqlite'
 
 async function main() {
-  await evmPortalStream({
+  await evmStream({
     id: 'base-erc20-signals',
-    portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+    source: 'https://portal.sqd.dev/datasets/base-mainnet',
     outputs: evmEventDecoder({
       range: { from: 'latest' },
       events: {

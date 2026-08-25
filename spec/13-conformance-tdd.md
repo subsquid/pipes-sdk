@@ -166,6 +166,11 @@ known-suspect in the current implementation (see gap register).
 | RS-10, RS-11 (purity, stateful) | CT-2 | P | K recovery relies on it; factory rollback C |
 | RS-20…RS-25 (cache) | CT-5 | C | except overlap re-insert (U) |
 | FM corpus | CT-4 | P | scattered unit coverage; no systematic corpus |
+| INV-60…INV-64 (fallback stream safety) | CT-1/2 | C | switch continuity, fork propagation across a switch, conservative and raise-only commitment, floor across a switch |
+| INV-65…INV-69 (fallback isolation, faults) | CT-2 | C | concurrent-read refusal, late verdict discarded, ineligible-head exclusion, strategy fault surfacing, cause attribution |
+| LIV-60…LIV-64 (handoff, reclaim) | CT-2 | P | handoff, reclaim, no-permanent-demotion, fresh start and all-down covered against a simulated frontier; no soak |
+| WP-60…WP-69 (driving the list) | CT-2 | P | selection, resume, boundary/stall decisions, probing and range resolution covered; head-poll cadence not benchmarked |
+| OB-60…OB-66 (fallback signals) | CT-1 | P | gauges and per-pipe labelling asserted; log-field redaction covered by the diagnostics suite, not end to end |
 | SLI/PF | CT-6 | U | no benchmarks recorded |
 | IB-1…IB-11 wire | CT-5 | P | client-side tested, including finalized route selection; no golden wire fixtures |
 | IB-20…IB-26 formats | CT-5 | P ⚠ | per-binding tests; no round-trip corpus; timestamp units per-network (GAP-24) |

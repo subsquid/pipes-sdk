@@ -8,7 +8,7 @@ import { encodeEvent, mockBlock, mockEvmPortalStream, resetMockBlockCounter } fr
 import { MockPortal, mockPortal, readAll } from '~/testing/index.js'
 
 import { FactoryEvent, evmEventDecoder } from './evm-decoder.js'
-import { evmPortalStream } from './evm-portal-source.js'
+import { evmStream } from './evm-stream.js'
 import { Factory, InternalFactoryEvent, contractFactory } from './factory.js'
 import { contractFactorySqliteStore } from './factory-adapters/sqlite.js'
 
@@ -188,9 +188,9 @@ describe('Factory', () => {
       database: db,
     })
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: poolFactory,
@@ -271,9 +271,9 @@ describe('Factory', () => {
     portal = await createSimpleChildPortal()
 
     const db = await contractFactorySqliteStore({ path: ':memory:' })
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: contractFactory({
@@ -299,9 +299,9 @@ describe('Factory', () => {
     portal = await createSimpleChildPortal()
 
     const db = await contractFactorySqliteStore({ path: ':memory:' })
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: {
         v1: evmEventDecoder({
           range: { from: 1, to: 2 },
@@ -378,9 +378,9 @@ describe('Factory', () => {
 
     const db = await contractFactorySqliteStore({ path: ':memory:' })
 
-    await evmPortalStream({
+    await evmStream({
       id: 'test-factory',
-      portal: {
+      source: {
         url: portal.url,
       },
       outputs: evmEventDecoder({
@@ -426,9 +426,9 @@ describe('Factory', () => {
   it('should filter factory events by indexed parameters', async () => {
     portal = await createFilteredFactoryPortal()
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: contractFactory({
@@ -470,9 +470,9 @@ describe('Factory', () => {
     const getPipeline = async (token0: string) => {
       portal = await createFilteredFactoryPortal()
 
-      return evmPortalStream({
+      return evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: evmEventDecoder({
           range: { from: 1, to: 2 },
           contracts: contractFactory({
@@ -523,9 +523,9 @@ describe('Factory', () => {
       database: await contractFactorySqliteStore({ path: ':memory:' }),
     })
 
-    const stream = evmPortalStream({
+    const stream = evmStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: contractsFactory,

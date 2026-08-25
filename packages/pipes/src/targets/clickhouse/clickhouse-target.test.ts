@@ -1,7 +1,7 @@
 import { createClient } from '@clickhouse/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { evmPortalStream } from '~/evm/index.js'
+import { evmStream } from '~/evm/index.js'
 import { MockPortal, MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
 
 import { ClickhouseStore } from './clickhouse-store.js'
@@ -54,9 +54,9 @@ describe('Clickhouse state', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         clickhouseTarget({
@@ -103,9 +103,9 @@ describe('Clickhouse state', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: {
+        source: {
           url: portal.url,
           // we need to save each response separately
           // to create multiple rows in the status table,
@@ -158,9 +158,9 @@ describe('Clickhouse state', () => {
         { statusCode: 200, data: [{ header: { number: 3, hash: '0x3', timestamp: 3000 } }] },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         clickhouseTarget({
@@ -207,9 +207,9 @@ describe('Clickhouse state', () => {
       portal = await mockPortal(responses)
 
       try {
-        await evmPortalStream({
+        await evmStream({
           id: 'test',
-          portal: {
+          source: {
             url: portal.url,
             // force one batch per response so each triggers a saveCursor call
             maxBytes: 1,
@@ -242,9 +242,9 @@ describe('Clickhouse state', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         clickhouseTarget({
@@ -288,9 +288,9 @@ describe('Clickhouse state', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         clickhouseTarget({
@@ -299,9 +299,9 @@ describe('Clickhouse state', () => {
         }),
       )
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 1, to: 2 }),
       }).pipeTo(
         clickhouseTarget({
@@ -329,9 +329,9 @@ describe('Clickhouse state', () => {
 
       // An older SDK keyed every cursor by the static "stream" id — reproduce that state by
       // pinning the legacy key explicitly for the first run.
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         clickhouseTarget({
@@ -343,9 +343,9 @@ describe('Clickhouse state', () => {
 
       // Restart without an explicit id: the cursor key becomes the pipe id, the legacy rows are
       // migrated to it automatically, and indexing continues from the migrated cursor.
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       }).pipeTo(
         clickhouseTarget({
@@ -382,9 +382,9 @@ describe('Clickhouse state', () => {
           },
         ])
 
-        await evmPortalStream({
+        await evmStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           outputs: blockDecoder({ from: 0, to: 2 }),
         }).pipeTo(
           clickhouseTarget({
@@ -520,9 +520,9 @@ describe('Clickhouse state', () => {
       ])
 
       let rollbackCalls = 0
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         clickhouseTarget({
@@ -712,9 +712,9 @@ describe('Clickhouse state', () => {
 
       let rollbackCalls = 0
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         clickhouseTarget({
@@ -850,9 +850,9 @@ describe('Clickhouse state', () => {
 
       while (!finished) {
         try {
-          await evmPortalStream({
+          await evmStream({
             id: 'test',
-            portal: portal.url,
+            source: portal.url,
             outputs: blockDecoder({ from: 0, to: 7 }),
           }).pipeTo(
             clickhouseTarget({
@@ -1022,9 +1022,9 @@ describe('Clickhouse state', () => {
 
       let rollbackCalls = 0
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         clickhouseTarget({

@@ -23,4 +23,9 @@ export interface TargetArtifacts {
   postSteps: TargetPostStep[]
 }
 
-export type TargetHandler = (config: Config<NetworkType>) => TargetArtifacts
+export interface TargetBuildOptions {
+  /** See `InitContext.rpcUrl` — in-memory only, lands in the .env as RPC_URL. */
+  rpcUrl?: string
+}
+
+export type TargetHandler = (config: Config<NetworkType>, options?: TargetBuildOptions) => TargetArtifacts

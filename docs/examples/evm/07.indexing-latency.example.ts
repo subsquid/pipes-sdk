@@ -1,5 +1,5 @@
 import { formatBlock } from '@subsquid/pipes'
-import { evmPortalStream, evmRpcLatencyWatcher } from '@subsquid/pipes/evm'
+import { evmRpcLatencyWatcher, evmStream } from '@subsquid/pipes/evm'
 import { metricsServer } from '@subsquid/pipes/metrics/node'
 
 /**
@@ -21,9 +21,9 @@ import { metricsServer } from '@subsquid/pipes/metrics/node'
 
 async function main() {
   // Create a stream of new blocks from the Base mainnet portal
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'indexing-latency',
-    portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+    source: 'https://portal.sqd.dev/datasets/base-mainnet',
     outputs: evmRpcLatencyWatcher({
       rpcUrl: ['https://base.drpc.org', 'https://base-rpc.publicnode.com'], // RPC endpoints to monitor
     }).pipe((data, { metrics }) => {

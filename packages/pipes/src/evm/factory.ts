@@ -3,7 +3,7 @@ import type { Codec } from '@subsquid/evm-codec'
 
 import { BlockCursor, Logger, PortalRange, createTarget } from '~/core/index.js'
 import { arrayify } from '~/internal/array.js'
-import { PortalClient } from '~/portal-client/client.js'
+import { BlockStreamClient } from '~/portal-client/client.js'
 import { Log, LogRequest } from '~/portal-client/query/evm.js'
 
 import {
@@ -16,7 +16,7 @@ import {
   getNormalizedEventParams,
   isEventWithArgs,
 } from './evm-decoder.js'
-import { evmPortalStream } from './evm-portal-source.js'
+import { evmStream } from './evm-stream.js'
 
 export type EventArgs = {
   [key: string]: Codec<any> & { indexed?: boolean }
@@ -187,14 +187,14 @@ export class Factory<T extends EventArgs> {
   }
 
   /** @internal */
-  async runPreindex({ portal, range, logger }: { portal: PortalClient; range: PortalRange; logger: Logger }) {
+  async runPreindex({ portal, range, logger }: { portal: BlockStreamClient; range: PortalRange; logger: Logger }) {
     const name = `factory preindexing ${this.factoryAddress().join(', ')}`
 
     logger.info(`Starting ${name}`)
 
-    await evmPortalStream({
+    await evmStream({
       id: name,
-      portal,
+      source: portal,
       logger,
       outputs: evmEventDecoder({
         profiler: { name },

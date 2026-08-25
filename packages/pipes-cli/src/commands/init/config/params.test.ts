@@ -317,4 +317,36 @@ describe('--config params schema', () => {
       expect(() => configJsonSchemaRaw.parse({ ...strictConfigSchema, pipeId: 'a'.repeat(65) })).toThrow()
     })
   })
+
+  describe('rpcFallback', () => {
+    const svmConfig = {
+      projectFolder: './sol-balances',
+      networkType: 'svm',
+      defaultNetwork: 'solana-mainnet',
+      packageManager: 'pnpm',
+      target: 'clickhouse',
+      templates: [{ templateId: 'tokenBalances' }],
+    }
+
+    it('accepts the flag on an EVM config and carries it through the transform', () => {
+      for (const rpcFallback of [true, false]) {
+        expect(configJsonSchemaRaw.parse({ ...strictConfigSchema, rpcFallback })).toMatchObject({ rpcFallback })
+        expect(configJsonSchema.parse({ ...strictConfigSchema, rpcFallback })).toMatchObject({ rpcFallback })
+      }
+    })
+
+    it('rejects the flag on an SVM config (no fallback support)', () => {
+      expect(() => configJsonSchemaRaw.parse(svmConfig)).to.not.throw()
+      expect(() => configJsonSchemaRaw.parse({ ...svmConfig, rpcFallback: true })).toThrow()
+    })
+
+    // The endpoint URL may embed an API key and must never live in a committed
+    // config file — it belongs in the generated .env only.
+    it('rejects a top-level rpcUrl key', () => {
+      expect(() => configJsonSchemaRaw.parse({ ...strictConfigSchema, rpcUrl: 'https://rpc.example.com' })).toThrow()
+      expect(() =>
+        configJsonSchemaRaw.parse({ ...strictConfigSchema, rpcFallback: true, rpcUrl: 'https://rpc.example.com' }),
+      ).toThrow()
+    })
+  })
 })

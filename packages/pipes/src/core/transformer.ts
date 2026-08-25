@@ -1,5 +1,5 @@
 import { Metrics } from '~/core/metrics-server.js'
-import { PortalClient } from '~/portal-client/client.js'
+import { BlockStreamClient } from '~/portal-client/client.js'
 
 import { Logger } from './logger.js'
 import { BatchContext } from './portal-source.js'
@@ -12,7 +12,15 @@ export type StartContext = {
   state: { current?: BlockCursor; initial: number }
   logger: Logger
   metrics: Metrics
-  portal: PortalClient
+  /**
+   * The client this pipe reads blocks through. Typed as the general contract because a pipe's
+   * source is not necessarily a portal any more: it may be an RPC-backed client, or a fallback
+   * multiplexing several. Narrow with `instanceof PortalClient` when you need portal-specific
+   * request options.
+   *
+   * (Type-level breaking change: this was `PortalClient` before multi-source streams existed.)
+   */
+  portal: BlockStreamClient
 }
 export type StopContext = { logger: Logger }
 type TransformerFn<In, Out> = (data: In, ctx: BatchContext) => Promise<Out> | Out

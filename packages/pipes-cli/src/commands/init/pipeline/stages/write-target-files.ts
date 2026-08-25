@@ -8,7 +8,7 @@ export const writeTargetFilesStage: InitStage = {
     // File generation only; the target's post-steps (e.g. `db:generate`) run in
     // the optional target-post-steps stage so their shell-out can fail without
     // discarding the project.
-    const artifacts = buildTarget(ctx.config)
+    const artifacts = buildTarget(ctx.config, { rpcUrl: ctx.rpcUrl })
     for (const file of artifacts.files) {
       if (file.preserveExisting) {
         ctx.projectWriter.createFileIfAbsent(file.path, file.content)
