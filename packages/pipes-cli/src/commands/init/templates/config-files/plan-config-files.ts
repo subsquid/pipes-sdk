@@ -19,7 +19,10 @@ export type ConfigFileSpec = {
 
 export function planConfigFiles(config: Config<NetworkType>, projectName: string): ConfigFileSpec[] {
   const isPostgres = config.target === 'postgresql'
-  const { dependencies, devDependencies } = renderDependencies(config.target, config.networkType)
+  const hasRpcFallback = config.rpcFallback === true
+  const { dependencies, devDependencies } = renderDependencies(config.target, config.networkType, {
+    rpcFallback: hasRpcFallback,
+  })
 
   const specs: ConfigFileSpec[] = [
     { path: 'biome.json', contents: biomeConfigTemplate },
@@ -56,6 +59,7 @@ export function planConfigFiles(config: Config<NetworkType>, projectName: string
         projectName,
         target: config.target,
         packageManager: config.packageManager,
+        hasRpcFallback,
       }),
     },
     {
@@ -64,6 +68,7 @@ export function planConfigFiles(config: Config<NetworkType>, projectName: string
         packageManager: config.packageManager,
         projectName,
         hasPostgresScripts: isPostgres,
+        hasRpcFallback,
       }),
     },
     { path: 'src/utils/index.ts', contents: renderUtilsTemplate(config) },

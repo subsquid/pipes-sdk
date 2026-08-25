@@ -312,6 +312,26 @@ describe('buildPostgresTarget artifacts', () => {
   it('returns a single db:generate post step using the configured package manager', () => {
     expect(buildPostgresTarget(config).postSteps).toEqual([{ kind: 'exec', command: 'pnpm run db:generate' }])
   })
+
+  describe('with rpcFallback', () => {
+    const rpcConfig: Config<'evm'> = { ...config, rpcFallback: true }
+
+    it('adds a required RPC_URL to the env schema', () => {
+      expect(buildPostgresTarget(rpcConfig).envSchema).toContain('RPC_URL: z.string().min(1),')
+      expect(buildPostgresTarget(config).envSchema).not.toContain('RPC_URL')
+    })
+
+    it('writes RPC_URL to .env — the prompted URL when given, a blank placeholder otherwise', () => {
+      const envOf = (artifacts: ReturnType<typeof buildPostgresTarget>) =>
+        artifacts.files.find((f) => f.path === '.env')!.content
+
+      expect(envOf(buildPostgresTarget(rpcConfig))).toContain('RPC_URL=\n')
+      expect(envOf(buildPostgresTarget(rpcConfig, { rpcUrl: 'https://rpc.example.com/v2/KEY' }))).toContain(
+        'RPC_URL=https://rpc.example.com/v2/KEY\n',
+      )
+      expect(envOf(buildPostgresTarget(config))).not.toContain('RPC_URL')
+    })
+  })
 })
 
 describe('buildClickhouseTarget artifacts', () => {
@@ -351,6 +371,26 @@ describe('buildClickhouseTarget artifacts', () => {
 
   it('returns an empty postSteps array', () => {
     expect(buildClickhouseTarget(config).postSteps).toEqual([])
+  })
+
+  describe('with rpcFallback', () => {
+    const rpcConfig: Config<'evm'> = { ...config, rpcFallback: true }
+
+    it('adds a required RPC_URL to the env schema', () => {
+      expect(buildClickhouseTarget(rpcConfig).envSchema).toContain('RPC_URL: z.string().min(1),')
+      expect(buildClickhouseTarget(config).envSchema).not.toContain('RPC_URL')
+    })
+
+    it('writes RPC_URL to .env — the prompted URL when given, a blank placeholder otherwise', () => {
+      const envOf = (artifacts: ReturnType<typeof buildClickhouseTarget>) =>
+        artifacts.files.find((f) => f.path === '.env')!.content
+
+      expect(envOf(buildClickhouseTarget(rpcConfig))).toContain('RPC_URL=\n')
+      expect(envOf(buildClickhouseTarget(rpcConfig, { rpcUrl: 'https://rpc.example.com/v2/KEY' }))).toContain(
+        'RPC_URL=https://rpc.example.com/v2/KEY\n',
+      )
+      expect(envOf(buildClickhouseTarget(config))).not.toContain('RPC_URL')
+    })
   })
 })
 

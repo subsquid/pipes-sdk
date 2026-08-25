@@ -22,6 +22,15 @@ const networkDependencies: Record<NetworkType, Record<string, string>> = {
   },
 }
 
+// Optional peerDependencies of @subsquid/pipes required by the `{ type: 'rpc' }`
+// source. Keep in sync with packages/pipes/package.json peerDependencies.
+const rpcFallbackDependencies: Record<string, string> = {
+  '@subsquid/evm-rpc': '^0.0.2',
+  '@subsquid/evm-normalization': '^0.0.2',
+  '@subsquid/rpc-client': '^4.15.1',
+  '@subsquid/http-client': '^1.8.1',
+}
+
 const baseDevDependencies: Record<string, string> = {
   typescript: '^5.9.2',
   '@biomejs/biome': '^2.3.4',
@@ -44,11 +53,17 @@ const targetDependencies: Record<Target, Record<string, string>> = {
 export function renderDependencies(
   target: Target,
   networkType: NetworkType,
+  options: { rpcFallback?: boolean } = {},
 ): {
   dependencies: Record<string, string>
   devDependencies: Record<string, string>
 } {
-  const dependencies = { ...baseDependencies, ...networkDependencies[networkType], ...targetDependencies[target] }
+  const dependencies = {
+    ...baseDependencies,
+    ...networkDependencies[networkType],
+    ...targetDependencies[target],
+    ...(options.rpcFallback ? rpcFallbackDependencies : {}),
+  }
   const devDependencies = { ...baseDevDependencies }
 
   return {

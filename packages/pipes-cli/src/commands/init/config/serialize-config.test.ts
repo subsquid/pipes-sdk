@@ -63,4 +63,15 @@ describe('serializePipeConfig', () => {
   it('omits pipeId when the config carries none', () => {
     expect(JSON.parse(serializePipeConfig(config))).not.toHaveProperty('pipeId')
   })
+
+  it('persists rpcFallback, and the saved value survives a parse back through the schema', () => {
+    const raw = JSON.parse(serializePipeConfig({ ...config, rpcFallback: true }))
+    expect(raw.rpcFallback).toBe(true)
+    expect(configJsonSchema.parse(raw)).toMatchObject({ rpcFallback: true })
+  })
+
+  it('omits rpcFallback when off, keeping the file parseable by older CLIs', () => {
+    expect(JSON.parse(serializePipeConfig(config))).not.toHaveProperty('rpcFallback')
+    expect(JSON.parse(serializePipeConfig({ ...config, rpcFallback: false }))).not.toHaveProperty('rpcFallback')
+  })
 })

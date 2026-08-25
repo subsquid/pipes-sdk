@@ -60,6 +60,12 @@ const evmConfig = baseSchemaRaw
       .enum(getPortalNetworkSlugs('evm'))
       .describe('Network every template indexes; per-deployment networks may override it in the future.'),
     templates: getTemplateSchemas('evm'),
+    rpcFallback: z
+      .boolean()
+      .optional()
+      .describe(
+        'Generate the pipe with an RPC fallback source: the SQD Portal stays primary and an RPC endpoint takes over while the Portal is unavailable. The endpoint URL is never stored in this file — set RPC_URL in the generated .env. EVM only.',
+      ),
   })
   .strict()
 
