@@ -360,6 +360,79 @@ This is an API and state compatibility break:
 encoded value requires, the table DDL, the subscription flags, the IAM grants for a subscription
 that lives in a different project than the topic, and the limits that come with the design.
 
+### 16. Google Pub/Sub: `signals` replaced by a `control` route
+
+Beta 4's signal routes published an application payload with no CDC envelope — a second data plane
+alongside `topics`, which meant a BigQuery subscription could not be attached to it at all. `control`
+keeps the two things that were load-bearing and drops the rest:
+
+```ts
+pubsubTarget({
+  topics: { transfers: { topic: 'transfers', map: ({ data, epoch }) => /* … */ } },
+  control: {
+    fork: ({ epoch, rollbackTo, deadEnd }) => ({ data: { type: 'fork', epoch, rollbackTo, deadEnd } }),
+    finality: {
+      everyBlocks: 100,
+      map: ({ finalized }) => ({ data: { type: 'finality', finalBlock: finalized.number } }),
+    },
+  },
+})
+```
+
+**The version sequence is now a documented contract, not an accident.** Every operation takes one
+number from one producer-wide counter, allocated in the transaction that queues it, so a
+single-topic producer's `_CHANGE_SEQUENCE_NUMBER` run is gapless. That is what lets a stateful
+consumer tell "nothing more is coming" from "it has not arrived yet" — for a fork's compensations
+(sequenced ahead of the rows that replace them) and for a whole block alike. Two things void it, and
+both are now stated as such: a producer feeding more than one topic, and a server-side filter, where
+every removed message reads as a gap. See RP-46 and `docs/pubsub-bigquery.md`.
+
+**`control.finality` publishes the source's finalized head** — the one input no consumer can derive
+from the row stream, and what one folding per-block state needs before it can compact. It is a
+*reference value*, not an authority over a row: finality is a policy, so the number is an input to
+whatever confirmation policy the consumer chose. Monotone, so it is read by keeping the maximum
+seen; emitted on the batch commit rather than on row traffic, so it keeps advancing while the table
+is quiet; and throttled by `everyBlocks` (default 100), where a skipped record costs nothing because
+the next carries a higher value. Closes GAP-39.
+
+**`control.fork` is an optimisation, not the rollback mechanism.** A folding consumer can retire a
+fork from the rows alone — a compensation carries the orphaned row's own body and is sequenced ahead
+of its replacement, so *on a DELETE at block N with sequence S, drop every contribution from a row
+with block ≥ N and sequence < S* is correct under unordered delivery. The announcement buys latency
+(one message instead of convergence as the last compensation lands) and generality (a `materialized`
+route compensates with an `UPSERT`, so such a topic can pass a fork with no `DELETE` at all).
+
+- One control route per producer, not one per stream: both record kinds are producer-wide. `fork`
+  and `finality` are each optional; configuring neither is a type error.
+- Both are ordinary CDC rows. `_id` defaults to `<namespace>:control:fork:<epoch>` and
+  `<namespace>:control:finality:<block>`.
+- They **ride the data topics** — neither is a separate feed, and a number burned on another topic
+  is a hole in this one.
+- Every message now carries the reserved `_type` attribute: `cdc` for a row change, `control` for
+  either. A BigQuery subscription selects rows with `attributes._type = "cdc"`. Pub/Sub filters
+  match attributes and never the body, which is why the discriminator is an attribute, and it is on
+  every message so neither kind is recognised by an absence. **A subscription's filter is immutable
+  after creation**, so it must exist before the first control record — note a watermark starts
+  flowing immediately, rather than waiting for a fork that may be weeks away. `control.topic`
+  publishes on a separate topic instead when an existing subscription cannot be recreated, at the
+  cost of the shared sequence.
+- A control route should mirror whatever constant attributes its subscribers filter on — the
+  target adds `_type` and nothing else, and a record a filter excludes is invisible exactly
+  when it matters.
+- All copies of one record share one sequence number, so a single-route producer's topic
+  sequence stays gapless.
+- `TopicRoute.map` now receives `epoch` alongside `data` and `ctx`, so data rows can be stamped
+  with the epoch they were published under.
+- `signals`, `SignalRoute`, `SignalDraft`, `SignalForkContext`, `PendingSignalOperation` and
+  `fork.mode: 'boundary' | 'finalized-only'` are removed. E2426 and E2427 are retired, never reused.
+- `SignalForkContext` becomes `ForkAnnouncement`; `PendingSignalOperation` becomes
+  `PendingControlOperation` and now carries `op`/`id` like any CDC operation.
+- `sqd_pubsub_operations_total`'s `kind` label is `cdc` | `control`; `operation` is always the CDC
+  op. The `data` / `fork` values are gone.
+- State schema v3 migrates in place, unless its outbox still holds unpublished signal-route
+  operations — those bytes have no row identity and cannot be re-encoded, so they are refused
+  (E2411). Drain the outbox on beta 4 before upgrading.
+
 ---
 
 ## New features

@@ -80,10 +80,7 @@ export const PUBSUB_ERROR_CODES = {
   ROUTE_NOT_CONFIGURED: 'E2423',
   /** The producer-wide BigQuery CDC change sequence cannot advance safely. */
   SEQUENCE_EXHAUSTED: 'E2424',
-  /** No CDC or signal routes were configured. */
+  /** No CDC topic routes were configured. */
   NO_ROUTES: 'E2425',
-  /** A signal draft lacks a usable chain attribution. */
-  INVALID_SIGNAL_BLOCK: 'E2426',
-  /** A finalized-only signal was mapped from an unfinalized block. */
-  SIGNAL_NOT_FINALIZED: 'E2427',
+  // E2426 and E2427 were the signal-route codes. Retired with that API, never reused.
 } as const

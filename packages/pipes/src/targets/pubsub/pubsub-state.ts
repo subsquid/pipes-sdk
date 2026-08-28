@@ -12,7 +12,7 @@ import { SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 import { MAX_SEQUENCE_VALUE, PubsubOp } from './protocol.js'
 
-export const STATE_SCHEMA_VERSION = '3'
+export const STATE_SCHEMA_VERSION = '4'
 
 export type RouteMode = 'event' | 'materialized'
 export type RowIdSource = 'row' | 'draft' | 'derived' | 'generated'
@@ -48,38 +48,58 @@ export type PendingCdcOperation = {
   inverse?: { op: 'upsert' | 'delete'; payload: Uint8Array }
 }
 
-/** A non-CDC application message. Its bytes are final before the state transaction commits. */
-export type PendingSignalOperation = {
-  kind: 'signal'
+/**
+ * A control record: a CDC row like any other, carrying a statement about the feed rather than a
+ * table row. Never rollbackable — a fork announcement is a historical fact a later fork must not
+ * retract, and a finality watermark is superseded by the next one rather than corrected.
+ */
+export type PendingControlOperation = {
+  kind: 'control'
   route: string
   topic: string
   orderingKey: string
+  op: 'upsert'
+  id: string
   attributes: Record<string, string>
   payload: Uint8Array
   blockNumber: number
-  /** Distinguishes ordinary mapped data from the one boundary message emitted for a fork. */
-  signalType: 'data' | 'fork'
 }
 
-export type PendingOperation = PendingCdcOperation | PendingSignalOperation
+export type PendingOperation = PendingCdcOperation | PendingControlOperation
 
 export type OutboxRow = {
   rowId: number
-  kind: 'cdc' | 'signal'
+  kind: 'cdc' | 'control'
   route: string
   topic: string
-  op?: PubsubOp
-  id?: string
+  op: PubsubOp
+  id: string
   orderingKey: string
   seq: number
   attributes: Record<string, string>
   payload: Uint8Array
 }
 
-export type SignalForkContext = {
+/** What the control route is told about a fork, inside the transaction that resolves it. */
+export type ForkAnnouncement = {
+  /** The durable fork counter AFTER this fork. Data rows published from here carry it too. */
   epoch: number
+  /** The last block that survived, or `null` when the fork rewound past everything local. */
   rollbackTo: BlockCursor | null
   deadEnd: boolean
+}
+
+/**
+ * What the control route is told when the source's finalized head has advanced far enough to
+ * publish again. The value is the source's own view, not a claim by this producer.
+ */
+export type FinalityWatermark = {
+  /** The source's finalized head as the producer received it. */
+  finalized: BlockCursor
+  /** The block being committed when it was observed — where the watermark enters the sequence. */
+  observedAt: BlockCursor
+  /** The fork counter in force at that point. */
+  epoch: number
 }
 
 export type CommitInput = {
@@ -121,7 +141,7 @@ export interface PubsubState {
    */
   fork(
     canonicalBlocks: BlockCursor[],
-    buildSignals?: (context: SignalForkContext) => PendingSignalOperation[],
+    announce?: (context: ForkAnnouncement) => PendingControlOperation[],
   ): Promise<BlockCursor | null>
   stats(): Promise<{ outbox: number; manifest: number }>
   close(): Promise<void>
@@ -133,7 +153,7 @@ type OutboxDbRow = {
   row_id: number
   route: string
   topic: string
-  kind: 'cdc' | 'signal'
+  kind: 'cdc' | 'control'
   op: string | null
   id: string | null
   ordering_key: string
@@ -261,6 +281,10 @@ export class SqlitePubsubState implements PubsubState {
       let version = this.getMetaSync('schema_version')
       if (version === '2') {
         this.#migrateV2ToV3()
+        version = '3'
+      }
+      if (version === '3') {
+        this.#migrateV3ToV4()
         version = STATE_SCHEMA_VERSION
       }
       if (version && version !== STATE_SCHEMA_VERSION) {
@@ -419,6 +443,34 @@ export class SqlitePubsubState implements PubsubState {
     try {
       db.exec("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'cdc'")
       this.setMetaSync(META_FORK_EPOCH, '0')
+      this.setMetaSync('schema_version', '3')
+      db.exec('COMMIT')
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /**
+   * v3 held signal-route rows, which carried an application payload and no row identity. The
+   * control route that replaced them publishes CDC, so those bytes cannot be re-encoded here —
+   * they are refused rather than guessed at, and only while any are still unpublished.
+   */
+  #migrateV3ToV4(): void {
+    const db = this.#db!
+
+    const stranded = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE kind = 'signal'")?.n ?? 0
+    if (stranded > 0) {
+      throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION, [
+        `The PubSub state at "${this.#options.path}" holds ${stranded} unpublished signal-route ` +
+          'operation(s) from schema version 3, which this build no longer speaks.',
+        'Drain the outbox on the previous release, then upgrade — or start a new feed with fresh state ' +
+          'and a fresh namespace.',
+      ])
+    }
+
+    db.exec('BEGIN IMMEDIATE')
+    try {
       this.setMetaSync('schema_version', STATE_SCHEMA_VERSION)
       db.exec('COMMIT')
     } catch (e) {
@@ -490,16 +542,15 @@ export class SqlitePubsubState implements PubsubState {
   }
 
   #enqueue(operation: PendingOperation, seq: number): void {
-    const isSignal = operation.kind === 'signal'
     this.#db!.exec(
       `INSERT INTO outbox (kind, route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        isSignal ? 'signal' : 'cdc',
+        operation.kind,
         operation.route,
         operation.topic,
-        isSignal ? null : operation.op,
-        isSignal ? null : operation.id,
+        operation.op,
+        operation.id,
         operation.orderingKey,
         seq,
         stableAttributes(operation.attributes),
@@ -520,7 +571,7 @@ export class SqlitePubsubState implements PubsubState {
         const seq = this.#nextSeq(operation)
         this.#enqueue(operation, seq)
 
-        if (operation.kind === 'signal') continue
+        if (operation.kind === 'control') continue
 
         if (operation.mode === 'materialized') {
           this.#assertIdentitySourceStable(operation)
@@ -781,7 +832,8 @@ export class SqlitePubsubState implements PubsubState {
       kind: row.kind ?? 'cdc',
       route: row.route,
       topic: row.topic,
-      ...(row.kind === 'signal' ? {} : { op: row.op as PubsubOp, id: row.id ?? undefined }),
+      op: row.op as PubsubOp,
+      id: row.id ?? '',
       orderingKey: row.ordering_key,
       seq: row.seq,
       attributes: JSON.parse(row.attributes) as Record<string, string>,
@@ -818,7 +870,7 @@ export class SqlitePubsubState implements PubsubState {
 
   async fork(
     canonicalBlocks: BlockCursor[],
-    buildSignals: (context: SignalForkContext) => PendingSignalOperation[] = () => [],
+    announce: (context: ForkAnnouncement) => PendingControlOperation[] = () => [],
   ): Promise<BlockCursor | null> {
     const db = this.#db!
 
@@ -842,9 +894,17 @@ export class SqlitePubsubState implements PubsubState {
         )
       }
       const epoch = currentEpoch + 1
-      const signals = buildSignals({ epoch, rollbackTo, deadEnd: !safe })
-      for (const signal of signals) {
-        this.#enqueue(signal, this.#nextSeq(signal))
+      // Enqueued before the compensations so the announcement leads its own drain, and — the
+      // load-bearing half — so "cursor rewound, epoch never announced" is unrepresentable.
+      const announcements = announce({ epoch, rollbackTo, deadEnd: !safe })
+      if (announcements.length) {
+        // One fork, one version, however many topics carry the same announcement: they are
+        // copies of one operation, and burning a number per copy would put a gap in the
+        // producer's sequence on every topic but the last.
+        const seq = this.#nextSeq(announcements[0])
+        for (const announcement of announcements) {
+          this.#enqueue(announcement, seq)
+        }
       }
       this.setMetaSync(META_FORK_EPOCH, String(epoch))
       const compensations = this.#compensate(floor)

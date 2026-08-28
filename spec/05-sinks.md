@@ -138,6 +138,103 @@ head gives the sink nothing to record and MUST be refused, unless the operator e
 declares it fork-free; a fork arriving under that declaration is fatal and uncompensatable
 (the assertion was wrong and the data has left).
 
+**RP-45 — Producer control channel (class C).** [MUST — where offered] A class-C sink MAY
+offer a producer-wide control channel carrying records that state something about the feed
+rather than carry a row. Two kinds are defined: the fork announcement below and the finality
+watermark (RP-47). A control record takes the producer's next version like any other
+operation and is never compensated — an announcement is a historical fact a later fork MUST
+NOT retract, and a watermark is superseded by the next one rather than corrected.
+
+Control records are published by default to **every destination the producer's data routes
+feed** — neither kind is a separate feed, both are statements about the operations already on
+those destinations — and every copy of one record MUST share one version, so a
+single-destination producer's version sequence stays gap-free (RP-46). Each MUST carry a
+protocol-owned **record-kind marker in the medium's filterable metadata, not in the
+payload** — carried by every operation, not only by control records, so neither kind is
+recognised by an absence and a subscriber selects positively without parsing; a binding
+whose filter language cannot read the payload is the general case, not a special one. The
+marker distinguishes data from control and no more: where a subscriber's selection is
+fixed at creation, it MUST stay correct as new kinds of control record are added, and
+their own payload discriminates them. Where such a subscriber's filter cannot be
+established before the first control record, the route MAY name a separate destination
+instead, at the cost of RP-46's barrier.
+
+A control record MUST be reachable by the subscribers of the operations it describes.
+Where a binding filters on metadata, the sink MUST let the route set that metadata on the
+record, and a route whose subscribers filter is obliged to carry what they filter
+on — a record a subscriber's own filter excludes is invisible in exactly the case
+it exists for. This is RP-44's inheritance rule restated for records that have nothing to
+inherit from: neither a fork nor a watermark has a single operation whose metadata it could
+copy.
+
+**The fork announcement.** Exactly one record per resolved fork, built and enqueued
+**inside** the same local transaction that rewinds the cursor and advances the producer's
+fork epoch, so a rewound cursor whose new epoch was never announced is unrepresentable
+rather than merely recovered from. It carries that epoch and the block the feed rewound to
+— or the fact that no local ancestor survived. The same epoch MUST be readable where
+ordinary operations are built, so an operation can carry the epoch it was published under
+and a consumer can recognise one from a branch since abandoned.
+
+It does not replace RP-44: both are published, and it is an optimisation rather than the
+rollback mechanism. A consumer that folds an aggregate can retire a fork from the
+compensations alone, because RP-44 makes each one carry the orphaned row's own value and
+RP-46 sequences it ahead of the operation that replaces it: *on a deletion at block N with
+version S, discard every contribution from an operation with block ≥ N and version < S*.
+What the announcement adds is latency — one record retires a whole fork, where that rule
+converges only as the last compensation lands — and generality: where a revisable route
+compensates by restoring the surviving revision (RP-44), a destination can pass through a
+fork with no deletion at all, and a consumer inferring forks from deletions is blind to it.
+A consumer that mirrors rows MAY ignore the announcement; one that folds MAY ignore the
+compensations, whose inherited attributes (RP-44) carry the pre-fork epoch and so fall to
+its own epoch fence.
+
+**RP-46 — Version sequence as completeness barrier (class C).** [MUST] A class-C sink
+allocates exactly one version per operation from one producer-wide counter, in the same
+local transaction that records the operation for publication, and releases that record only
+once the publish is confirmed — so a rolled-back commit rolls its versions back with it and
+the producer never leaves a hole it will not fill. On a producer feeding one destination
+this makes that destination's version run **gap-free**, which is the only completeness
+statement the feed makes: a subscriber holding a contiguous run is missing no operation the
+producer committed inside it, whatever order the medium delivered them in.
+
+Two consumer questions rest on it and MUST be answerable without a further message type:
+whether a fork's repairs are all in hand (via the ordering rule in RP-45), and whether a
+block is whole — the run reaching the first operation of a higher block, which is also the
+only way to distinguish a block that produced no operations from one whose operations have
+not arrived. The sink MUST therefore publish operations for a block in block order, and MUST
+sequence a compensation ahead of the operation that replaces it.
+
+The version MUST travel in the binding's canonical field (RP-24); any additional encoding of
+it is deduplication metadata and MUST carry the same number. Two conditions void the barrier
+and MUST be documented as such rather than assumed: a producer feeding more than one
+destination, which splits the counter across them, and a subscription that filters
+server-side, where every removed message reads as a gap. A binding MAY offer both, and a
+subscriber that needs the barrier takes neither.
+
+The barrier is a transport statement and no more. It does not assert that the source or the
+author's mapping produced every operation it should have, and it does not establish finality
+(RP-47).
+
+**RP-47 — Finality watermark (class C).** [MUST — where offered] Where a class-C sink offers
+the control channel, it MAY publish the source's finalized head on it, and where it does the
+value MUST be published as a **reference**, not as an authority over any operation: finality
+is a policy — sources disagree about it, and an operator may deliberately widen the window —
+so the number is an input to whatever confirmation policy a consumer has chosen. A binding
+MUST NOT state it in terms that let a consumer read it as a proof that a given row is
+immutable.
+
+It exists because no consumer can derive it from the operation stream, and one folding
+per-block state into a base a retraction can no longer reach needs it: RP-46's barrier
+answers what the producer has committed, never what the chain has finalized. The value is
+monotone, so a consumer reads it by keeping the maximum it has seen, with no version
+comparison involved — which makes a skipped record harmless and duplicate or reordered
+delivery a non-event.
+
+It MUST be emitted on the sink's own commit rather than on operation traffic: stamped on
+operations it would stop advancing whenever the tracked data is quiet, leaving a sparse
+feed's consumer as stale as its last row. The republication rate is an author-visible
+setting, and a skipped record MUST cost nothing.
+
 ## Error taxonomy (sink-visible)
 
 Closed, banded, coded (ADR-4); concrete codes in IB-50…IB-52. Classes: configuration

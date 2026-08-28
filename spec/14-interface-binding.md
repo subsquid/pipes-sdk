@@ -143,17 +143,21 @@ remains. Orphan guard: tracked data without sync rows → coded refusal *(probed
 table-wide rather than per key, so a first run into a table a co-resident pipe populates
 is refused — GAP-20)*.
 
-**IB-28 — Google Pub/Sub binding (class C).** Combined local state schema v2, one SQLite
+**IB-28 — Google Pub/Sub binding (class C).** Combined local state schema v4, one SQLite
 file per pipe (`synchronous = FULL`, exclusive locking mode as the single-writer lock):
 `meta(key, value)` (schema version, cursor key, go-live block, producer-wide sequence,
-wire configuration, and materialized-route id sources), `cursor(id, latest, finalized,
-updated_at)`, `outbox(row_id AUTOINCREMENT, route, topic, op, id, ordering_key, seq,
-attributes, payload, block_number)`, `ledger_blocks(number, hash, timestamp)` — the
-rollback chain for ancestor resolution — `manifest(route, topic, ordering_key, seq,
-block_number, mode, op, id, attributes, payload)`, `materialized_baseline(route, topic,
-ordering_key, id, op, attributes, payload, block_number)`, `materialized_identity(id,
-route, topic, ordering_key, attributes)`, and `rollback_inverse(route, topic,
-ordering_key, id, op, payload)`. Schema v1 is refused rather than migrated in place.
+fork epoch, wire configuration, and materialized-route id sources), `cursor(id, latest,
+finalized, updated_at)`, `outbox(row_id AUTOINCREMENT, kind, route, topic, op, id,
+ordering_key, seq, attributes, payload, block_number)`, `ledger_blocks(number, hash,
+timestamp)` — the rollback chain for ancestor resolution — `manifest(route, topic,
+ordering_key, seq, block_number, mode, op, id, attributes, payload)`,
+`materialized_baseline(route, topic, ordering_key, id, op, attributes, payload,
+block_number)`, `materialized_identity(id, route, topic, ordering_key, attributes)`, and
+`rollback_inverse(route, topic, ordering_key, id, op, payload)`. `outbox.kind` is `cdc`
+for a data operation and `control` for a fork announcement or a finality watermark; only
+`cdc` rows reach the manifest. Schema v2 and v3 migrate in place; v1 is refused rather than guessed at, and so
+is a v3 file whose outbox still holds unpublished rows of the retired signal-route kind
+(ADR-23) — those payloads carry no row identity and cannot be re-encoded as CDC.
 
 Each payload is a plain-object BigQuery CDC row containing the author's columns plus
 target-owned `_id`, `_CHANGE_TYPE` (`UPSERT` | `DELETE`), and
@@ -167,7 +171,7 @@ decimal string, byte views → lowercase `0x` hex, `Date` → RFC 3339, keys sor
 UTF-16 code unit, unrepresentable values refused — RP-24); a route may encode the complete
 CDC row itself; the destination column types the encoding implies are normative for a
 BigQuery subscription and are tabulated in `docs/pubsub-bigquery.md`. User attributes remain
-attributes; the only protocol attribute is optional `_uid`, a canonical JSON tuple
+attributes; the protocol attributes are `_type` (always) and the optional `_uid`, a canonical JSON tuple
 `[namespace, topic, orderingKey, seq]` with decimal `seq`.
 
 `publish.messageOrdering` is false by default. When enabled, the topic name is the default
@@ -177,6 +181,28 @@ materialized route uses one id source, and each id keeps its route, topic, order
 and attributes across revisions. Go-live block (`publishFrom`, default: the head at first
 start, then persisted) gates publishing and recording, so a pipe may read deeper history
 than it publishes. Topic administration is validate-only by default. Codes E24xx.
+
+The optional control channel (RP-45) is one route, not one per stream, carrying two record
+kinds. Each is an ordinary CDC row: `UPSERT`, the producer's next sequence, and an `_id`
+the route may override, defaulting to `<namespace>:control:fork:<epoch>` for an
+announcement and `<namespace>:control:finality:<block>` for a watermark — write-once
+either way, so the topic accumulates a log. Both are published to every topic the `topics`
+routes feed, all copies of one record sharing one sequence. Every message carries the
+protocol attribute `_type` — `cdc` for a row change, `control` for either kind — added at
+publish time and counted against the per-message attribute budget; a BigQuery subscription
+selects rows with the filter `attributes._type = "cdc"`, which must exist before the first
+control record because a subscription's filter is immutable after creation. A
+route-supplied `topic` overrides the destination instead.
+
+The fork epoch is a `meta` counter advanced once per resolved fork in the transaction that
+rewinds the cursor, and it is readable where ordinary operations are built. The finality
+watermark (RP-47) is emitted from the batch commit, carries the source's finalized head, the
+block being committed and the epoch, and is throttled by `finality.everyBlocks` (default
+100) against the highest value already published. That threshold is held in process memory
+and deliberately not persisted: a skipped watermark is superseded by the next one, so
+durable bookkeeping would buy nothing. Nothing below the go-live block is published, a
+watermark included. Retired with the signal routes the channel replaced: E2426, E2427, and
+the `data` / `fork` values of the operations counter's `operation` label.
 
 **IB-24 — Lock declarations.** Postgres: per-batch advisory transaction lock on the
 cursor key — dual instance fails coded. ClickHouse, BigQuery, Parquet: **no lock**
@@ -241,8 +267,9 @@ surface; the −1 sentinel exists only on /metrics, IB-46).
 `sqd_portal_requests_total` (+ labels `classification` ∈ success|rate_limited|error,
 `status`), `sqd_batch_size_blocks` (histogram), `sqd_batch_size_bytes` (histogram).
 Per-sink metric sets (`sqd_parquet_*` with a `table` label, `sqd_bigquery_*` with a
-`kind` label) and the runtime's default process metrics MAY additionally be present;
-consumers MUST tolerate them.
+`kind` label, `sqd_pubsub_*` with `topic`, `kind` ∈ cdc|control and `operation` ∈
+upsert|delete on its operations counter) and the runtime's default process metrics MAY
+additionally be present; consumers MUST tolerate them.
 
 **IB-43 — `GET /profiler?id=&from=`.** `{payload: {enabled, profiles: [{name,
 totalTime, startOffset, children[]}…]}}` — per-batch span trees; retention

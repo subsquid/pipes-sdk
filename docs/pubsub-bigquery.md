@@ -258,32 +258,175 @@ a `REQUIRED` one, breaks subscribers whose tables no longer match.
 
 **No finality marker on a CDC row.** The feed converges after a chain reorg — a fork
 publishes a `DELETE` or a restoring `UPSERT` with a higher sequence number — but nothing in
-the CDC envelope says when a row became reorg-proof. "Act only on finalized values" is not
-expressible on a `topics` route. A signal route can carry that announcement on its own
-topic (see below); a BigQuery subscription still cannot act on it.
+the CDC envelope says when a row became reorg-proof, and a BigQuery subscription could not act on
+it anyway. A stateful consumer that needs the source's finalized head reads it off the control
+route's finality watermark below, as a reference value.
 
 **Quotas.** 10 000 attached subscriptions per topic, and a per-region cap on BigQuery
 subscription throughput.
 
-## Signal routes are not for BigQuery
+## The sequence is the completeness barrier
 
-Alongside `topics`, the target accepts `signals`: routes that publish an application-defined
-payload with no CDC envelope — no `_id`, no `_CHANGE_TYPE`, no `_CHANGE_SEQUENCE_NUMBER`.
-They exist for consumers that fold their own state rather than mirror a table: raw event
-streams, watermark and finality announcements, control messages.
+Every operation takes exactly one number from one producer-wide counter, and the number is
+allocated in the same transaction that writes the operation to the outbox — a rolled-back commit
+rolls the number back with it, and the outbox row is deleted only once its publish is confirmed.
+So on a producer feeding **one** topic, that topic's `_CHANGE_SEQUENCE_NUMBER` run is gapless, and
+a subscriber holding a contiguous run is missing no operation the producer committed inside it.
 
-**Do not attach a BigQuery subscription to a signal topic.** Every message would fail schema
-validation and land in the dead-letter topic. Signal topics take ordinary pull or push
-subscriptions.
+That is what a stateful consumer actually reads, for two different questions:
 
-The fork story also differs. A signal has no row identity, so it cannot be repaired per
-message. Each route declares how it copes: `fork: { mode: 'boundary', map }` publishes one
-boundary message per fork — carrying a durable epoch counter and the block the feed rewound
-to — ahead of every CDC compensation, and the consumer unwinds its own state from that.
-`fork: { mode: 'finalized-only' }` promises the route never publishes anything a fork could
-orphan, and that promise is enforced rather than assumed.
+- **a fork is retired** once the compensations are in hand — they are sequenced ahead of the rows
+  that replace them, so "on a `DELETE` at block *N* with sequence *S*, drop every contribution from
+  a row with block ≥ *N* and sequence < *S*" is correct even though delivery is unordered;
+- **a block is whole** once the run reaches the first operation of a higher block. This is also the
+  only way to distinguish "that block produced no rows" from "its rows have not arrived".
 
-`docs/examples/evm/19.pubsub-signals.example.ts` is a runnable example.
+Out-of-order delivery costs a reorder buffer, not correctness: contiguity is a property of the set
+a subscriber has accumulated, not of the order it arrived in. Two conditions apply, and both are
+easy to break by accident:
+
+- **the producer keeps one topic.** A second data topic splits the counter across both, and neither
+  run is contiguous on its own. So does `control.topic`.
+- **the subscription does not filter.** A server-side filter removes messages, and every removal
+  reads as a gap. A BigQuery landing may filter — it uses no barrier — but a filtered subscription
+  cannot double as a stateful consumer's.
+
+`_CHANGE_SEQUENCE_NUMBER` is the canonical carrier and is always present. `publish.uidAttribute`
+adds a decimal copy of the same number as the fourth element of `_uid`, so a subscriber can
+gap-check without decoding the body; it is deduplication metadata, not a second contract.
+
+The barrier is about transport, and nothing else. It says the subscriber has every operation the
+producer committed — not that the source or the mapper produced every row it should have, and not
+that a row is final.
+
+## The control route
+
+The optional `control` route carries records that state something about the feed rather than carry
+a table row. Two kinds today.
+
+### The fork announcement
+
+```ts
+control: {
+  fork: ({ epoch, rollbackTo, deadEnd }) => ({
+    data: { type: 'fork', epoch, rollbackTo: rollbackTo?.number ?? null, deadEnd },
+  }),
+}
+```
+
+One message per resolved fork, built inside the transaction that rewinds the cursor and raises the
+epoch — so a rewound cursor whose new epoch was never announced cannot exist.
+
+**This is an optimisation, not the rollback mechanism.** A consumer folding an aggregate already
+has an exact rule without it: the compensation rule above. What the announcement buys is latency —
+one message retires a whole fork, where the rule converges only as the last compensation lands —
+and generality: a `materialized` route compensates by restoring the surviving revision, so such a
+topic can pass through a fork without a single `DELETE`, and a consumer inferring forks from
+`DELETE`s is blind to it.
+
+### The finality watermark
+
+```ts
+control: {
+  finality: {
+    everyBlocks: 100,
+    map: ({ finalized, observedAt }) => ({
+      data: { type: 'finality', finalBlock: finalized.number, observedAt: observedAt.number },
+    }),
+  },
+}
+```
+
+The source's own finalized head, republished each time it advances by `everyBlocks` (default 100).
+This is the one input a consumer cannot derive from the row stream, and it needs one: per-block
+state cannot be kept forever, and folding it into a base a retraction can no longer reach takes an
+answer to "have all corrections below this height already arrived?" that the rows do not give.
+
+It is a **reference value, not an authority over a row.** Finality is a policy — providers disagree
+about it, and a pipe may widen its window deliberately — so the number is an input to whatever
+confirmation policy the consumer chose. Reading it needs no ceremony: the value is monotone, so a
+consumer keeps the maximum of what it has seen, with no sequence comparison involved, which makes
+the read robust to duplicates and reordering for free. A watermark skipped by a rolled-back commit
+or a restart costs nothing, because the next one carries a higher value.
+
+It comes off the batch commit rather than off row traffic, so it keeps advancing while the table is
+quiet. Stamped on rows instead, it would stop advancing exactly when a sparse table's consumer
+needs it most.
+
+### Both kinds ride the data topics
+
+Neither is a separate feed — both are statements about the rows already on those topics — so they
+go to every topic the producer's `topics` routes feed. One subscription for a consumer, and no
+number burned out of the topic's own sequence.
+
+Each is an ordinary CDC row — `_id`, `_CHANGE_TYPE`, `_CHANGE_SEQUENCE_NUMBER` and all. `_id`
+defaults to `<namespace>:control:fork:<epoch>` and `<namespace>:control:finality:<block>`,
+write-once either way; the route may set its own.
+
+### `_type` selects what a subscription receives
+
+Every message carries a reserved `_type` attribute: `cdc` for a table row change, `control` for a
+producer statement about the feed. A BigQuery subscription takes the rows:
+
+```
+attributes._type = "cdc"
+```
+
+Pub/Sub filters match **attributes only**, never the message body — that is why the discriminator
+is an attribute rather than a field. Filtered messages are acknowledged by Pub/Sub and never
+delivered, and carry no outbound charge.
+
+`_type` is deliberately coarse. A subscription's filter cannot be changed after it is created, so
+`attributes._type = "cdc"` has to stay correct when a new kind of control record appears later —
+which that record's own body then discriminates.
+
+> **The filter is immutable.** A subscription's filter cannot be changed after it is created
+> ([subscription filters][filter-docs]). It therefore has to be in place **before** the producer
+> publishes its first control record — otherwise that record reaches a table whose schema is not
+> its own and lands in the dead-letter topic. Note that a finality watermark starts flowing as soon
+> as the route is configured, without waiting for a fork. To add a control route to a feed whose
+> subscriptions already exist, either recreate those subscriptions with the filter, or set
+> `control.topic` to publish on a separate topic and leave them untouched — at the cost of the
+> shared sequence.
+
+### Give it the attributes your subscribers filter on
+
+The target adds `_type` and nothing else. If your consumers subscribe with a filter —
+`attributes.chain = "ethereum"`, say — a control record without a `chain` attribute is silently
+invisible to them, in exactly the case it exists for. Set the filter attributes your data rows
+carry:
+
+```ts
+control: {
+  fork: ({ epoch, rollbackTo, deadEnd }) => ({
+    data: { type: 'fork', epoch, safeBlock: rollbackTo?.number ?? 0, deadEnd },
+    attributes: { chain: 'ethereum', table: 'blocks' },
+  }),
+}
+```
+
+Only the attributes that are constant for the topic can be mirrored — a per-row one such as
+`block_number` cannot be, since a fork spans many. A subscriber filtering on one of those has to
+admit control records explicitly (and gives up the sequence barrier by filtering at all):
+
+```
+attributes.block_number = "19000000" OR attributes._type = "control"
+```
+
+### Why the epoch matters
+
+The announcement is enqueued inside the transaction that rewinds the cursor and raises the epoch,
+so a rewound cursor with an unannounced epoch cannot exist — a crash leaves it unpublished, never
+unrecorded. `map` receives the same `epoch`, so data rows can carry the epoch they were published
+under: after the announcement raises it, a row still stamped with the old one is recognisable as
+coming from the abandoned branch. That is what lets an unordered consumer tell a late duplicate
+from live data.
+
+The announcement does not replace the per-row compensations — both go out, and the compensations
+are what keep a BigQuery destination correct. A consumer that acts on the announcement can ignore
+them; their inherited attributes carry the pre-fork epoch, so an epoch fence discards them anyway.
+
+`docs/examples/evm/19.pubsub-control.example.ts` is a runnable example.
 
 ## Producer metrics
 
@@ -293,11 +436,11 @@ Exported by the pipe's metrics server. Alert on the first two.
 | --- | --- | --- |
 | `sqd_pubsub_block_to_commit_lag_seconds` | histogram | Seconds from the committed block's chain timestamp to the Pub/Sub ack. End-to-end freshness, including block production and chain-to-portal propagation — a service level, not an attribution. Empty below the go-live block, or when the pipe's query selects no block `timestamp`. |
 | `sqd_pubsub_portal_to_commit_lag_seconds` | histogram | Seconds from the portal stamping the batch to the Pub/Sub ack. In-process latency, covering stream-buffer dwell and the pipe's transformers as well as this target. |
-| `sqd_pubsub_operations_total` | counter | Operations enqueued, by `topic`, `kind` (`cdc`/`signal`) and `operation` (`upsert`/`delete`, or `data`/`fork`). |
+| `sqd_pubsub_operations_total` | counter | Operations enqueued, by `topic`, `kind` (`cdc`/`control`) and `operation` (`upsert`/`delete`). |
 | `sqd_pubsub_publish_duration_seconds` | histogram | Wallclock of one outbox drain. Split a `portal_to_commit` regression against this. |
 | `sqd_pubsub_published_bytes_total` | counter | Payload bytes confirmed published, attributes excluded. |
 | `sqd_pubsub_outbox_depth` | gauge | Rows queued but unconfirmed. Sustained growth means the publisher is not keeping up. |
-| `sqd_pubsub_compensations_per_fork` | histogram | Compensating operations per resolved fork — fork blast radius. Signals are excluded; they compensate nothing. |
+| `sqd_pubsub_compensations_per_fork` | histogram | Compensating operations per resolved fork — fork blast radius. The fork announcement is excluded; it compensates nothing. |
 | `sqd_pubsub_manifest_rows` | gauge | Rows in the rollback manifest — the unfinalized window the target can still repair. |
 | `sqd_pubsub_publish_saturation_seconds` | counter | Message ordering only: seconds spent publishing a partition at ≥80% of Pub/Sub's 1 MB/s per-ordering-key cap. Growth means the headroom is eroding. |
 | `sqd_pubsub_cold_start` | gauge | 1 when the state file started empty. See the lost-sequencer limit above. |
@@ -318,6 +461,7 @@ per-subscriber cost, no backfill problem, and no sequencer to lose.
 [bq-sub]: https://cloud.google.com/pubsub/docs/bigquery
 [bq-cdc]: https://cloud.google.com/bigquery/docs/change-data-capture
 [bq-table-schema]: https://cloud.google.com/pubsub/docs/create-bigquery-subscription#use_table_schema
+[filter-docs]: https://cloud.google.com/pubsub/docs/subscription-message-filter
 [bq-troubleshooting]: https://cloud.google.com/pubsub/docs/bigquery-troubleshooting
 [dlq]: https://cloud.google.com/pubsub/docs/dead-letter-topics
 [ahub]: https://cloud.google.com/bigquery/docs/analytics-hub-introduction

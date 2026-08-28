@@ -144,7 +144,9 @@ describe('pubsubTarget', () => {
     expect(publisher.published[0]).toEqual({
       topic: 'blocks',
       orderingKey: '',
-      attributes: { chain: 'mock' },
+      // `_type` rides every message: a subscription filter reads attributes, so a data row has
+      // to say it is one rather than be recognised by an absence.
+      attributes: { chain: 'mock', _type: 'cdc' },
       payload:
         '{"_CHANGE_SEQUENCE_NUMBER":"1","_CHANGE_TYPE":"UPSERT",' + '"_id":"test-pipe:blocks:1:0x1:0","number":1}',
     })
@@ -935,8 +937,8 @@ describe('pubsubTarget', () => {
         'network down',
       )
 
-      // The stream keeps a route, so the target itself is valid — but the pending row's route is
-      // now a signal route, and its CDC encoder is gone. Same failure as deleting it outright.
+      // The target is still valid — it has a route — but the pending row's own stream was
+      // renamed, so nothing configured can encode it.
       await expect(
         driveBatches({
           statePath,
@@ -944,14 +946,7 @@ describe('pubsubTarget', () => {
           blocks: [],
           finalized: 0,
           targetOptions: {
-            topics: {},
-            signals: {
-              blocks: {
-                topic: 'blocks',
-                map: () => [],
-                fork: { mode: 'finalized-only' },
-              },
-            },
+            topics: { headers: blocksRoute() } as never,
           },
         }),
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED })

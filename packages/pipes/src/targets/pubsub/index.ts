@@ -6,6 +6,8 @@ export {
   PROTOCOL_ATTRIBUTES,
   PUBSUB_LIMITS,
   type PubsubOp,
+  TYPE_ATTRIBUTE,
+  type WireType,
   canonicalJson,
 } from './protocol.js'
 export {
@@ -17,22 +19,24 @@ export {
 } from './publisher.js'
 export {
   type CommitInput,
+  type FinalityWatermark,
+  type ForkAnnouncement,
   type OutboxRow,
   type PendingCdcOperation,
+  type PendingControlOperation,
   type PendingOperation,
-  type PendingSignalOperation,
   type PubsubState,
   type RouteMode,
   type RowIdSource,
-  type SignalForkContext,
   SqlitePubsubState,
 } from './pubsub-state.js'
 export {
+  type ControlDraft,
+  type ControlRoute,
+  type ControlRouteBase,
   type MessageDraft,
   type PubsubTargetOptions,
   type RollbackInverse,
-  type SignalDraft,
-  type SignalRoute,
   type TopicRoute,
   pubsubTarget,
 } from './pubsub-target.js'

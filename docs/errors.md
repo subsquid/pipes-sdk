@@ -627,11 +627,14 @@ numbers they already hold.
 
 ### E2411 · State schema version mismatch
 
-The state file was written by a different schema version of the target. State schemas are not
-migrated in place.
+The state file was written by a schema version this build cannot read. Recent versions migrate in
+place; older ones, and a version 3 file whose outbox still holds unpublished signal-route
+operations, are refused — those bytes carry an application payload and no row identity, and the
+control route that replaced them publishes CDC.
 
-**Fix** — run the SDK version that owns the state, or start a fresh state and re-bootstrap the
-destination. A new state file is a new sequencer; see the cold-start warning in the target's logs.
+**Fix** — drain the outbox on the release that wrote it and upgrade again, or start a fresh state
+and re-bootstrap the destination. A new state file is a new sequencer; see the cold-start warning
+in the target's logs.
 
 ### E2412 · Ordering key while message ordering is disabled
 
@@ -737,23 +740,10 @@ would make later changes look stale to BigQuery.
 
 ### E2425 · No routes configured
 
-The target was constructed with neither a `topics` entry nor a `signals` entry, so it would open a
-state file, take its exclusive lock, and publish nothing.
+The target was constructed with no `topics` entry, so it would open a state file and publish
+nothing.
 
-**Fix** — configure at least one CDC topic route or one signal route.
+**Fix** — configure at least one CDC topic route.
 
-### E2426 · Signal draft without a usable block
+E2426 and E2427 were the signal-route codes. They were retired with that API and are never reused.
 
-A signal route produced a draft whose `block.number` is missing, negative, or not an integer. Every
-signal is attributed to a block so the go-live cut and the `finalized-only` check can be applied.
-
-**Fix** — set `block` on the draft to the block the signal describes.
-
-### E2427 · Finalized-only signal from an unfinalized block
-
-A route declaring `fork.mode: 'finalized-only'` mapped a block above the dataset's finalized head.
-That mode is a promise that the route publishes nothing a fork could orphan, and a signal cannot be
-retracted once it is on the wire.
-
-**Fix** — read the finalized stream, withhold the signal until its block finalizes, or switch the
-route to `fork.mode: 'boundary'` and publish a compensating boundary message on a fork.

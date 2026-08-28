@@ -41,8 +41,8 @@
  * The state file holds the cursor, rollback data, outbox, and sequence counter. Keep it on durable
  * storage and run one producer per path.
  *
- * `19.pubsub-signals.example.ts` covers signal routes — messages published without the CDC
- * envelope, for consumers that fold their own state instead of mirroring rows.
+ * `19.pubsub-control.example.ts` covers the control route — the fork announcement, for consumers
+ * that fold their own state instead of mirroring rows.
  *
  * To run:
  *

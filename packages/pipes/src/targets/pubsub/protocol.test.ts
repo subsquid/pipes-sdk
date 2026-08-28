@@ -202,6 +202,7 @@ describe('BigQuery CDC encoding', () => {
 describe('buildAttributes', () => {
   const operation = {
     topic: 'evm.base.transfers',
+    kind: 'cdc' as const,
     op: 'upsert' as const,
     id: 'pipe:transfers:1:0xab:0',
     seq: 1041,
@@ -210,8 +211,12 @@ describe('buildAttributes', () => {
     payload: new Uint8Array(),
   }
 
-  it('keeps only business filter attributes by default', () => {
-    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ token: '0x42' })
+  it('keeps business filter attributes and stamps the record kind', () => {
+    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ token: '0x42', _type: 'cdc' })
+  })
+
+  it('stamps a control record with its own kind', () => {
+    expect(buildAttributes({ ...operation, kind: 'control' }, { namespace: 'pipe' })['_type']).toBe('control')
   })
 
   it('fully qualifies _uid when it is enabled', () => {

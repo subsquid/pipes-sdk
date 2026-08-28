@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { BlockCursor } from '~/core/index.js'
+import { loadSqlite } from '~/drivers/sqlite/sqlite.js'
 import { testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
@@ -236,7 +237,7 @@ describe('SqlitePubsubState', () => {
     expect(result.coldStart).toBe(false)
   })
 
-  // Only v2 has an in-place migration to v3; anything older is refused rather than guessed at.
+  // v2 and v3 migrate in place; anything older is refused rather than guessed at.
   it('refuses a schema older than the one it can migrate', async () => {
     const path = statePath()
     const first = await openState(path)
@@ -244,6 +245,46 @@ describe('SqlitePubsubState', () => {
     await first.state.close()
 
     await expect(openState(path)).rejects.toBeInstanceOf(PubsubTargetError)
+  })
+
+  describe('the v3 signal-route retirement', () => {
+    /** Rewrite the opened file as the previous release would have left it. */
+    async function asSchemaV3(path: string, { stranded }: { stranded: boolean }) {
+      const db = await loadSqlite({ path })
+      db.exec("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+      if (stranded) {
+        db.exec(`UPDATE outbox SET kind = 'signal'`)
+      }
+      db.close()
+    }
+
+    it('migrates a drained v3 state in place', async () => {
+      const path = statePath()
+      const first = await openState(path)
+      await commit(first.state, { operations: [operation()], ledger: [block(1)], cursor: block(1), finalized: null })
+      await first.state.confirm((await first.state.pending()).map((row) => row.rowId))
+      await first.state.close()
+      await asSchemaV3(path, { stranded: false })
+
+      const reopened = await openState(path)
+
+      expect(reopened.coldStart).toBe(false)
+      expect(await reopened.state.getMeta('schema_version')).toBe('4')
+    })
+
+    it('refuses a v3 state whose outbox still holds signal-route operations', async () => {
+      const path = statePath()
+      const first = await openState(path)
+      await commit(first.state, { operations: [operation()], ledger: [block(1)], cursor: block(1), finalized: null })
+      await first.state.close()
+      await asSchemaV3(path, { stranded: true })
+
+      // Those bytes carry an application payload and no row identity; the control route that
+      // replaced them publishes CDC, so they cannot be re-encoded — only refused.
+      await expect(openState(path)).rejects.toMatchObject({
+        code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION,
+      })
+    })
   })
 
   describe('fork compensation', () => {

@@ -25,8 +25,21 @@ const MAX_TOPIC_RESOURCE_BYTES = 'projects/'.length + 30 + '/topics/'.length + 2
 
 export type PubsubOp = 'upsert' | 'delete'
 
-/** The only protocol-owned PubSub attribute; row metadata lives in `data`. */
-export const PROTOCOL_ATTRIBUTES = ['_uid'] as const
+/**
+ * Protocol-owned PubSub attributes; row metadata lives in `data`. `_type` says which kind of
+ * record a message is, so a subscription can select what it wants — PubSub filters read
+ * attributes and never the body, so this cannot be a field.
+ */
+export const PROTOCOL_ATTRIBUTES = ['_uid', '_type'] as const
+
+/**
+ * On every message. `cdc` is a table row change, `control` a producer statement about the feed
+ * itself. Coarse on purpose: a subscription's filter is immutable once created, so
+ * `attributes._type = "cdc"` has to stay correct when a new kind of control record appears —
+ * which is what that record's own body then discriminates.
+ */
+export const TYPE_ATTRIBUTE = '_type'
+export type WireType = 'cdc' | 'control'
 
 export const CDC_FIELDS = {
   id: '_id',
@@ -370,14 +383,16 @@ export type WireOperation = {
 }
 
 /**
- * Build business filter attributes plus the optional Dataflow deduplication id. Row identity,
- * operation, and version are fields in the BigQuery CDC payload.
+ * Build business filter attributes plus the record kind and the optional Dataflow deduplication
+ * id. Row identity, operation, and version are fields in the BigQuery CDC payload.
  */
 export function buildAttributes(
-  operation: Omit<WireOperation, 'seq'> & { seq: number | string },
+  operation: Omit<WireOperation, 'seq'> & { seq: number | string; kind: WireType },
   options: { namespace: string; uidAttribute?: boolean },
 ): Record<string, string> {
-  const attributes: Record<string, string> = { ...operation.attributes }
+  // Derived at wire time rather than stored: it is a property of the operation's kind, and the
+  // durable copy stays exactly what the route wrote.
+  const attributes: Record<string, string> = { ...operation.attributes, [TYPE_ATTRIBUTE]: operation.kind }
 
   if (options.uidAttribute) {
     // Fully qualified so independently configured producers cannot collide even if they reuse
