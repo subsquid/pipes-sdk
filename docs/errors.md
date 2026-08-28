@@ -699,10 +699,21 @@ under this pipe's identity.
 `settings.id` to the key the file was written under if this pipe really is that producer
 renamed.
 
+### E2420 · Cold start refused
+
+The run started with no state at the configured path, so it would restart the producer's change
+sequence at zero. If that namespace has already published, BigQuery discards the republished lower
+numbers as stale and every affected row freezes at its old value — with no error on either side.
+That is why recovery from lost state is not a restart.
+
+**Fix** — to bootstrap a namespace that has never published, set `allowColdStart: true`. To recover
+a namespace whose state was lost, publish under a fresh namespace and re-bootstrap every
+destination; restoring the state file from a backup reintroduces the same failure.
+
 ### E2421 · State wire configuration changed
 
-The `namespace`, `publish.uidAttribute`, or `publish.messageOrdering` setting changed while reusing
-PubSub state. Those settings determine published metadata and ordering keys. Continuing could
+The `namespace`, `attributes`, `publish.uidAttribute`, or `publish.messageOrdering` setting changed
+while reusing PubSub state. Those settings determine published metadata and ordering keys. Continuing could
 rebuild an unconfirmed outbox row differently during crash recovery. The same error is raised when
 a route switches between the canonical and a custom encoder while that route still has pending
 outbox rows.
@@ -737,23 +748,26 @@ would make later changes look stale to BigQuery.
 
 ### E2425 · No routes configured
 
-The target was constructed with neither a `topics` entry nor a `signals` entry, so it would open a
-state file, take its exclusive lock, and publish nothing.
+The target was constructed with no `topics` entry, so it would open a state file, take its
+exclusive lock, and publish nothing.
 
-**Fix** — configure at least one CDC topic route or one signal route.
+**Fix** — configure at least one topic route.
 
-### E2426 · Signal draft without a usable block
+### E2428 · Producer feeds more than one topic
 
-A signal route produced a draft whose `block.number` is missing, negative, or not an integer. Every
-signal is attributed to a block so the go-live cut and the `finalized-only` check can be applied.
+The change sequence is one producer-wide counter, so a producer that feeds several topics leaves
+none of them with a contiguous run — and a consumer reading a gap-free run as a completeness
+barrier would see holes it cannot distinguish from lost messages.
 
-**Fix** — set `block` on the draft to the block the signal describes.
+**Fix** — run one producer per topic (several routes may share one), or set `sequenceBarrier: false`
+to declare that no consumer of this producer relies on a contiguous sequence run.
 
-### E2427 · Finalized-only signal from an unfinalized block
+### E2429 · Operations step backwards in block order
 
-A route declaring `fork.mode: 'finalized-only'` mapped a block above the dataset's finalized head.
-That mode is a promise that the route publishes nothing a fork could orphan, and a signal cannot be
-retracted once it is on the wire.
+A batch mapped an operation for a lower block than one already sequenced. Operations take their
+numbers in the order they are mapped, and consumers read a contiguous run reaching block *N+1* as
+proof that block *N* is complete — a backwards step makes that reading wrong.
 
-**Fix** — read the finalized stream, withhold the signal until its block finalizes, or switch the
-route to `fork.mode: 'boundary'` and publish a compensating boundary message on a fork.
+**Fix** — emit drafts in block order, across routes too when several feed one topic. A fork's
+rewind is not a backwards step: the target resets the check when it resolves one. Set
+`sequenceBarrier: false` if no consumer relies on block boundaries.

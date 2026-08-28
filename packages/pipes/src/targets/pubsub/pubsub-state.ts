@@ -10,9 +10,9 @@ import {
 import { SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { MAX_SEQUENCE_VALUE, PubsubOp } from './protocol.js'
+import { MAX_SEQUENCE_VALUE, MessageKind, PubsubOp } from './protocol.js'
 
-export const STATE_SCHEMA_VERSION = '3'
+export const STATE_SCHEMA_VERSION = '4'
 
 export type RouteMode = 'event' | 'materialized'
 export type RowIdSource = 'row' | 'draft' | 'derived' | 'generated'
@@ -21,9 +21,10 @@ export type RowIdSource = 'row' | 'draft' | 'derived' | 'generated'
  * One wire operation on its way out: everything the state needs to sequence it, publish it,
  * and — when it sits above the finalized watermark — compensate it after a fork.
  */
-export type PendingCdcOperation = {
-  kind: 'cdc'
-  /** Route name selects the encoder after recovery. */
+export type PendingOperation = {
+  /** `control` records are the producer's own statements; they never enter the manifest. */
+  kind: MessageKind
+  /** Route name selects the encoder after recovery. Empty on a control record. */
   route: string
   topic: string
   /** Empty when PubSub message ordering is disabled. */
@@ -48,38 +49,17 @@ export type PendingCdcOperation = {
   inverse?: { op: 'upsert' | 'delete'; payload: Uint8Array }
 }
 
-/** A non-CDC application message. Its bytes are final before the state transaction commits. */
-export type PendingSignalOperation = {
-  kind: 'signal'
-  route: string
-  topic: string
-  orderingKey: string
-  attributes: Record<string, string>
-  payload: Uint8Array
-  blockNumber: number
-  /** Distinguishes ordinary mapped data from the one boundary message emitted for a fork. */
-  signalType: 'data' | 'fork'
-}
-
-export type PendingOperation = PendingCdcOperation | PendingSignalOperation
-
 export type OutboxRow = {
   rowId: number
-  kind: 'cdc' | 'signal'
+  kind: MessageKind
   route: string
   topic: string
-  op?: PubsubOp
-  id?: string
+  op: PubsubOp
+  id: string
   orderingKey: string
   seq: number
   attributes: Record<string, string>
   payload: Uint8Array
-}
-
-export type SignalForkContext = {
-  epoch: number
-  rollbackTo: BlockCursor | null
-  deadEnd: boolean
 }
 
 export type CommitInput = {
@@ -119,10 +99,7 @@ export interface PubsubState {
    * cursor, enqueue the compensations, and rewind. Returns the safe cursor, or `null` on a
    * dead-end fork (the whole rollbackable manifest is compensated first).
    */
-  fork(
-    canonicalBlocks: BlockCursor[],
-    buildSignals?: (context: SignalForkContext) => PendingSignalOperation[],
-  ): Promise<BlockCursor | null>
+  fork(canonicalBlocks: BlockCursor[]): Promise<BlockCursor | null>
   stats(): Promise<{ outbox: number; manifest: number }>
   close(): Promise<void>
 }
@@ -133,9 +110,9 @@ type OutboxDbRow = {
   row_id: number
   route: string
   topic: string
-  kind: 'cdc' | 'signal'
-  op: string | null
-  id: string | null
+  kind: MessageKind
+  op: string
+  id: string
   ordering_key: string
   seq: number
   attributes: string
@@ -157,7 +134,6 @@ type ManifestDbRow = {
 const META_SEQUENCE = 'sequence'
 const META_CURSOR_KEY = 'cursor_key'
 const META_MATERIALIZED_ID_SOURCE = 'materialized_id_source:'
-export const META_FORK_EPOCH = 'fork_epoch'
 
 /**
  * An unambiguous key for a composite identity. A separator-joined string is not one:
@@ -258,11 +234,7 @@ export class SqlitePubsubState implements PubsubState {
       this.#lock()
       this.#initializeSchema()
 
-      let version = this.getMetaSync('schema_version')
-      if (version === '2') {
-        this.#migrateV2ToV3()
-        version = STATE_SCHEMA_VERSION
-      }
+      const version = this.getMetaSync('schema_version')
       if (version && version !== STATE_SCHEMA_VERSION) {
         throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION, [
           `The PubSub state at "${this.#options.path}" was written with schema version ${version}, ` +
@@ -274,7 +246,6 @@ export class SqlitePubsubState implements PubsubState {
       if (coldStart) {
         this.setMetaSync('schema_version', STATE_SCHEMA_VERSION)
         this.setMetaSync(META_SEQUENCE, '0')
-        this.setMetaSync(META_FORK_EPOCH, '0')
         this.setMetaSync(META_CURSOR_KEY, this.#key.value)
       } else {
         this.#assertSameProducer()
@@ -413,20 +384,6 @@ export class SqlitePubsubState implements PubsubState {
     }
   }
 
-  #migrateV2ToV3(): void {
-    const db = this.#db!
-    db.exec('BEGIN IMMEDIATE')
-    try {
-      db.exec("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT 'cdc'")
-      this.setMetaSync(META_FORK_EPOCH, '0')
-      this.setMetaSync('schema_version', STATE_SCHEMA_VERSION)
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
-  }
-
   // ─── meta ───────────────────────────────────────────────────────────────────
 
   getMetaSync(key: string): string | undefined {
@@ -490,16 +447,15 @@ export class SqlitePubsubState implements PubsubState {
   }
 
   #enqueue(operation: PendingOperation, seq: number): void {
-    const isSignal = operation.kind === 'signal'
     this.#db!.exec(
       `INSERT INTO outbox (kind, route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        isSignal ? 'signal' : 'cdc',
+        operation.kind,
         operation.route,
         operation.topic,
-        isSignal ? null : operation.op,
-        isSignal ? null : operation.id,
+        operation.op,
+        operation.id,
         operation.orderingKey,
         seq,
         stableAttributes(operation.attributes),
@@ -520,7 +476,8 @@ export class SqlitePubsubState implements PubsubState {
         const seq = this.#nextSeq(operation)
         this.#enqueue(operation, seq)
 
-        if (operation.kind === 'signal') continue
+        // A control record states something about the feed; it owns no row a fork could orphan.
+        if (operation.kind === 'control') continue
 
         if (operation.mode === 'materialized') {
           this.#assertIdentitySourceStable(operation)
@@ -609,7 +566,7 @@ export class SqlitePubsubState implements PubsubState {
    * A route emits one homogeneous materialized row family. Switching between `_id`, draft `id`,
    * `deriveId`, and generated ids would make one revision unreachable under the next one's key.
    */
-  #assertIdentitySourceStable(operation: PendingCdcOperation): void {
+  #assertIdentitySourceStable(operation: PendingOperation): void {
     const key = `${META_MATERIALIZED_ID_SOURCE}${operation.route}`
     const known = this.getMetaSync(key) as RowIdSource | undefined
 
@@ -634,7 +591,7 @@ export class SqlitePubsubState implements PubsubState {
    * never receives a revision carrying new ones; if a fork is possible, its repair also uses the
    * identity the row was first published under.
    */
-  #assertIdentityStable(operation: PendingCdcOperation): void {
+  #assertIdentityStable(operation: PendingOperation): void {
     const db = this.#db!
     const id = operation.id
 
@@ -685,7 +642,7 @@ export class SqlitePubsubState implements PubsubState {
    * Without forks there is no manifest or payload baseline, but filter safety still needs one
    * durable identity per live materialized id. A delete ends that lifetime and frees the id.
    */
-  #updateMaterializedIdentity(operation: PendingCdcOperation): void {
+  #updateMaterializedIdentity(operation: PendingOperation): void {
     const db = this.#db!
     const id = operation.id
 
@@ -778,10 +735,11 @@ export class SqlitePubsubState implements PubsubState {
 
     return rows.map((row) => ({
       rowId: row.row_id,
-      kind: row.kind ?? 'cdc',
+      kind: row.kind,
       route: row.route,
       topic: row.topic,
-      ...(row.kind === 'signal' ? {} : { op: row.op as PubsubOp, id: row.id ?? undefined }),
+      op: row.op as PubsubOp,
+      id: row.id,
       orderingKey: row.ordering_key,
       seq: row.seq,
       attributes: JSON.parse(row.attributes) as Record<string, string>,
@@ -816,10 +774,7 @@ export class SqlitePubsubState implements PubsubState {
 
   // ─── fork (CN-35) ───────────────────────────────────────────────────────────
 
-  async fork(
-    canonicalBlocks: BlockCursor[],
-    buildSignals: (context: SignalForkContext) => PendingSignalOperation[] = () => [],
-  ): Promise<BlockCursor | null> {
+  async fork(canonicalBlocks: BlockCursor[]): Promise<BlockCursor | null> {
     const db = this.#db!
 
     const persisted = await this.getCursor()
@@ -834,19 +789,6 @@ export class SqlitePubsubState implements PubsubState {
 
     db.exec('BEGIN IMMEDIATE')
     try {
-      const currentEpoch = Number(this.getMetaSync(META_FORK_EPOCH) ?? '0')
-      if (!Number.isSafeInteger(currentEpoch) || currentEpoch < 0 || currentEpoch >= MAX_SEQUENCE_VALUE) {
-        throw new PubsubTargetError(
-          PUBSUB_ERROR_CODES.SEQUENCE_EXHAUSTED,
-          'The PubSub fork epoch cannot advance safely.',
-        )
-      }
-      const epoch = currentEpoch + 1
-      const signals = buildSignals({ epoch, rollbackTo, deadEnd: !safe })
-      for (const signal of signals) {
-        this.#enqueue(signal, this.#nextSeq(signal))
-      }
-      this.setMetaSync(META_FORK_EPOCH, String(epoch))
       const compensations = this.#compensate(floor)
       this.#logger?.debug(
         `fork at block ${floor}: ${compensations} compensating operation(s) enqueued${safe ? '' : ' (dead-end fork)'}`,

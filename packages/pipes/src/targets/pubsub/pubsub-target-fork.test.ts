@@ -41,6 +41,8 @@ async function run({
       publisher,
       state: { path: tempStatePath() },
       publishFrom: 0,
+      allowColdStart: true,
+      finality: false,
       topics: { blocks: route },
     }),
   )
@@ -209,6 +211,23 @@ describe('pubsubTarget — fork compensation', () => {
     expect(new Set(sequence).size).toBe(sequence.length)
   })
 
+  it('rewinds the block order the next batch is checked against', async () => {
+    // The orphaned branch reached block 3; the canonical one restarts at 2. Without the rewind
+    // that forward step reads as a mapper going backwards and the batch is refused.
+    const publisher = await run({ responses: deepFork, route: eventRoute, to: 4 })
+
+    expect(publisher.operations().map((operation) => [operation.op, JSON.parse(operation.payload).number])).toEqual([
+      ['upsert', 1],
+      ['upsert', 2],
+      ['upsert', 3],
+      ['delete', 2],
+      ['delete', 3],
+      ['upsert', 2],
+      ['upsert', 3],
+      ['upsert', 4],
+    ])
+  })
+
   it('resumes the read loop from the safe cursor', async () => {
     const publisher = new FakePublisher()
 
@@ -234,6 +253,8 @@ describe('pubsubTarget — fork compensation', () => {
         publisher,
         state: { path: tempStatePath() },
         publishFrom: 0,
+        allowColdStart: true,
+        finality: false,
         topics: { blocks: eventRoute },
       }),
     )

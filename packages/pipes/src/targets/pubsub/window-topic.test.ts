@@ -43,6 +43,8 @@ async function publish({
     publisher,
     state: { path: tempStatePath() },
     publishFrom: 0,
+    allowColdStart: true,
+    finality: false,
     topics: { candles: route },
   })
 

@@ -51,6 +51,7 @@ async function driveBatches({
   publisher,
   blocks,
   finalized,
+  finalizedAt = () => finalized,
   targetOptions = {},
   metrics,
   lastBlockReceivedAt,
@@ -60,6 +61,8 @@ async function driveBatches({
   publisher: FakePublisher
   blocks: number[]
   finalized: number
+  /** Finalized head per block, for the cases that watch the watermark move. */
+  finalizedAt?: (blockNumber: number) => number
   targetOptions?: Partial<Parameters<typeof pubsubTarget<Blocks>>[0]>
   metrics?: ReturnType<typeof mockMetricsServer>
   lastBlockReceivedAt?: Date
@@ -71,6 +74,10 @@ async function driveBatches({
     publisher,
     state: { path: statePath },
     publishFrom: 0,
+    allowColdStart: true,
+    // Opted out unless a case is about it: it would otherwise add a control record to every
+    // published list these cases count.
+    finality: false,
     topics: { blocks: blocksRoute() },
     ...targetOptions,
   })
@@ -81,7 +88,7 @@ async function driveBatches({
         data: { blocks: [{ number, hash: `0x${number}`, timestamp: number }] },
         ctx: makeBatchContext({
           current: { number, hash: `0x${number}`, timestamp: blockTimestamp(number) },
-          finalized: { number: finalized, hash: `0x${finalized}` },
+          finalized: { number: finalizedAt(number), hash: `0x${finalizedAt(number)}` },
           rollbackChain: [{ number, hash: `0x${number}` }],
           metrics: metrics?.server.metrics,
           lastBlockReceivedAt,
@@ -123,6 +130,8 @@ async function runPipe({
       publisher,
       state: { path: statePath },
       publishFrom: 0,
+      allowColdStart: true,
+      finality: false,
       topics: { blocks: blocksRoute() },
       ...targetOptions,
     }),
@@ -144,7 +153,7 @@ describe('pubsubTarget', () => {
     expect(publisher.published[0]).toEqual({
       topic: 'blocks',
       orderingKey: '',
-      attributes: { chain: 'mock' },
+      attributes: { _type: 'cdc', chain: 'mock' },
       payload:
         '{"_CHANGE_SEQUENCE_NUMBER":"1","_CHANGE_TYPE":"UPSERT",' + '"_id":"test-pipe:blocks:1:0x1:0","number":1}',
     })
@@ -332,6 +341,7 @@ describe('pubsubTarget', () => {
         publisher: resumed,
         state: { path: statePath },
         publishFrom: 0,
+        finality: false,
         topics: { blocks: blocksRoute() },
       }),
     )
@@ -399,6 +409,7 @@ describe('pubsubTarget', () => {
           publisher: resumed,
           state: { path: statePath },
           publishFrom: 'latest',
+          finality: false,
           topics: { blocks: blocksRoute() },
         }),
       )
@@ -444,6 +455,7 @@ describe('pubsubTarget', () => {
         publisher: new FakePublisher(),
         state: { path: tempStatePath() },
         assumeNoForks: true,
+        allowColdStart: true,
         topics: { blocks: blocksRoute() },
       })
 
@@ -725,6 +737,8 @@ describe('pubsubTarget', () => {
         publisher: new FakePublisher(),
         state: { path: tempStatePath() },
         publishFrom: 0,
+        allowColdStart: true,
+        finality: false,
         topics: {
           blocks: {
             topic: 'blocks',
@@ -925,6 +939,256 @@ describe('pubsubTarget', () => {
     })
   })
 
+  describe('the sequence barrier', () => {
+    const secondTopic = { blocks: blocksRoute(), extra: blocksRoute('other-topic') } as never
+
+    it('refuses a producer that would split its counter across topics', () => {
+      expect(() =>
+        pubsubTarget<Blocks>({
+          pubsub: {} as never,
+          publisher: new FakePublisher(),
+          state: { path: tempStatePath() },
+          topics: secondTopic,
+        }),
+      ).toThrowError(expect.objectContaining({ code: PUBSUB_ERROR_CODES.MULTIPLE_TOPICS }))
+    })
+
+    it('accepts several topics once the barrier is declared off', () => {
+      expect(() =>
+        pubsubTarget<Blocks>({
+          pubsub: {} as never,
+          publisher: new FakePublisher(),
+          state: { path: tempStatePath() },
+          sequenceBarrier: false,
+          topics: secondTopic,
+        }),
+      ).not.toThrow()
+    })
+
+    /** Descending drafts: the second operation would take a higher number than the first. */
+    function descendingRoute(topic = 'blocks') {
+      return {
+        topic,
+        map: ({ data }: { data: Blocks['blocks'] }) =>
+          [...data, ...data].map((header, index) => ({
+            data: { number: header.number - index },
+            block: { ...header, number: header.number - index },
+          })),
+      }
+    }
+
+    it('refuses a batch whose operations step backwards in block order', async () => {
+      await expect(
+        driveBatches({
+          statePath: tempStatePath(),
+          publisher: new FakePublisher(),
+          blocks: [5],
+          finalized: 0,
+          targetOptions: { topics: { blocks: descendingRoute() } },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.BLOCK_ORDER })
+    })
+
+    it('refuses a step backwards between batches, not only inside one', async () => {
+      await expect(
+        driveBatches({
+          statePath: tempStatePath(),
+          publisher: new FakePublisher(),
+          blocks: [5, 4],
+          finalized: 0,
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.BLOCK_ORDER })
+    })
+
+    it('checks no block order once the barrier is declared off', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [5, 4],
+        finalized: 0,
+        targetOptions: { sequenceBarrier: false },
+      })
+
+      expect(publisher.operations()).toHaveLength(2)
+    })
+  })
+
+  describe('the finality watermark', () => {
+    const finality = { everyBlocks: 10 }
+
+    it('publishes the source finalized head as a control record on the feed topic', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1, 2],
+        finalized: 1,
+        targetOptions: { finality },
+      })
+
+      expect(publisher.controlRecords()).toEqual([
+        {
+          _CHANGE_SEQUENCE_NUMBER: expect.any(String),
+          _CHANGE_TYPE: 'UPSERT',
+          _id: 'test-pipe:finality',
+          record: 'finality',
+          namespace: 'test-pipe',
+          finalized_block_number: 1,
+          finalized_block_hash: '0x1',
+        },
+      ])
+      expect(publisher.published.every((message) => message.topic === 'blocks')).toBe(true)
+    })
+
+    it('declares the kind of every message, so a subscription selects rows positively', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1],
+        finalized: 1,
+        targetOptions: { finality },
+      })
+
+      expect(publisher.published.map((message) => message.attributes['_type'])).toEqual(['cdc', 'control'])
+    })
+
+    it('carries the producer-wide attributes onto the control record too', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1],
+        finalized: 1,
+        targetOptions: { finality, attributes: { chain: 'mock', table: 'blocks' } },
+      })
+
+      // A subscriber filtered on `table` would otherwise miss the statements about its own feed.
+      expect(publisher.published.map((message) => message.attributes['table'])).toEqual(['blocks', 'blocks'])
+    })
+
+    it('publishes the first one immediately, below the go-live block included', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1, 2],
+        finalized: 1,
+        targetOptions: { finality, publishFrom: 100 },
+      })
+
+      expect(publisher.operations()).toHaveLength(0)
+      expect(publisher.controlRecords()).toHaveLength(1)
+    })
+
+    it('advances off the producer’s own progress while the routes map nothing', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1, 2, 3],
+        finalized: 1,
+        finalizedAt: (block) => block * 100,
+        targetOptions: { topics: { blocks: { topic: 'blocks', map: () => [] } }, finality },
+      })
+
+      expect(publisher.controlRecords().map((record) => record['finalized_block_number'])).toEqual([100, 200, 300])
+    })
+
+    it('republishes only once the head has advanced past the throttle', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1, 2, 3, 4],
+        finalized: 1,
+        // +1, +1, +10 — only the last clears `everyBlocks: 10`, and the first is unconditional.
+        finalizedAt: (block) => (block < 4 ? block : 13),
+        targetOptions: { finality },
+      })
+
+      expect(publisher.controlRecords().map((record) => record['finalized_block_number'])).toEqual([1, 13])
+    })
+
+    it('never publishes a head below the last one, so the maximum a consumer keeps is safe', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1, 2],
+        finalized: 1,
+        finalizedAt: (block) => (block === 1 ? 50 : 20),
+        targetOptions: { finality: { everyBlocks: 1 } },
+      })
+
+      expect(publisher.controlRecords().map((record) => record['finalized_block_number'])).toEqual([50])
+    })
+
+    it('publishes none when the producer declares it off', async () => {
+      const publisher = new FakePublisher()
+
+      await driveBatches({ statePath: tempStatePath(), publisher, blocks: [1], finalized: 1 })
+
+      expect(publisher.controlRecords()).toHaveLength(0)
+    })
+  })
+
+  describe('cold start', () => {
+    it('refuses a run that would restart the change sequence', async () => {
+      await expect(
+        driveBatches({
+          statePath: tempStatePath(),
+          publisher: new FakePublisher(),
+          blocks: [1],
+          finalized: 1,
+          targetOptions: { allowColdStart: false },
+        }),
+      ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.COLD_START_REFUSED })
+    })
+
+    it('publishes nothing at all when it refuses', async () => {
+      const publisher = new FakePublisher()
+
+      await expect(
+        driveBatches({
+          statePath: tempStatePath(),
+          publisher,
+          blocks: [1],
+          finalized: 1,
+          targetOptions: { allowColdStart: false },
+        }),
+      ).rejects.toThrow()
+
+      expect(publisher.published).toHaveLength(0)
+      expect(publisher.setupCalls).toHaveLength(0)
+    })
+
+    it('needs no declaration on a warm restart', async () => {
+      const statePath = tempStatePath()
+      await driveBatches({ statePath, publisher: new FakePublisher(), blocks: [1], finalized: 1 })
+
+      const restarted = new FakePublisher()
+      await driveBatches({
+        statePath,
+        publisher: restarted,
+        blocks: [2],
+        finalized: 1,
+        targetOptions: { allowColdStart: false },
+      })
+
+      expect(restarted.operations()).toHaveLength(1)
+    })
+  })
+
   describe('startup failures', () => {
     it('requires an outbox route to remain configured during recovery', async () => {
       const statePath = tempStatePath()
@@ -935,24 +1199,15 @@ describe('pubsubTarget', () => {
         'network down',
       )
 
-      // The stream keeps a route, so the target itself is valid — but the pending row's route is
-      // now a signal route, and its CDC encoder is gone. Same failure as deleting it outright.
+      // The target is valid on its own terms — it just no longer configures the route the
+      // pending row belongs to, so recovery cannot encode it.
       await expect(
         driveBatches({
           statePath,
           publisher: new FakePublisher(),
           blocks: [],
           finalized: 0,
-          targetOptions: {
-            topics: {},
-            signals: {
-              blocks: {
-                topic: 'blocks',
-                map: () => [],
-                fork: { mode: 'finalized-only' },
-              },
-            },
-          },
+          targetOptions: { topics: { renamed: blocksRoute() } as never },
         }),
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED })
     })
@@ -1078,7 +1333,7 @@ describe('pubsubTarget', () => {
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH })
     })
 
-    it('refuses ambiguous legacy encoder metadata while the outbox is pending', async () => {
+    it('refuses a wire config it cannot compare, while the outbox is pending', async () => {
       const statePath = tempStatePath()
       const failing = new FakePublisher()
       failing.failOn = () => new Error('network down')
@@ -1095,32 +1350,6 @@ describe('pubsubTarget', () => {
       await expect(
         driveBatches({ statePath, publisher: new FakePublisher(), blocks: [], finalized: 0 }),
       ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH })
-    })
-
-    it('drains a pending v2 CDC outbox after migrating its route metadata', async () => {
-      const statePath = tempStatePath()
-      const failing = new FakePublisher()
-      failing.failOn = () => new Error('network down')
-
-      await expect(driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 0 })).rejects.toThrow(
-        'network down',
-      )
-
-      const state = new SqlitePubsubState({ path: statePath })
-      await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
-      await state.setMeta('wire_config', JSON.stringify(['test-pipe', false, false, [['blocks', 'canonical']]]))
-      await state.close()
-
-      const restarted = new FakePublisher()
-      await driveBatches({ statePath, publisher: restarted, blocks: [], finalized: 0 })
-
-      expect(restarted.published).toHaveLength(1)
-      const migrated = new SqlitePubsubState({ path: statePath })
-      await migrated.open({ cursorKey: 'test-pipe', logger: testLogger() })
-      expect(await migrated.getMeta('wire_config')).toBe(
-        JSON.stringify(['test-pipe', false, false, [['cdc:blocks', 'canonical']]]),
-      )
-      await migrated.close()
     })
 
     it('rechecks a custom encoder output size during recovery', async () => {

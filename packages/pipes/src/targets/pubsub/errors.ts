@@ -72,6 +72,11 @@ export const PUBSUB_ERROR_CODES = {
    * another producer's file would hand its consumers this pipe's operations.
    */
   STATE_IDENTITY_MISMATCH: 'E2419',
+  /**
+   * The run started with no state under a namespace that may already have published. Resuming
+   * one restarts the change sequence, and every affected row freezes silently downstream.
+   */
+  COLD_START_REFUSED: 'E2420',
   /** Wire configuration changed incompatibly while reusing recovery state. */
   STATE_WIRE_CONFIG_MISMATCH: 'E2421',
   /** A row is not an object, has an invalid `_id`, or owns target-generated CDC fields. */
@@ -80,10 +85,13 @@ export const PUBSUB_ERROR_CODES = {
   ROUTE_NOT_CONFIGURED: 'E2423',
   /** The producer-wide BigQuery CDC change sequence cannot advance safely. */
   SEQUENCE_EXHAUSTED: 'E2424',
-  /** No CDC or signal routes were configured. */
+  /** No routes were configured. */
   NO_ROUTES: 'E2425',
-  /** A signal draft lacks a usable chain attribution. */
-  INVALID_SIGNAL_BLOCK: 'E2426',
-  /** A finalized-only signal was mapped from an unfinalized block. */
-  SIGNAL_NOT_FINALIZED: 'E2427',
+  /**
+   * The producer feeds more than one topic, which splits its sequence counter and puts a hole
+   * in every topic's run. Declare `sequenceBarrier: false` if no consumer reads the barrier.
+   */
+  MULTIPLE_TOPICS: 'E2428',
+  /** A batch's operations step backwards in block order, which voids the block boundary. */
+  BLOCK_ORDER: 'E2429',
 } as const
