@@ -18,12 +18,12 @@ import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 import {
   CdcEncoder,
   MAX_SEQUENCE_VALUE,
+  PROTOCOL_ATTRIBUTES,
   PubsubOp,
   assertPublishRequestSize,
   assertWireLimits,
   buildAttributes,
   canonicalCdcMessageBytes,
-  canonicalJson,
   encodeCdcMessage,
   encodeRow,
   readRowId,
@@ -39,16 +39,13 @@ import {
   resolvePubsubClient,
 } from './publisher.js'
 import {
-  META_FORK_EPOCH,
   OutboxRow,
-  PendingCdcOperation,
   PendingOperation,
-  PendingSignalOperation,
   PubsubState,
   RouteMode,
   RowIdSource,
-  SignalForkContext,
   SqlitePubsubState,
+  stableAttributes,
 } from './pubsub-state.js'
 
 export type MessageDraft = {
@@ -124,64 +121,6 @@ export type TopicRoute<Data> = {
   rollbackWhenMissing?: (draft: MessageDraft & { id: string }) => RollbackInverse
 }
 
-export type SignalDraft = {
-  /**
-   * The message body, published verbatim as canonical JSON. No CDC envelope is added, so the
-   * route owns the whole schema — including any id, type tag, or epoch a consumer needs.
-   */
-  data: object
-  /**
-   * The block this signal describes. Drives the go-live cut and the `finalized-only` check; it
-   * is never used to retract the message, because a signal has no compensating operation.
-   */
-  block: BlockCursor
-  /** User attributes for subscription filtering. `_`-prefixed names are reserved, `goog…` by GCP. */
-  attributes?: Record<string, string>
-  /**
-   * Available only when `publish.messageOrdering` is enabled. Defaults to the topic name, so a
-   * route that does not set one publishes its whole topic on a single ordered partition.
-   */
-  orderingKey?: string
-}
-
-/** A boundary signal is emitted by the fork itself, so it has no block of its own to declare. */
-export type ForkSignalDraft = Omit<SignalDraft, 'block'>
-
-/**
- * A route that publishes application messages instead of BigQuery CDC rows.
- *
- * Signals are fire-and-forget: they carry no row identity, never enter the rollback manifest,
- * and cannot be retracted. That is the whole trade — a signal route buys an arbitrary payload
- * schema at the cost of the fork repair a `TopicRoute` gets for free. `fork` is how the route
- * pays for it, and there is no default: every route states which of the two strategies it uses.
- */
-export type SignalRoute<Data> = {
-  topic: string
-  /**
-   * Map one batch of this stream's data to signals. Must be pure and deterministic (no wall
-   * clock, no randomness): a replay after a crash must reproduce identical bytes.
-   *
-   * `epoch` is the durable fork counter, incremented once per fork and readable by consumers to
-   * discard messages from a branch that has since been orphaned. Include it in `data` if the
-   * consumer needs to reason about forks at all.
-   */
-  map: (batch: { data: Data; ctx: BatchContext; epoch: number }) => SignalDraft[]
-  /**
-   * How this route survives a chain reorg.
-   *
-   * `boundary` — the route publishes unfinalized data and accepts that some of it is orphaned.
-   * On a fork the target publishes one message built by `map` ahead of every CDC compensation,
-   * carrying the new `epoch` and the block the feed rewound to. The consumer is expected to
-   * discard everything it received above that block, from the previous epoch, on its own.
-   *
-   * `finalized-only` — the route never publishes anything a fork could orphan, so no boundary
-   * message is needed. Enforced: a draft above the finalized head is a fatal `E2427` rather
-   * than an unretractable message on the wire. Reading the finalized stream satisfies this
-   * trivially.
-   */
-  fork: { mode: 'boundary'; map: (context: SignalForkContext) => ForkSignalDraft } | { mode: 'finalized-only' }
-}
-
 export type PubsubTargetOptions<T> = {
   /** A constructed client, or `ClientConfig` passed to `new PubSub(...)`. Auth = ADC / emulator. */
   pubsub: PubSub | ClientConfig
@@ -196,10 +135,34 @@ export type PubsubTargetOptions<T> = {
    */
   topics?: { [K in keyof NoInfer<T>]?: TopicRoute<NoInfer<T>[K]> }
   /**
-   * Routes that publish application messages without the CDC envelope. Same stream keys as
-   * `topics`, and a stream may feed both. At least one route across the two is required.
+   * Attributes that are constant for this producer — `chain` and `table`, typically. They ride
+   * every message, control records included, so a subscription filtered on them still receives
+   * the statements the producer makes about its own feed. Per-draft `attributes` add to these.
    */
-  signals?: { [K in keyof NoInfer<T>]?: SignalRoute<NoInfer<T>[K]> }
+  attributes?: Record<string, string>
+  /**
+   * The gap-free sequence run, on by default. A subscriber holding a contiguous run of change
+   * sequence numbers is then missing no operation the producer committed inside it.
+   *
+   * Keeping it means one topic per producer: the counter is producer-wide, so a second topic
+   * puts a hole in both runs. Set `false` to declare that no consumer of this producer reads
+   * the barrier — that, and only that, permits several topics and unordered blocks.
+   */
+  sequenceBarrier?: boolean
+  /**
+   * How often the source's finalized head is republished as a control record, or `false` to
+   * publish none. It rides the producer's own progress rather than row traffic, so a quiet
+   * table's consumers keep receiving it.
+   */
+  finality?: FinalityOptions | false
+  /**
+   * Permit a run that starts with no state. Off by default, because a cold start under a
+   * namespace that has already published restarts the change sequence: BigQuery discards the
+   * republished lower numbers as stale and every affected row freezes with no downstream
+   * symptom. Recovery from lost state is a fresh namespace and a consumer re-bootstrap, never
+   * a restart — so set this only to bootstrap a namespace that has never published.
+   */
+  allowColdStart?: boolean
   /** Cursor key inside the state file. Defaults to the pipe id (the CursorKey rule, ADR-2). */
   settings?: { id?: string }
   publish?: {
@@ -245,6 +208,13 @@ export type PubsubTargetOptions<T> = {
   publisher?: Publisher
 }
 
+export type FinalityOptions = {
+  /** Republish once the finalized head has advanced this many blocks. Default 100. */
+  everyBlocks?: number
+  /** …or once this many seconds have passed, whichever comes first. Default 30. */
+  everySeconds?: number
+}
+
 const CAP_BYTES_PER_SECOND = 1024 * 1024
 const META_GO_LIVE = 'go_live_block'
 const META_WIRE_CONFIG = 'wire_config'
@@ -260,7 +230,6 @@ const PIPELINE_LAG_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60]
 type DrainSample = { elapsed: number; bytes: number; saturation: number }
 
 type ResolvedRoute = {
-  kind: 'cdc'
   stream: string
   topic: string
   mode: RouteMode
@@ -268,41 +237,50 @@ type ResolvedRoute = {
   route: TopicRoute<any>
 }
 
-type ResolvedSignalRoute = {
-  kind: 'signal'
-  stream: string
-  topic: string
-  route: SignalRoute<any>
-}
+type EncoderKind = 'canonical' | 'custom'
 
-type AnyResolvedRoute = ResolvedRoute | ResolvedSignalRoute
-
-type EncoderKind = 'canonical' | 'custom' | 'signal'
+/** The one control record kind: the source's finalized head, as a reference value. */
+const FINALITY_RECORD = 'finality'
+const DEFAULT_FINALITY_EVERY_BLOCKS = 100
+const DEFAULT_FINALITY_EVERY_SECONDS = 30
 
 export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
   const messageOrdering = options.publish?.messageOrdering ?? false
   const topicSetup: TopicSetup = options.topicSetup ?? 'validate'
 
+  const sequenceBarrier = options.sequenceBarrier ?? true
+
   const routes: ResolvedRoute[] = Object.entries(options.topics ?? {})
     .filter((entry): entry is [string, TopicRoute<any>] => Boolean(entry[1]))
     .map(([stream, route]) => ({
-      kind: 'cdc' as const,
       stream,
       topic: route.topic,
       mode: route.mode ?? 'event',
       encoderKind: route.encode ? 'custom' : 'canonical',
       route,
     }))
-  const signals: ResolvedSignalRoute[] = Object.entries(options.signals ?? {})
-    .filter((entry): entry is [string, SignalRoute<any>] => Boolean(entry[1]))
-    .map(([stream, route]) => ({ kind: 'signal' as const, stream, topic: route.topic, route }))
-  const allRoutes: AnyResolvedRoute[] = [...routes, ...signals]
+  const topics = [...new Set(routes.map((route) => route.topic))]
 
   // Refused here rather than at first write: with no routes there is nothing the state file can
   // be opened for, and taking its exclusive lock only to fail would strand a concurrent retry.
-  if (!allRoutes.length) {
-    throw new PubsubTargetError(PUBSUB_ERROR_CODES.NO_ROUTES, 'Configure at least one CDC topic or signal route.')
+  if (!routes.length) {
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.NO_ROUTES, 'Configure at least one topic route.')
   }
+
+  if (sequenceBarrier && topics.length > 1) {
+    throw new PubsubTargetError(PUBSUB_ERROR_CODES.MULTIPLE_TOPICS, [
+      `This producer feeds ${topics.length} topics (${topics.join(', ')}), and its change sequence is one ` +
+        'counter shared across all of them — so neither topic carries a contiguous run of it.',
+      'Run one producer per topic, or set `sequenceBarrier: false` to declare that no consumer of this ' +
+        'producer relies on a contiguous sequence run.',
+    ])
+  }
+
+  validateUserAttributes(options.attributes, {
+    topic: topics[0],
+    route: 'attributes',
+    protocolAttributes: PROTOCOL_ATTRIBUTES.length,
+  })
 
   const state: PubsubState =
     'path' in options.state
@@ -319,20 +297,30 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
       const namespace = options.namespace ?? id ?? options.settings?.id ?? 'pipe'
       const uidAttribute = options.publish?.uidAttribute ?? false
 
+      const statePath = 'path' in options.state ? options.state.path : 'custom'
       const { coldStart } = await state.open({ cursorKey: options.settings?.id ?? id ?? '', logger })
 
       // Everything past `open` runs under cleanup: the state holds an exclusive lock on its
       // file, so a failure in topic validation or the recovery drain would otherwise leave it
       // locked for the life of the process and make the retry fail as a second producer.
       try {
+        if (coldStart && !options.allowColdStart) {
+          throw new PubsubTargetError(PUBSUB_ERROR_CODES.COLD_START_REFUSED, [
+            `The PubSub state at "${statePath}" is empty, so this run would restart the change sequence of ` +
+              `namespace "${namespace}" at zero.`,
+            'If that namespace has already published, BigQuery discards the republished lower numbers as ' +
+              'stale and every affected row freezes with no downstream symptom — which is why recovery from ' +
+              'lost state is a fresh namespace and a consumer re-bootstrap, not a restart.',
+            'Set `allowColdStart: true` to bootstrap a namespace that has never published.',
+          ])
+        }
+
         await bindWireConfig(state, {
           namespace,
           uidAttribute,
           messageOrdering,
-          encoders: [
-            ...routes.map(({ stream, encoderKind }) => [`cdc:${stream}`, encoderKind] as [string, EncoderKind]),
-            ...signals.map(({ stream }) => [`signal:${stream}`, 'signal'] as [string, EncoderKind]),
-          ],
+          attributes: options.attributes ?? {},
+          encoders: routes.map(({ stream, encoderKind }) => [stream, encoderKind] as [string, EncoderKind]),
         })
         await run()
       } finally {
@@ -352,24 +340,21 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
           publisher = new GooglePubsubPublisher(client, publisherOptions)
         }
 
-        await publisher.setup([...new Set(allRoutes.map((r) => r.topic))], logger)
+        await publisher.setup(topics, logger)
 
         logger.info({
           message:
-            `publishing ${allRoutes.length} route(s) to PubSub — message ordering ${messageOrdering ? 'enabled' : 'disabled'}, ` +
+            `publishing ${routes.length} route(s) to PubSub — message ordering ${messageOrdering ? 'enabled' : 'disabled'}, ` +
             `namespace "${namespace}", ` +
-            `state "${'path' in options.state ? options.state.path : 'custom'}"`,
-          topics: allRoutes.map((r) => `${r.kind}:${r.stream} → ${r.topic}${r.kind === 'cdc' ? ` (${r.mode})` : ''}`),
+            `state "${statePath}"`,
+          topics: routes.map((r) => `${r.stream} → ${r.topic} (${r.mode})`),
         })
 
         if (coldStart) {
-          // A cold start on an already-live namespace means a lost sequencer: the producer can
-          // hand out change sequence numbers consumers already hold.
           logger.warn(
-            `PubSub state at "${'path' in options.state ? options.state.path : 'custom'}" started EMPTY under ` +
-              `namespace "${namespace}". On a first run this is expected. On an existing feed it means the ` +
-              `sequencer was reset, so destinations can ignore newer changes as stale. Recover with a fresh ` +
-              `namespace and a re-bootstrap, not with a restart.`,
+            `PubSub state at "${statePath}" started EMPTY under namespace "${namespace}", and ` +
+              '`allowColdStart` permitted it. The change sequence restarts at zero: if this namespace has ' +
+              'ever published, destinations now discard its newer changes as stale.',
           )
         }
 
@@ -383,11 +368,15 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
         context = new WriteContext({
           state,
           publisher,
-          routes: allRoutes,
+          routes,
+          topics,
           namespace,
           messageOrdering,
           logger,
           uidAttribute,
+          constantAttributes: options.attributes ?? {},
+          sequenceBarrier,
+          finality: options.finality ?? {},
           assumeNoForks: options.assumeNoForks ?? false,
           finalizedStream: finalizedStream ?? false,
           publishFrom: options.publishFrom ?? 'latest',
@@ -416,7 +405,8 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
         ])
       }
 
-      const safe = await state.fork(canonicalBlocks, (fork) => context?.forkSignals(fork) ?? [])
+      const safe = await state.fork(canonicalBlocks)
+      context?.rewind()
 
       // Compensations go out before anything later on their partitions, and before the source
       // re-streams the canonical blocks.
@@ -430,11 +420,15 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
 type WriteContextOptions = {
   state: PubsubState
   publisher: Publisher
-  routes: AnyResolvedRoute[]
+  routes: ResolvedRoute[]
+  topics: string[]
   namespace: string
   messageOrdering: boolean
   logger: Logger
   uidAttribute: boolean
+  constantAttributes: Record<string, string>
+  sequenceBarrier: boolean
+  finality: FinalityOptions | false
   assumeNoForks: boolean
   finalizedStream: boolean
   publishFrom: number | 'latest'
@@ -443,9 +437,7 @@ type WriteContextOptions = {
 
 class WriteContext {
   readonly #options: WriteContextOptions
-  readonly #routesByIdentity: Map<string, AnyResolvedRoute>
-  readonly #cdcRoutes: ResolvedRoute[]
-  readonly #signalRoutes: ResolvedSignalRoute[]
+  readonly #routesByStream: Map<string, ResolvedRoute>
   #metrics?: PubsubMetrics
   #goLive?: number
   #batches = 0
@@ -453,12 +445,19 @@ class WriteContext {
   #skippedLogged = false
   #lagWarned = false
   #deferredDrains: DrainSample[] = []
+  /** Highest block sequenced so far, for the forward block-order check. Reset by a fork. */
+  #lastBlock = -1
+  /** Last finalized head published as a control record, and when. Deliberately not durable. */
+  #watermark?: { block: number; at: number }
 
   constructor(options: WriteContextOptions) {
     this.#options = options
-    this.#routesByIdentity = new Map(options.routes.map((route) => [`${route.kind}:${route.stream}`, route]))
-    this.#cdcRoutes = options.routes.filter((route): route is ResolvedRoute => route.kind === 'cdc')
-    this.#signalRoutes = options.routes.filter((route): route is ResolvedSignalRoute => route.kind === 'signal')
+    this.#routesByStream = new Map(options.routes.map((route) => [route.stream, route]))
+  }
+
+  /** A fork rewinds the cursor, so the next forward batch legitimately steps back in blocks. */
+  rewind(): void {
+    this.#lastBlock = -1
   }
 
   async write({ data, ctx }: { data: any; ctx: BatchContext }): Promise<void> {
@@ -498,15 +497,7 @@ class WriteContext {
       )
 
       for (const operation of operations) {
-        this.#metrics.ops.inc(
-          {
-            id: ctx.id,
-            topic: operation.topic,
-            kind: operation.kind,
-            operation: operation.kind === 'cdc' ? operation.op : operation.signalType,
-          },
-          1,
-        )
+        this.#metrics.ops.inc({ id: ctx.id, topic: operation.topic, kind: operation.kind, operation: operation.op }, 1)
       }
 
       let publishAckAt: number | undefined
@@ -539,25 +530,18 @@ class WriteContext {
    * BigQuery metric this one is read beside excludes its own post-commit for the same reason.
    */
   async drain({ span, fork }: { span?: Profiler; fork?: boolean } = {}): Promise<number> {
-    const { state, publisher, namespace, uidAttribute, logger } = this.#options
+    const { state, publisher, logger } = this.#options
 
     const rows = await state.pending()
     if (!rows.length) return Date.now()
 
-    const wire = rows.map((row) => this.#wireMessage(row, { namespace, uidAttribute }))
+    const wire = rows.map((row) => this.#wireMessage(row))
 
     if (fork) {
-      // A signal never compensates anything, so it is not fork blast radius and must not land in
-      // this histogram. The CDC remainder can still include rows a failed pre-fork publish left
-      // queued — the outbox does not mark compensations, so this stays an upper bound.
-      const compensations = rows.filter((row) => row.kind === 'cdc').length
-      const signals = rows.length - compensations
-
-      this.#metrics?.compensations.observe(compensations)
-      logger.info(
-        `publishing ${compensations} compensating operation(s) after a fork` +
-          (signals ? ` and ${signals} boundary signal(s)` : ''),
-      )
+      // The outbox does not mark compensations, so a row a failed pre-fork publish left queued
+      // counts here too — this is an upper bound on the fork's blast radius.
+      this.#metrics?.compensations.observe(rows.length)
+      logger.info(`publishing ${rows.length} compensating operation(s) after a fork`)
     }
 
     const startedAt = Date.now()
@@ -726,12 +710,12 @@ class WriteContext {
     )
   }
 
-  async #map(data: any, ctx: BatchContext): Promise<PendingOperation[]> {
+  #map(data: any, ctx: BatchContext): PendingOperation[] {
     const operations: PendingOperation[] = []
     const finalizedNumber = ctx.stream.head.finalized?.number
     const goLive = this.#goLive ?? 0
 
-    for (const resolved of this.#cdcRoutes) {
+    for (const resolved of this.#options.routes) {
       const streamData = data?.[resolved.stream]
       if (streamData === undefined) continue
 
@@ -769,124 +753,103 @@ class WriteContext {
       }
     }
 
-    // Read once per batch, and only when a route can use it: the fork counter lives in the same
-    // state file every commit already touches.
-    const epoch = this.#signalRoutes.length ? await this.#forkEpoch() : 0
+    this.#assertBlockOrder(operations)
 
-    for (const resolved of this.#signalRoutes) {
-      const streamData = data?.[resolved.stream]
-      if (streamData === undefined) continue
-
-      for (const draft of resolved.route.map({ data: streamData, ctx, epoch })) {
-        this.#assertSignalDraftBlock(draft, resolved)
-
-        if (draft.block.number < goLive) continue
-
-        this.#assertSignalFinality(draft, resolved, finalizedNumber)
-
-        operations.push(this.#toSignalOperation({ draft, resolved, signalType: 'data' }))
-      }
-    }
+    // Appended after the rows, so a subscriber reads the watermark against a run that already
+    // contains everything this batch produced.
+    operations.push(...this.#finalityRecords(ctx))
 
     return operations
   }
 
-  async #forkEpoch(): Promise<number> {
-    return Number((await this.#options.state.getMeta(META_FORK_EPOCH)) ?? '0')
+  /**
+   * Forward operations take their numbers in block order, which is what turns a contiguous run
+   * into a block boundary: reaching the first operation of block N+1 proves the producer's
+   * output for block N is whole. A mapper that steps backwards would silently retire that
+   * reading for every consumer, so the batch is refused instead.
+   */
+  #assertBlockOrder(operations: PendingOperation[]): void {
+    if (!this.#options.sequenceBarrier) return
+
+    for (const operation of operations) {
+      if (operation.blockNumber < this.#lastBlock) {
+        throw new PubsubTargetError(PUBSUB_ERROR_CODES.BLOCK_ORDER, [
+          `Route "${operation.route}" produced an operation for block ${formatBlock(operation.blockNumber)} ` +
+            `after one for block ${formatBlock(this.#lastBlock)}.`,
+          'Operations are sequenced in the order they are mapped, and consumers read a contiguous ' +
+            'sequence run as a block boundary — a backwards step makes that reading wrong.',
+          'Emit drafts in block order (across routes too, when several feed one topic), or set ' +
+            '`sequenceBarrier: false` if no consumer relies on it.',
+        ])
+      }
+
+      this.#lastBlock = operation.blockNumber
+    }
   }
 
   /**
-   * One boundary message per `boundary` route, built inside the fork transaction so it shares the
-   * epoch the fork is about to persist. A `finalized-only` route publishes nothing a fork can
-   * orphan, so it needs no boundary.
+   * The source's finalized head, as a reference value. It rides a control record rather than an
+   * attribute on rows because the maximum of nothing is nothing: stamped on rows it would stop
+   * advancing whenever the table is quiet, leaving a sparse feed's consumers as stale as the last
+   * row. Monotone, so a consumer keeps the maximum it has seen and a skipped one costs nothing —
+   * which is also why the producer keeps no durable record of what it last published.
    */
-  forkSignals(context: SignalForkContext): PendingSignalOperation[] {
-    return this.#signalRoutes.flatMap((resolved) => {
-      if (resolved.route.fork.mode !== 'boundary') return []
+  #finalityRecords(ctx: BatchContext): PendingOperation[] {
+    const finality = this.#options.finality
+    if (finality === false) return []
 
-      const draft = resolved.route.fork.map(context)
+    const finalized = ctx.stream.head.finalized
+    if (!finalized) return []
 
-      // A dead-end fork rewinds below every recorded block, so there is no cursor to attribute
-      // the boundary to. Block 0 is the honest floor — `deadEnd` in the payload carries the rest.
-      const block = context.rollbackTo ?? { number: 0 }
+    const now = Date.now()
+    if (!this.#due(finalized.number, now, finality)) return []
 
-      return [this.#toSignalOperation({ draft: { ...draft, block }, resolved, signalType: 'fork' })]
+    this.#watermark = { block: finalized.number, at: now }
+
+    const id = `${this.#options.namespace}:${FINALITY_RECORD}`
+    const payload = encodeRow({
+      _id: id,
+      record: FINALITY_RECORD,
+      namespace: this.#options.namespace,
+      finalized_block_number: finalized.number,
+      finalized_block_hash: finalized.hash ?? null,
+    })
+
+    return this.#options.topics.map((topic) => {
+      const operation: PendingOperation = {
+        kind: 'control',
+        // No route owns it: a control record speaks for the producer, and is always canonical.
+        route: '',
+        topic,
+        orderingKey: this.#options.messageOrdering ? topic : '',
+        // Revised in place under one id, so a destination lands one current row per producer.
+        mode: 'materialized',
+        op: 'upsert',
+        id,
+        idSource: 'row',
+        attributes: {},
+        payload,
+        blockNumber: finalized.number,
+        rollbackable: false,
+      }
+
+      this.#assertOperationSize(operation, undefined, FINALITY_RECORD)
+
+      return operation
     })
   }
 
-  #assertSignalDraftBlock(draft: SignalDraft, resolved: ResolvedSignalRoute): void {
-    if (draft.block && Number.isInteger(draft.block.number) && draft.block.number >= 0) return
+  #due(finalizedNumber: number, now: number, finality: FinalityOptions): boolean {
+    // The first one goes out immediately, below go-live included: a consumer starting today needs
+    // a floor to reason against without waiting for the next republication interval.
+    if (!this.#watermark) return true
 
-    throw new PubsubTargetError(
-      PUBSUB_ERROR_CODES.INVALID_SIGNAL_BLOCK,
-      `Signal route "${resolved.stream}" produced a draft without a usable block.number.`,
-    )
-  }
+    if (finalizedNumber <= this.#watermark.block) return false
 
-  /**
-   * A `finalized-only` route trades the boundary message for a promise that it never publishes
-   * anything a fork could orphan. Broken here, the message would already be unretractable on the
-   * wire, so it is refused before the batch commits.
-   */
-  #assertSignalFinality(draft: SignalDraft, resolved: ResolvedSignalRoute, finalizedNumber?: number): void {
-    if (resolved.route.fork.mode !== 'finalized-only') return
-    if (this.#options.finalizedStream) return
-    if (draft.block.number <= (finalizedNumber ?? -1)) return
+    const blocks = finality.everyBlocks ?? DEFAULT_FINALITY_EVERY_BLOCKS
+    const seconds = finality.everySeconds ?? DEFAULT_FINALITY_EVERY_SECONDS
 
-    throw new PubsubTargetError(PUBSUB_ERROR_CODES.SIGNAL_NOT_FINALIZED, [
-      `Signal route "${resolved.stream}" mapped block ${formatBlock(draft.block.number)}, above the ` +
-        `finalized head ${finalizedNumber === undefined ? '(none reported)' : formatBlock(finalizedNumber)}, ` +
-        'while declaring `fork.mode: "finalized-only"`.',
-      'Read the finalized stream, hold the signal until its block finalizes, or switch the route to ' +
-        '`fork.mode: "boundary"` and publish a compensating boundary message on a fork.',
-    ])
-  }
-
-  #toSignalOperation({
-    draft,
-    resolved,
-    signalType,
-  }: {
-    draft: SignalDraft
-    resolved: ResolvedSignalRoute
-    signalType: 'data' | 'fork'
-  }): PendingSignalOperation {
-    const { messageOrdering, namespace, uidAttribute } = this.#options
-    const where = { topic: resolved.topic, route: resolved.stream }
-
-    if (draft.orderingKey !== undefined && !messageOrdering) {
-      throw new PubsubTargetError(
-        PUBSUB_ERROR_CODES.ORDERING_KEY_NOT_SUPPORTED,
-        `Signal route "${resolved.stream}" set an ordering key while message ordering is disabled.`,
-      )
-    }
-
-    const orderingKey = messageOrdering ? (draft.orderingKey ?? resolved.topic) : ''
-    const attributes = draft.attributes ?? {}
-
-    validateUserAttributes(attributes, { ...where, protocolAttributes: uidAttribute ? 1 : 0 })
-    assertWireLimits({ orderingKey, uidNamespace: uidAttribute ? namespace : undefined }, where)
-
-    const operation: PendingSignalOperation = {
-      kind: 'signal',
-      route: resolved.stream,
-      topic: resolved.topic,
-      orderingKey,
-      attributes,
-      payload: new TextEncoder().encode(canonicalJson(draft.data)),
-      blockNumber: draft.block.number,
-      signalType,
-    }
-
-    // Sized at the worst case the row can reach once the state assigns it a sequence: PubSub
-    // rejects an oversized request at publish time, by which point the operation is durable.
-    const wire = this.#wireSignalMessage(
-      { ...operation, rowId: 0, seq: MAX_SEQUENCE_VALUE },
-      { namespace, uidAttribute },
-    )
-    assertPublishRequestSize({ ...wire, payloadBytes: wire.payload.byteLength }, { route: resolved.stream })
-
-    return operation
+    return finalizedNumber - this.#watermark.block >= blocks || now - this.#watermark.at >= seconds * 1000
   }
 
   #assertDraftBlock(draft: MessageDraft, resolved: ResolvedRoute): void {
@@ -910,7 +873,7 @@ class WriteContext {
     index: number
     finalizedNumber?: number
     ctx: BatchContext
-  }): PendingCdcOperation {
+  }): PendingOperation {
     const { namespace, messageOrdering, uidAttribute } = this.#options
     const op: PubsubOp = draft.op ?? 'upsert'
 
@@ -929,7 +892,8 @@ class WriteContext {
     validateUserAttributes(attributes, {
       topic: resolved.topic,
       route: resolved.stream,
-      protocolAttributes: uidAttribute ? 1 : 0,
+      // `_type` always, `_uid` on request, and the producer-wide set every message carries.
+      protocolAttributes: 1 + (uidAttribute ? 1 : 0) + Object.keys(this.#options.constantAttributes).length,
     })
 
     // Every limit the service enforces is checked HERE, before the operation becomes durable.
@@ -1049,7 +1013,7 @@ class WriteContext {
   }: {
     draft: MessageDraft & { id: string }
     resolved: ResolvedRoute
-  }): PendingCdcOperation['inverse'] {
+  }): PendingOperation['inverse'] {
     const inverse = resolved.route.rollbackWhenMissing!(draft)
 
     if (inverse.op === 'delete') {
@@ -1059,8 +1023,14 @@ class WriteContext {
     return { op: 'upsert', payload: encodeRow(inverse.data) }
   }
 
-  #wireMessage(row: OutboxRow, options: { namespace: string; uidAttribute: boolean }) {
-    const route = this.#routesByIdentity.get(`${row.kind}:${row.route}`)
+  /**
+   * A control record states something about the feed rather than about a row, so it is always
+   * canonical: a route's encoder speaks that route's row schema and has nothing to say here.
+   */
+  #encoderFor(row: OutboxRow): CdcEncoder | undefined {
+    if (row.kind === 'control') return undefined
+
+    const route = this.#routesByStream.get(row.route)
     if (!route) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED, [
         `The durable PubSub outbox contains an operation for route "${row.route}", but that route is not configured.`,
@@ -1068,26 +1038,30 @@ class WriteContext {
       ])
     }
 
-    const wire =
-      row.kind === 'signal'
-        ? this.#wireSignalMessage(row, options)
-        : this.#wireMessageWithEncoder(
-            row as OutboxRow & { op: PubsubOp; id: string },
-            (route as ResolvedRoute).route.encode,
-            options,
-          )
-    assertPublishRequestSize({ ...wire, payloadBytes: wire.payload.byteLength }, { route: route.stream })
+    return route.route.encode
+  }
+
+  #wireMessage(row: OutboxRow): PublishMessage {
+    const payload = encodeCdcMessage(row, this.#encoderFor(row))
+    const attributes = buildAttributes(row, this.#attributeOptions())
+    const wire = { rowId: row.rowId, topic: row.topic, orderingKey: row.orderingKey, attributes, payload }
+
+    assertPublishRequestSize({ ...wire, payloadBytes: payload.byteLength }, { route: row.route || row.kind })
 
     return wire
   }
 
-  #assertOperationSize(operation: PendingCdcOperation, encode: CdcEncoder | undefined, route: string): void {
-    const preview = { ...operation, rowId: 0, seq: MAX_SEQUENCE_VALUE }
-    const options = {
+  #attributeOptions(): { namespace: string; uidAttribute: boolean; constant: Record<string, string> } {
+    return {
       namespace: this.#options.namespace,
       uidAttribute: this.#options.uidAttribute,
+      constant: this.#options.constantAttributes,
     }
-    const attributes = buildAttributes(preview, options)
+  }
+
+  #assertOperationSize(operation: PendingOperation, encode: CdcEncoder | undefined, route: string): void {
+    const preview = { ...operation, rowId: 0, seq: MAX_SEQUENCE_VALUE }
+    const attributes = buildAttributes(preview, this.#attributeOptions())
     // A custom encoder can change the document arbitrarily, so it must run before commit.
     // The canonical path can derive the exact size from the already encoded row instead.
     const payloadBytes = encode ? encodeCdcMessage(preview, encode).byteLength : canonicalCdcMessageBytes(preview)
@@ -1097,41 +1071,6 @@ class WriteContext {
       { route },
     )
   }
-
-  #wireMessageWithEncoder(
-    row: OutboxRow & { op: PubsubOp; id: string },
-    encode: CdcEncoder | undefined,
-    options: { namespace: string; uidAttribute: boolean },
-  ) {
-    const payload = encodeCdcMessage(row, encode)
-    const attributes = buildAttributes(row, options)
-
-    return { rowId: row.rowId, topic: row.topic, orderingKey: row.orderingKey, attributes, payload }
-  }
-
-  /**
-   * A signal's payload is final before it reaches the outbox, so this only attaches attributes.
-   * `buildAttributes` derives `_uid` from topic/orderingKey/seq alone; the `op` and `id` it takes
-   * are inert here and exist only to satisfy the shared CDC shape.
-   */
-  #wireSignalMessage(
-    row: Pick<OutboxRow, 'rowId' | 'topic' | 'orderingKey' | 'attributes' | 'payload' | 'seq'>,
-    options: { namespace: string; uidAttribute: boolean },
-  ) {
-    const attributes = buildAttributes({ ...row, op: 'upsert', id: '' }, options)
-
-    return { rowId: row.rowId, topic: row.topic, orderingKey: row.orderingKey, attributes, payload: row.payload }
-  }
-}
-
-/**
- * Read a stored encoder key as a route identity. Schema 2 keyed these by bare stream name, before
- * signal routes made a stream ambiguous; anything without a kind prefix is one of those and was a
- * CDC route by construction. Decided from the stored key's own shape, so the reading does not
- * shift with whatever the current configuration happens to contain.
- */
-function routeIdentity(stream: string): string {
-  return stream.startsWith('cdc:') || stream.startsWith('signal:') ? stream : `cdc:${stream}`
 }
 
 async function bindWireConfig(
@@ -1140,11 +1079,13 @@ async function bindWireConfig(
     namespace: string
     uidAttribute: boolean
     messageOrdering: boolean
+    attributes: Record<string, string>
     encoders: [stream: string, kind: EncoderKind][]
   },
 ): Promise<void> {
   const encoders = [...config.encoders].sort(([left], [right]) => left.localeCompare(right))
-  const current = JSON.stringify([config.namespace, config.uidAttribute, config.messageOrdering, encoders])
+  const core = [config.namespace, config.uidAttribute, config.messageOrdering, stableAttributes(config.attributes)]
+  const current = JSON.stringify([...core, encoders])
   const stored = await state.getMeta(META_WIRE_CONFIG)
 
   if (stored === undefined) {
@@ -1156,15 +1097,14 @@ async function bindWireConfig(
     return
   }
 
-  const previous = JSON.parse(stored) as [string, boolean, boolean, [string, EncoderKind][]?]
-  const sameCore =
-    previous[0] === config.namespace && previous[1] === config.uidAttribute && previous[2] === config.messageOrdering
+  const previous = JSON.parse(stored) as [string, boolean, boolean, string, [string, EncoderKind][]?]
+  const sameCore = JSON.stringify(previous.slice(0, 4)) === JSON.stringify(core)
 
   if (sameCore) {
-    const previousEncoders = new Map((previous[3] ?? []).map(([stream, kind]) => [routeIdentity(stream), kind]))
-    // A route whose kind flipped, or that was dropped outright, has no entry here to compare
-    // against and falls through to E2423 when recovery tries to encode its rows.
-    const pendingRoutes = new Set((await state.pending()).map((row) => `${row.kind}:${row.route}`))
+    const previousEncoders = new Map(previous[4] ?? [])
+    // A route that was dropped outright has no entry here to compare against and falls through
+    // to E2423 when recovery tries to encode its rows.
+    const pendingRoutes = new Set((await state.pending()).map((row) => row.route))
     const changedPendingRoute = encoders.find(
       ([stream, kind]) =>
         pendingRoutes.has(stream) && (!previousEncoders.has(stream) || previousEncoders.get(stream) !== kind),
@@ -1183,8 +1123,8 @@ async function bindWireConfig(
   }
 
   throw new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_WIRE_CONFIG_MISMATCH, [
-    'The PubSub state was written with a different namespace, `publish.uidAttribute`, or ' +
-      '`publish.messageOrdering` setting.',
+    'The PubSub state was written with a different namespace, `attributes`, `publish.uidAttribute`, ' +
+      'or `publish.messageOrdering` setting.',
     'Those settings determine published metadata, so changing them while reusing an outbox ' +
       'could mutate an unconfirmed operation during recovery. Use the original settings, or start a new feed ' +
       'with fresh state and a fresh namespace.',
@@ -1209,8 +1149,8 @@ function registerPubsubMetrics(metrics: Metrics): PubsubMetrics {
     ops: metrics.counter({
       name: 'sqd_pubsub_operations_total',
       help:
-        'Wire operations enqueued for publishing. `kind` separates CDC rows from signals; ' +
-        '`operation` is the CDC op (upsert/delete) or the signal type (data/fork).',
+        'Wire operations enqueued for publishing. `kind` separates row changes (cdc) from the ' +
+        "producer's own control records; `operation` is the CDC op (upsert/delete).",
       labelNames: ['id', 'topic', 'kind', 'operation'] as const,
     }),
     publishedBytes: metrics.counter({

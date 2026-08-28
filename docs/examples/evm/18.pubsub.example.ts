@@ -19,8 +19,16 @@
  * `uint256` amount (`BIGNUMERIC` is narrower) and `TIMESTAMP` for the date — not `INT64`.
  *
  * Fork repairs use `DELETE` or a restoring `UPSERT` with a larger change sequence number. The
- * sequence is one durable producer-wide counter; it is independent of PubSub ordering keys and
- * is not a gap detector.
+ * sequence is one durable producer-wide counter, independent of PubSub ordering keys. One
+ * producer feeds one topic, so its run on that topic is gap-free: a subscriber holding a
+ * contiguous run is missing no operation the producer committed inside it. A second topic is
+ * refused for that reason unless `sequenceBarrier: false` says no consumer reads the barrier.
+ *
+ * Beside the rows, the producer publishes the source's finalized head as a control record —
+ * `_type: "control"` in the attributes, `record: "finality"` in the body. It advances off the
+ * pipe's own progress rather than row traffic, and it is a reference value a consumer folds into
+ * its own confirmation policy, never a proof that a row can no longer change. A BigQuery
+ * subscription filters it out with `attributes._type = "cdc"`.
  *
  * Business attributes remain on the PubSub message for subscription filters. A compensation
  * copies the attributes of the operation it repairs, so a filter such as
@@ -39,10 +47,9 @@
  * `_uid`; enabling the SDK option alone does not configure Dataflow.
  *
  * The state file holds the cursor, rollback data, outbox, and sequence counter. Keep it on durable
- * storage and run one producer per path.
- *
- * `19.pubsub-signals.example.ts` covers signal routes — messages published without the CDC
- * envelope, for consumers that fold their own state instead of mirroring rows.
+ * storage and run one producer per path: losing it restarts the sequence, which freezes every
+ * affected destination row silently. A run that starts with no state is refused for that reason —
+ * `allowColdStart: true` below declares the one bootstrap where that is what you want.
  *
  * To run:
  *
@@ -78,6 +85,12 @@ async function main() {
       // The id space consumers see. Pinned explicitly so renaming the pipe does not silently
       // start a new one (the default is the pipe id).
       namespace: 'base-erc20',
+      // Drop this once the namespace has published: it exists to make bootstrapping a deliberate
+      // act, so a lost state file cannot quietly restart the sequence.
+      allowColdStart: true,
+      // Constant for the whole producer, and mirrored onto control records — a subscriber
+      // filtered on `table` would otherwise miss the statements about its own feed.
+      attributes: { chain: 'base', table: 'erc20_transfers' },
       publish: {
         // The target generates the value. Dataflow must separately be told to use `_uid` as
         // its PubSub id attribute.
@@ -105,8 +118,9 @@ async function main() {
               // Required: every operation is attributed to its block, and that attribution is
               // what makes fork compensation possible.
               block: t.block,
-              // Filter attributes. A fork's `delete` carries these unchanged, so a filtered
-              // subscription receives the repair for its own slice.
+              // Per-row filter attributes, added to the producer-wide ones above. A fork's
+              // `delete` carries them unchanged, so a filtered subscription receives the repair
+              // for its own slice.
               attributes: {
                 token: t.rawEvent.address,
                 from: t.event.from,

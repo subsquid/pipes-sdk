@@ -201,6 +201,7 @@ describe('BigQuery CDC encoding', () => {
 
 describe('buildAttributes', () => {
   const operation = {
+    kind: 'cdc' as const,
     topic: 'evm.base.transfers',
     op: 'upsert' as const,
     id: 'pipe:transfers:1:0xab:0',
@@ -210,8 +211,20 @@ describe('buildAttributes', () => {
     payload: new Uint8Array(),
   }
 
-  it('keeps only business filter attributes by default', () => {
-    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ token: '0x42' })
+  it('keeps only business filter attributes beside the message kind', () => {
+    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ _type: 'cdc', token: '0x42' })
+  })
+
+  it('declares a control record as such, so a filtered subscription can exclude it', () => {
+    const attributes = buildAttributes({ ...operation, kind: 'control' }, { namespace: 'pipe' })
+
+    expect(attributes['_type']).toBe('control')
+  })
+
+  it('mirrors the producer-wide constant attributes a route declares once', () => {
+    const attributes = buildAttributes(operation, { namespace: 'pipe', constant: { chain: 'base', table: 'logs' } })
+
+    expect(attributes).toEqual({ _type: 'cdc', chain: 'base', table: 'logs', token: '0x42' })
   })
 
   it('fully qualifies _uid when it is enabled', () => {
