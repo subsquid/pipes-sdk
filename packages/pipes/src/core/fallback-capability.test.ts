@@ -28,16 +28,18 @@ function client(stream: StreamFn): MockBlockStreamClient {
 const QUERY = { type: 'evm', fields: { block: { number: true } }, fromBlock: 0, parentBlockHash: '0xdead' }
 
 describe('makeCapabilityProbe', () => {
-  it('reads a one-block slice just past the cursor and reports capable when it serves', async () => {
+  it('reads a one-block slice AT the cursor and reports capable when it serves', async () => {
     const c = client(async function* () {
-      yield batch(100)
+      yield batch(99)
     })
     expect(await makeCapabilityProbe(c, QUERY)(cursor(99))).toEqual({ ok: true })
 
-    // The slice is bounded to one block at the frontier, keeps the full query (fields + request),
-    // and drops the resume anchor — a probe must never fault a 409 out of a reorg.
+    // The slice is bounded to one block at the frontier — the last DELIVERED block, never the one
+    // past it: that block may not exist yet at the tip, and a parked slice re-fetches an RPC
+    // source's head every ~100ms until it does. It keeps the full query (fields + request) and
+    // drops the resume anchor — a probe must never fault a 409 out of a reorg.
     expect(c.reads).toHaveLength(1)
-    expect(c.reads[0]).toMatchObject({ fromBlock: 100, toBlock: 100, fields: QUERY.fields })
+    expect(c.reads[0]).toMatchObject({ fromBlock: 99, toBlock: 99, fields: QUERY.fields })
     expect(c.reads[0].parentBlockHash).toBeUndefined()
   })
 

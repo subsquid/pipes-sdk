@@ -20,7 +20,7 @@ const DEFAULT_TIMEOUT_MS = 30_000
 /**
  * Build a generic capability probe for any {@link BlockStreamClient}. It pulls a single-block
  * slice of *exactly the data the stream is configured to serve* — the full query (fields +
- * request) re-exercises the whole pipeline (logs, traces, state diffs) — anchored just past the
+ * request) re-exercises the whole pipeline (logs, traces, state diffs) — anchored at the
  * indexing frontier, and reports whether the source could serve it.
  *
  * This catches the reachable-but-incapable failures liveness alone misses: an RPC node with the
@@ -49,7 +49,12 @@ export function makeCapabilityProbe(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
   return async (atCursor?: BlockCursor): Promise<ProbeResult> => {
-    const from = atCursor ? atCursor.number + 1 : query.fromBlock
+    // Probe AT the frontier block, never past it. `atCursor` is the last *delivered* block, so it
+    // exists on any source that can serve the pipe's position and the slice answers immediately.
+    // Probing `atCursor + 1` parks the slice at the tip until the chain produces that block — an
+    // RPC source spends the wait re-fetching its head every ~100ms, turning one probe into dozens
+    // of block lookups per block interval.
+    const from = atCursor ? atCursor.number : query.fromBlock
     // A one-block bounded slice; `parentBlockHash` is deliberately dropped — fork detection is the
     // active stream's job, and a probe faulting a 409 would misreport a reorg as incapability.
     const probeQuery = { ...query, fromBlock: from, toBlock: from, parentBlockHash: undefined }

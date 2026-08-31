@@ -36,7 +36,10 @@ confirmed capability (DEF-65).
 
 **DEF-65 — Capability.** Evidence that a source can serve *this pipe's query* at the
 indexing frontier, not merely that it is reachable. Delivering a batch is evidence; so is
-a successful probe of a one-block slice of the same query. Liveness alone is not.
+a successful probe of a one-block slice of the same query. Liveness alone is not. The
+probe slice is anchored AT the frontier (the last delivered block), never past it — the
+next block may not exist yet at the tip, and a slice parked on an unmined block turns one
+probe into a sustained head-poll loop on the probed source.
 
 **DEF-66 — Detection.** The sensing half of the machinery: the probes, polls and clocks
 that produce a source's health and the freshness **verdicts** (DEF-67). Detection owns
