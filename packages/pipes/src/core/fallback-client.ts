@@ -39,7 +39,7 @@ export interface FallbackClientSource {
   client: BlockStreamClient
   /**
    * Custom capability probe for this source, replacing the generic one built from the stream's
-   * query. It should confirm the source can serve the configured data just past `atCursor` and
+   * query. It should confirm the source can serve the configured data at `atCursor` and
    * resolve not-`ok` (with a cause) when it cannot.
    */
   probeCapability?: (atCursor?: BlockCursor) => Promise<ProbeResult>
