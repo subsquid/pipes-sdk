@@ -234,6 +234,11 @@ function lazyEvmRpcBlockClient(config: {
     // Head-polling a standby RPC source loads the RPC stack — that is fine/desirable: it is exactly
     // when we want to confirm the source is loadable and viable before switching up to it.
     getHead: async (options?: { finalized: boolean }): Promise<BlockRef | undefined> => (await load()).getHead(options),
+    // Must be forwarded explicitly, like every method here: this wrapper is what the fallback
+    // holds, so an optional method it omits is invisible — the fallback would silently fall back
+    // to the full `getHead` block lookup and the cheap poll would never fire.
+    getHeight: async (options?: { finalized: boolean }): Promise<number | undefined> =>
+      await (await load()).getHeight?.(options),
     resolveTimestamp: async (seconds: number): Promise<number> => (await load()).resolveTimestamp(seconds),
     getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
       async function* stream(): AsyncGenerator<StreamData<GetBlock<Q>>> {

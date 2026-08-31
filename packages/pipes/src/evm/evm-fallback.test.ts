@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import http from 'node:http'
+import { AddressInfo } from 'node:net'
+
+import { afterEach, describe, expect, it } from 'vitest'
 
 import { FallbackClient } from '~/core/index.js'
 import { BlockStreamClient } from '~/portal-client/index.js'
-import { mockPortal } from '~/testing/index.js'
+import { MockPortal, mockPortal } from '~/testing/index.js'
 
 import * as evmBarrel from './browser.js'
 import { createEvmFallbackClient, translateMissingRpcPeer } from './evm-fallback.js'
@@ -235,5 +238,63 @@ describe('createEvmFallbackClient — source specs', () => {
 
     expect(fb.finalized).toBe(false)
     expect(fb.metrics().sources.map((s) => s.name)).toEqual(['bulk', 'tip'])
+  })
+})
+
+describe('lazy RPC source — head-poll wire cost', () => {
+  let portal: MockPortal | undefined
+  let rpcServer: http.Server | undefined
+
+  afterEach(async () => {
+    await portal?.close()
+    portal = undefined
+    await new Promise<void>((resolve) => (rpcServer ? rpcServer.close(() => resolve()) : resolve()))
+    rpcServer = undefined
+  })
+
+  it('polls a standby RPC source with eth_blockNumber, never a block lookup', async () => {
+    // Regression: the lazy wrapper enumerates the client contract method by method, so a newly
+    // added optional method (`getHeight`) that is not forwarded is silently invisible — the
+    // fallback then quietly downgrades every poll to the full `eth_getBlockByNumber` lookup.
+    // Only an end-to-end path through `createEvmFallbackClient` catches that; the internal
+    // framework has no RPC mock, so a minimal method-counting JSON-RPC stub stands in (it never
+    // has to serve blocks — the standby is polled, not streamed).
+    const methods: string[] = []
+    rpcServer = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = []
+      for await (const c of req) chunks.push(c as Buffer)
+      const body = JSON.parse(Buffer.concat(chunks).toString())
+      const calls = Array.isArray(body) ? body : [body]
+      for (const c of calls) methods.push(c.method)
+
+      const answer = (c: any) => {
+        if (c.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: c.id, result: '0x64' }
+        return { jsonrpc: '2.0', id: c.id, error: { code: -32601, message: `unexpected ${c.method}` } }
+      }
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify(Array.isArray(body) ? calls.map(answer) : answer(calls[0])))
+    })
+    await new Promise<void>((resolve) => rpcServer?.listen(0, resolve))
+    const rpcUrl = `http://127.0.0.1:${(rpcServer!.address() as AddressInfo).port}`
+
+    portal = await mockPortal([
+      { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
+      { statusCode: 200, data: [{ header: { number: 2, hash: '0x2', timestamp: 2000 } }] },
+    ])
+
+    const fb = createEvmFallbackClient([portal.url, { type: 'rpc', url: rpcUrl, name: 'standby' }], {
+      // Lag detection stays on (the default) so the boundary polls the standby; probes off so the
+      // standby is never asked to stream; headTtlMs 0 so every boundary re-polls.
+      detection: { capabilityProbe: false, headTtlMs: 0, headPollTimeoutMs: 5000 },
+    })
+
+    const numbers: number[] = []
+    for await (const b of fb.getStream({ type: 'evm', fromBlock: 1, toBlock: 2 } as never)) {
+      numbers.push(...(b.blocks as { header: { number: number } }[]).map((x) => x.header.number))
+    }
+
+    expect(numbers).toEqual([1, 2])
+    expect(methods).toContain('eth_blockNumber')
+    expect(methods).not.toContain('eth_getBlockByNumber')
   })
 })
