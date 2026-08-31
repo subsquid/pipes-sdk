@@ -201,7 +201,6 @@ describe('BigQuery CDC encoding', () => {
 
 describe('buildAttributes', () => {
   const operation = {
-    kind: 'cdc' as const,
     topic: 'evm.base.transfers',
     op: 'upsert' as const,
     id: 'pipe:transfers:1:0xab:0',
@@ -211,20 +210,24 @@ describe('buildAttributes', () => {
     payload: new Uint8Array(),
   }
 
-  it('keeps only business filter attributes beside the message kind', () => {
-    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ _type: 'cdc', token: '0x42' })
+  it('keeps only the business filter attributes when no finalized head is known', () => {
+    expect(buildAttributes(operation, { namespace: 'pipe' })).toEqual({ token: '0x42' })
   })
 
-  it('declares a control record as such, so a filtered subscription can exclude it', () => {
-    const attributes = buildAttributes({ ...operation, kind: 'control' }, { namespace: 'pipe' })
+  it('stamps the finalized head as a decimal string, because filters compare strings', () => {
+    const attributes = buildAttributes(operation, { namespace: 'pipe', finalized: 19_000_000 })
 
-    expect(attributes['_type']).toBe('control')
+    expect(attributes['_finalized']).toBe('19000000')
+  })
+
+  it('stamps block 0, which a nullish check would drop', () => {
+    expect(buildAttributes(operation, { namespace: 'pipe', finalized: 0 })['_finalized']).toBe('0')
   })
 
   it('mirrors the producer-wide constant attributes a route declares once', () => {
     const attributes = buildAttributes(operation, { namespace: 'pipe', constant: { chain: 'base', table: 'logs' } })
 
-    expect(attributes).toEqual({ _type: 'cdc', chain: 'base', table: 'logs', token: '0x42' })
+    expect(attributes).toEqual({ chain: 'base', table: 'logs', token: '0x42' })
   })
 
   it('fully qualifies _uid when it is enabled', () => {

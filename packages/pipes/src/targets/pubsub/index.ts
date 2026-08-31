@@ -3,7 +3,6 @@ export {
   type BigQueryCdcMessage,
   CDC_FIELDS,
   type CdcEncoder,
-  type MessageKind,
   PROTOCOL_ATTRIBUTES,
   PUBSUB_LIMITS,
   type PubsubOp,
@@ -26,7 +25,6 @@ export {
   SqlitePubsubState,
 } from './pubsub-state.js'
 export {
-  type FinalityOptions,
   type MessageDraft,
   type PubsubTargetOptions,
   type RollbackInverse,

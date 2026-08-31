@@ -65,16 +65,8 @@ export class FakePublisher implements Publisher {
     this.closed = true
   }
 
-  /** The producer's own statements about the feed, which carry no route row. */
-  controlRecords(): Record<string, unknown>[] {
-    return this.published
-      .filter((message) => message.attributes['_type'] === 'control')
-      .map((message) => JSON.parse(message.payload) as Record<string, unknown>)
-  }
-
   operations(topic?: string): { op: string; id?: string; payload: string; seq: number }[] {
     return this.published
-      .filter((message) => message.attributes['_type'] !== 'control')
       .filter((message) => !topic || message.topic === topic)
       .map((message) => {
         const payload = JSON.parse(message.payload)

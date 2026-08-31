@@ -10,7 +10,7 @@ import {
 import { SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { MAX_SEQUENCE_VALUE, MessageKind, PubsubOp } from './protocol.js'
+import { MAX_SEQUENCE_VALUE, PubsubOp } from './protocol.js'
 
 export const STATE_SCHEMA_VERSION = '4'
 
@@ -22,9 +22,7 @@ export type RowIdSource = 'row' | 'draft' | 'derived' | 'generated'
  * and — when it sits above the finalized watermark — compensate it after a fork.
  */
 export type PendingOperation = {
-  /** `control` records are the producer's own statements; they never enter the manifest. */
-  kind: MessageKind
-  /** Route name selects the encoder after recovery. Empty on a control record. */
+  /** Route name selects the encoder after recovery. */
   route: string
   topic: string
   /** Empty when PubSub message ordering is disabled. */
@@ -51,7 +49,6 @@ export type PendingOperation = {
 
 export type OutboxRow = {
   rowId: number
-  kind: MessageKind
   route: string
   topic: string
   op: PubsubOp
@@ -84,8 +81,14 @@ export type CommitInput = {
  * requirement, not the storage engine.
  */
 export interface PubsubState {
-  /** Opens the backing store, validates its schema, and reports whether it started empty (CN-46). */
-  open(ctx: { cursorKey: string; logger: Logger }): Promise<{ coldStart: boolean }>
+  /**
+   * Opens the backing store, validates its schema, and reports whether it started empty (CN-46).
+   *
+   * `allowColdStart: false` opens an empty store read-only: the bootstrap markers are what make
+   * the next open look warm, so a caller that is about to refuse the run must not leave them
+   * behind — otherwise the refusal is a one-time speed bump and the retry restarts the sequence.
+   */
+  open(ctx: { cursorKey: string; logger: Logger; allowColdStart?: boolean }): Promise<{ coldStart: boolean }>
   getCursor(): Promise<TargetState | undefined>
   getMeta(key: string): Promise<string | undefined>
   setMeta(key: string, value: string): Promise<void>
@@ -110,7 +113,6 @@ type OutboxDbRow = {
   row_id: number
   route: string
   topic: string
-  kind: MessageKind
   op: string
   id: string
   ordering_key: string
@@ -202,7 +204,15 @@ export class SqlitePubsubState implements PubsubState {
     return this.#key.value
   }
 
-  async open({ cursorKey, logger }: { cursorKey: string; logger: Logger }): Promise<{ coldStart: boolean }> {
+  async open({
+    cursorKey,
+    logger,
+    allowColdStart = true,
+  }: {
+    cursorKey: string
+    logger: Logger
+    allowColdStart?: boolean
+  }): Promise<{ coldStart: boolean }> {
     this.#key.bind(cursorKey)
     this.#logger = logger
 
@@ -243,6 +253,13 @@ export class SqlitePubsubState implements PubsubState {
       }
 
       const coldStart = !version
+
+      // Stamping is the bootstrap. A caller that will not permit one gets the report and an
+      // untouched file, so its refusal still holds on the next open.
+      if (coldStart && !allowColdStart) {
+        return { coldStart }
+      }
+
       if (coldStart) {
         this.setMetaSync('schema_version', STATE_SCHEMA_VERSION)
         this.setMetaSync(META_SEQUENCE, '0')
@@ -311,7 +328,6 @@ export class SqlitePubsubState implements PubsubState {
       db.exec(`
         CREATE TABLE IF NOT EXISTS outbox (
           row_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-          kind          TEXT NOT NULL DEFAULT 'cdc',
           route         TEXT,
           topic         TEXT,
           op            TEXT,
@@ -448,10 +464,9 @@ export class SqlitePubsubState implements PubsubState {
 
   #enqueue(operation: PendingOperation, seq: number): void {
     this.#db!.exec(
-      `INSERT INTO outbox (kind, route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO outbox (route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        operation.kind,
         operation.route,
         operation.topic,
         operation.op,
@@ -475,9 +490,6 @@ export class SqlitePubsubState implements PubsubState {
       for (const operation of operations) {
         const seq = this.#nextSeq(operation)
         this.#enqueue(operation, seq)
-
-        // A control record states something about the feed; it owns no row a fork could orphan.
-        if (operation.kind === 'control') continue
 
         if (operation.mode === 'materialized') {
           this.#assertIdentitySourceStable(operation)
@@ -735,7 +747,6 @@ export class SqlitePubsubState implements PubsubState {
 
     return rows.map((row) => ({
       rowId: row.row_id,
-      kind: row.kind,
       route: row.route,
       topic: row.topic,
       op: row.op as PubsubOp,
@@ -938,8 +949,8 @@ export class SqlitePubsubState implements PubsubState {
     const seq = this.#nextSeq(compensation)
 
     this.#db!.exec(
-      `INSERT INTO outbox (kind, route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
-       VALUES ('cdc', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO outbox (route, topic, op, id, ordering_key, seq, attributes, payload, block_number)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         compensation.route,
         compensation.topic,

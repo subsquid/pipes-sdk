@@ -551,7 +551,7 @@ A configured route names a topic that is missing from the project. The default `
 ### E2402 · Reserved attribute name
 
 A user attribute collides with a reserved namespace: names starting with `_` belong to the target
-(`_uid`), names starting with `goog` to Google Cloud. The CDC fields `_id`, `_CHANGE_TYPE`, and
+(`_finalized`, `_uid`), names starting with `goog` to Google Cloud. The CDC fields `_id`, `_CHANGE_TYPE`, and
 `_CHANGE_SEQUENCE_NUMBER` belong in the message body and are added by the target.
 
 **Fix** — rename the attribute. Every unprefixed name is free, deliberately including common
@@ -559,8 +559,8 @@ business names like `id` and `op`.
 
 ### E2403 · Attribute budget exceeded
 
-The message exceeds PubSub's per-message attribute limits: 100 attributes (all 100 for the user,
-or 99 with `publish.uidAttribute`), 256 bytes per key, 1024 bytes per value. Non-string values are
+The message exceeds PubSub's per-message attribute limits: 100 attributes (99 for the user beside
+`_finalized`, or 98 with `publish.uidAttribute`), 256 bytes per key, 1024 bytes per value. Non-string values are
 refused here too — PubSub attributes are strings, and filters compare them as strings.
 
 **Fix** — publish the value in the payload instead, or shorten it. Filter attributes should stay
@@ -759,8 +759,12 @@ The change sequence is one producer-wide counter, so a producer that feeds sever
 none of them with a contiguous run — and a consumer reading a gap-free run as a completeness
 barrier would see holes it cannot distinguish from lost messages.
 
-**Fix** — run one producer per topic (several routes may share one), or set `sequenceBarrier: false`
-to declare that no consumer of this producer relies on a contiguous sequence run.
+**Fix** — run one producer per topic, or set `sequenceBarrier: false` to declare that no consumer
+of this producer relies on a contiguous sequence run.
+
+Several routes may name the same topic, but with the barrier on only one of them can span more
+than one block per batch: routes are mapped one after another, so the second restarts at the
+batch's first block and is refused by E2429. Merge such streams into one route's `map`.
 
 ### E2429 · Operations step backwards in block order
 
@@ -768,6 +772,12 @@ A batch mapped an operation for a lower block than one already sequenced. Operat
 numbers in the order they are mapped, and consumers read a contiguous run reaching block *N+1* as
 proof that block *N* is complete — a backwards step makes that reading wrong.
 
-**Fix** — emit drafts in block order, across routes too when several feed one topic. A fork's
-rewind is not a backwards step: the target resets the check when it resolves one. Set
-`sequenceBarrier: false` if no consumer relies on block boundaries.
+**Fix** — emit drafts in block order. A fork's rewind is not a backwards step: the target resets
+the check when it resolves one. Set `sequenceBarrier: false` if no consumer relies on block
+boundaries.
+
+Note that the check walks the batch in sequencing order, which is route by route rather than
+block by block. A second route on the same topic therefore restarts at the batch's first block
+and lands here on any batch spanning more than one block, with no ordering the mapper can supply
+to avoid it — the barrier admits one multi-block route per producer. Merge the streams into one
+`map`, or turn the barrier off.

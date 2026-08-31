@@ -181,8 +181,11 @@ outbox → stream from the recovered cursor. No data repair runs and none is pos
 commit point precedes the wire, so recovery has nothing published-but-unrecorded to
 clean up, and every outbox row it republishes is byte- and sequence-identical to what a
 first attempt would have sent. A cold start (no state at the configured path) MUST be
-made observable — the sequencer is the state, and its loss is indistinguishable in-band
-from a first run (ADR-21, GAP-38).
+refused unless the operator explicitly declares the bootstrap, and MUST be observable when
+it is permitted: the sequencer is the state, so resuming a namespace that has already
+published rewinds every version it hands out, and that loss is indistinguishable in-band
+from a first run (ADR-21, GAP-38). Recovery from lost state is a fresh namespace and a
+consumer re-bootstrap, never a restart.
 
 ## Subsystem non-interference
 
