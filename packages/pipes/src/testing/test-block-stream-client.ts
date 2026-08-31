@@ -7,6 +7,8 @@ export type MockBlockStreamClientOptions = {
   stream?: (query: any) => AsyncGenerator<StreamData<any>>
   /** The independent head poll (receives the caller's options); defaults to "no head known". */
   getHead?: (options?: { finalized: boolean }) => Promise<BlockRef | undefined>
+  /** The number-only head poll; defaults to delegating to `getHead`, like a client without one. */
+  getHeight?: (options?: { finalized: boolean }) => Promise<number | undefined>
 }
 
 export type MockBlockStreamClient = BlockStreamClient & {
@@ -35,6 +37,11 @@ export function mockBlockStreamClient(options: MockBlockStreamClientOptions = {}
     getMetadata: async () => ({ dataset: name, aliases: [], real_time: true, start_block: 0 }),
     getHead: async (headOptions?: { finalized: boolean }) =>
       options.getHead ? await options.getHead(headOptions) : undefined,
+    getHeight: async (headOptions?: { finalized: boolean }) => {
+      if (options.getHeight) return await options.getHeight(headOptions)
+      const head = options.getHead ? await options.getHead(headOptions) : undefined
+      return head?.number
+    },
     resolveTimestamp: async () => {
       throw new Error(`${name}: resolveTimestamp unsupported`)
     },

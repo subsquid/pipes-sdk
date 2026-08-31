@@ -35,6 +35,35 @@ describe('EvmRpcBlockClient', () => {
     await expect(client.resolveTimestamp(1700000000)).rejects.toThrowError(/portal source/)
   })
 
+  it('answers getHeight with eth_blockNumber, not a block lookup', async () => {
+    // The head poll runs once per batch per standby at tip pace, so it must be the cheapest call
+    // the provider offers. The finalized commitment has no eth_blockNumber equivalent and stays on
+    // the block lookup.
+    const calls: string[] = []
+    const stubRpcClient = {
+      call: async (method: string) => {
+        calls.push(method)
+        if (method === 'eth_blockNumber') return '0x64'
+        if (method === 'eth_getBlockByNumber') {
+          return { number: '0x63', hash: `0x${'ab'.repeat(32)}`, parentHash: `0x${'cd'.repeat(32)}` }
+        }
+        throw new Error(`unexpected method ${method}`)
+      },
+      batchCall: async () => [],
+      getConcurrency: () => 10,
+      url: KEYED_URL,
+    }
+    const { Rpc } = await import('@subsquid/evm-rpc')
+    const client = new EvmRpcBlockClient({ rpc: new Rpc({ client: stubRpcClient as never }) })
+
+    expect(await client.getHeight()).toBe(0x64)
+    expect(calls).toEqual(['eth_blockNumber'])
+
+    calls.length = 0
+    expect(await client.getHeight({ finalized: true })).toBe(0x63)
+    expect(calls).toEqual(['eth_getBlockByNumber'])
+  })
+
   it('rejects a non-EVM query with an actionable error', async () => {
     // It implements the chain-generic client contract, but only speaks EVM.
     const client = new EvmRpcBlockClient({ rpc: { url: KEYED_URL } })
