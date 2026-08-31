@@ -76,6 +76,18 @@ export class EvmRpcBlockClient {
     return head ? { number: head.number, hash: head.hash } : undefined
   }
 
+  /**
+   * The cheap liveness poll: `eth_blockNumber` — no block header round-trip. The finalized
+   * commitment has no `eth_blockNumber` equivalent, so that path stays on the finalized-head
+   * block lookup.
+   */
+  async getHeight(options?: { finalized: boolean }): Promise<number | undefined> {
+    const finalized = options?.finalized ?? this.finalized
+    if (finalized) return (await this.#headSource.getFinalizedHead())?.number
+
+    return await this.#rpc.getHeight()
+  }
+
   async resolveTimestamp(_seconds: number): Promise<number> {
     throw new Error(
       'an RPC source cannot resolve Date/timestamp block-range bounds — use numeric block ranges, or configure a portal source',

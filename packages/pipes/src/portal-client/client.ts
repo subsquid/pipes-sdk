@@ -122,6 +122,13 @@ export interface BlockStreamClient {
   getUrl(): string
   getMetadata(): Promise<ApiDataset>
   getHead(options?: { finalized: boolean }): Promise<BlockRef | undefined>
+  /**
+   * Number-only head poll, for callers that need liveness/lag rather than a resume anchor.
+   * Optional — the fallback prefers it when present and falls back to `getHead().number`. An RPC
+   * source answers it with `eth_blockNumber`, which is far cheaper for the provider than the
+   * `eth_getBlockByNumber` that a full {@link BlockRef} (number + hash) requires.
+   */
+  getHeight?(options?: { finalized: boolean }): Promise<number | undefined>
   /** Resolve a unix timestamp (seconds) to a block number — used for `Date` range bounds. */
   resolveTimestamp(seconds: number): Promise<number>
   getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>>

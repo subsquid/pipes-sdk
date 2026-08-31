@@ -541,7 +541,15 @@ export class FallbackClient implements BlockStreamClient {
     active: number,
     cursor: BlockCursor | undefined,
   ): Promise<Extract<FallbackEvent, { type: 'batch' }>> {
-    const others = await this.#chainHeadOthers(active, cursor)
+    const staleAtBoundary = this.#isStale()
+    // Boundary head polls feed the lag verdict, a custom strategy's snapshot, the
+    // stale-vs-chain-stall distinction, and the reclaim of a recovered more-preferred source.
+    // When none of those can consume them — lag detection off, not stale, stock strategy already
+    // driving the most-preferred source — the poll is pure standby traffic, and at tip pace the
+    // batch cadence outruns `headTtlMs`, so this gate (not the cache) is what bounds it: one
+    // `eth_getBlockByNumber`-class call per block per standby otherwise.
+    const wantHeads = this.#strategy != null || this.#detection.maxLagBlocks != null || staleAtBoundary || active > 0
+    const others = wantHeads ? await this.#chainHeadOthers(active, cursor) : undefined
     // A boundary can be reached before any block has been delivered — a source may yield an empty
     // batch (the portal answers 204 that way) — so there is not always a position to measure from.
     // Both gauges stay unset rather than falling back to a `-1` sentinel, which would surface as a
@@ -571,11 +579,10 @@ export class FallbackClient implements BlockStreamClient {
       this.#lagArmed &&
       this.lag != null &&
       this.lag > this.#detection.maxLagBlocks
-    const stale = this.#isStale()
     this.staleness = this.#unproductiveMs
-    this.chainStalled = stale && !this.#fresherThanCursor(cursor)
+    this.chainStalled = staleAtBoundary && !this.#fresherThanCursor(cursor)
 
-    return { type: 'batch', lagging, stale }
+    return { type: 'batch', lagging, stale: staleAtBoundary }
   }
 
   /**
@@ -643,7 +650,7 @@ export class FallbackClient implements BlockStreamClient {
    * response — must not stall the healthy active source: on timeout this rejects and `#getCachedHead`
    * records a liveness failure. `null` defers to the underlying client's own request timeout.
    */
-  #headWithTimeout(p: Promise<BlockRef | undefined>): Promise<BlockRef | undefined> {
+  #headWithTimeout<T>(p: Promise<T>): Promise<T> {
     const timeoutMs = this.#detection.headPollTimeoutMs
     return withTimeout(p, timeoutMs, () => new Error(`head poll timed out after ${timeoutMs}ms`))
   }
@@ -663,12 +670,14 @@ export class FallbackClient implements BlockStreamClient {
       // head, a hot source the chain tip) — the reference we want is "how far can this source
       // serve", which is what both the lag and the "is anything fresher" checks mean. When the
       // stream is forced to a single commitment, that wins for every source.
-      const head = await this.#headWithTimeout(
-        this.#sources[i].client.getHead(
-          this.#streamFinalized != null ? { finalized: this.#streamFinalized } : undefined,
-        ),
-      )
-      const value = head?.number
+      //
+      // Only the NUMBER is consumed here, so a client offering the cheaper number-only poll
+      // (`eth_blockNumber` on an RPC source, vs a full block-header lookup) is preferred.
+      const client = this.#sources[i].client
+      const headOptions = this.#streamFinalized != null ? { finalized: this.#streamFinalized } : undefined
+      const value = client.getHeight
+        ? await this.#headWithTimeout(client.getHeight(headOptions))
+        : (await this.#headWithTimeout(client.getHead(headOptions)))?.number
       this.#headCache[i] = { value, at: now, cursorAt: last?.number }
       if (value != null) this.#health[i].onLivenessPass()
       this.#maybeProbeCapability(i, last)

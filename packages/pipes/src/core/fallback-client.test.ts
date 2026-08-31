@@ -586,7 +586,10 @@ describe('FallbackClient — freshness', () => {
     const next = it.next()
     await wait(60)
     expect(fb.chainStalled).toBe(true)
-    expect(s1heads.length).toBeLessThan(3) // s1's head was (re)polled during the hold (liveness)
+    // s1's head was (re)polled repeatedly during the hold (liveness). The polls here all come from
+    // stall ticks: the boundary after batch(50) no longer polls (lag off, not yet stale, stock
+    // strategy, most-preferred source active).
+    expect(s1heads.length).toBeLessThan(4)
     expect(probedCapability).toBeGreaterThan(0) // capability probe fired during the hold
 
     // s1's head advances past us → fail over to it, recovering without the active ever resolving.
@@ -1011,6 +1014,82 @@ describe('FallbackClient — BlockStreamClient surface', () => {
   })
 })
 
+describe('FallbackClient — standby traffic', () => {
+  it('skips boundary head polls entirely when nothing can consume them', async () => {
+    // Lag detection off, not stale, stock strategy, most-preferred source active: the polled heads
+    // would feed no verdict, no strategy snapshot, and no reclaim. Before the gate this cost one
+    // `eth_getBlockByNumber`-class call per block per standby at tip pace (batch cadence > headTtlMs).
+    let polls = 0
+    const s0 = source('s0', async function* () {
+      for (let n = 1; n <= 5; n++) yield batch(n)
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => {
+        polls++
+        return cursor(1000)
+      },
+    )
+
+    const fb = fallback([s0, standby], { headTtlMs: 0, maxLagBlocks: null, maxStalenessMs: null })
+
+    const out = await collect(fb)
+
+    expect(out).toEqual([1, 2, 3, 4, 5])
+    expect(polls).toBe(0)
+  })
+
+  it('keeps polling at the boundary while lag detection is on', async () => {
+    let polls = 0
+    const s0 = source('s0', async function* () {
+      for (let n = 1; n <= 3; n++) yield batch(n)
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => {
+        polls++
+        return cursor(3)
+      },
+    )
+
+    // Default detection (maxLagBlocks on); headTtlMs 0 so every boundary re-polls.
+    const fb = fallback([s0, standby], { headTtlMs: 0 })
+    await collect(fb)
+
+    expect(polls).toBeGreaterThan(0)
+  })
+
+  it("prefers a source's cheap `getHeight` over `getHead` for the poll", async () => {
+    // On an RPC source `getHeight` is `eth_blockNumber` while `getHead` is a block lookup; only
+    // the number is consumed, so the cheap call must win whenever the client offers it.
+    let heights = 0
+    let heads = 0
+    const s0 = source('s0', async function* () {
+      for (let n = 1; n <= 3; n++) yield batch(n)
+    })
+    const standbyClient = mockBlockStreamClient({
+      name: 'standby',
+      stream: async function* () {},
+      getHead: async () => {
+        heads++
+        return cursor(1000)
+      },
+      getHeight: async () => {
+        heights++
+        return 1000
+      },
+    })
+
+    const fb = fallback([s0, { name: 'standby', client: standbyClient }], { headTtlMs: 0 })
+    await collect(fb)
+
+    expect(heights).toBeGreaterThan(0)
+    expect(heads).toBe(0)
+  })
+})
+
 describe('FallbackClient — custom strategy (code as config)', () => {
   it('pins a source: a `select` handler routes every selection, ignoring preference order', async () => {
     const s0 = source('s0', async function* () {
@@ -1136,7 +1215,16 @@ describe('FallbackClient — custom strategy (code as config)', () => {
       async () => cursor(50),
       (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
     )
-    const fb = fallback([s0, standby], { headTtlMs: 0, capabilityProbeIntervalMs: 0, maxLagBlocks: null })
+    // With lag detection off and the primary active, the boundary gate would skip standby polls
+    // entirely (nothing consumes them) — a passthrough custom strategy keeps them flowing, since
+    // a strategy is entitled to fresh snapshots.
+    const fb = fallback(
+      [s0, standby],
+      { headTtlMs: 0, capabilityProbeIntervalMs: 0, maxLagBlocks: null },
+      {
+        strategy: () => undefined,
+      },
+    )
 
     await collect(fb) // stream 1: drives s0, fires the standby's probe, then ends
     expect(resolvers).toHaveLength(1)

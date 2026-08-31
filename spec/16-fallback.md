@@ -78,7 +78,12 @@ position (INV-61).
 
 **WP-63 — Boundary decision.** After each delivered batch the pipe refreshes the other
 sources' heads (subject to `P-FB-HEAD-TTL-MS`), updates the freshness gauges, and consults
-the strategy with a `batch` event carrying the `lagging` and `stale` verdicts. `use(i)`
+the strategy with a `batch` event carrying the `lagging` and `stale` verdicts. The refresh
+runs only when something can consume it — lag detection enabled, the `stale` verdict
+raised, a custom strategy installed, or a more-preferred source available to reclaim;
+otherwise the boundary MUST NOT poll standbys (at tip pace the batch cadence outruns
+`P-FB-HEAD-TTL-MS`, so an unconditional refresh degenerates to one poll per batch per
+standby). `use(i)`
 switches to a different source without penalising the active one; `failover` abandons
 the active source, recording a cause; `hold` continues.
 
@@ -100,7 +105,9 @@ probe verdict that arrives after the read it was issued for has ended MUST be di
 read has a forced commitment, in which case that one applies to every source. Polls are
 cached for `P-FB-HEAD-TTL-MS` and time-boxed by `P-FB-HEAD-TIMEOUT-MS`; a timed-out poll counts
 as a liveness failure and contributes no head. A head and the pipe position it is
-compared against MUST be sampled at the same instant.
+compared against MUST be sampled at the same instant. Only the head *number* is consumed,
+so a source offering a number-only poll (`eth_blockNumber` on an RPC source) MUST be
+polled through it rather than through a full block-reference lookup.
 
 **WP-67 — Health transitions.** A stream error, a capability failure, or
 `P-FB-LIVENESS-FAIL` consecutive liveness failures make a source `unhealthy` for
