@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a release of any published package in this repo — @subsquid/pipes, @subsquid/pipes-cli, or @subsquid/pipes-ui. Bumps the version, tags, pushes, watches the Release workflow, and publishes curated GitHub release notes. Handles stable releases and alpha/beta/rc prereleases (published to matching npm dist-tags via Trusted Publishing). Use when the user asks to "release", "publish", "cut a version", "ship", "deploy", or "cut an alpha/beta" for any of these packages.
+description: Cut a release of any published package in this repo — @subsquid/pipes, @subsquid/pipes-cli, or @subsquid/pipes-ui. Bumps the version, tags, pushes, watches the Release workflow, and publishes curated GitHub release notes. Handles stable releases and alpha/beta/rc prereleases (betas ship on the npm `latest` tag until 1.0.0; alpha and rc get their own, all via Trusted Publishing). Use when the user asks to "release", "publish", "cut a version", "ship", "deploy", or "cut an alpha/beta" for any of these packages.
 ---
 
 # Release
@@ -106,19 +106,36 @@ npm view <npm-name> dist-tags
 ## Prereleases (alpha/beta/rc)
 
 Cut one exactly like a stable release — just name a prerelease version
-(`1.0.0-alpha.17`, `1.0.0-beta.1`, `1.0.0-rc.1`). No extra inputs:
+(`1.0.0-alpha.17`, `1.0.0-beta.5`, `1.0.0-rc.1`). No extra inputs; `resolve`
+derives the channel from the identifier:
 
-- **npm dist-tag** — derived from the identifier: `alpha` → `@alpha`, `beta` →
-  `@beta`, `rc` → `@rc`, anything else → `@next`. Stable `X.Y.Z` → `@latest`. So a
-  plain `npm i` never serves a prerelease; testers opt in with `npm i <pkg>@alpha`.
-- **GitHub release** — flagged `prerelease: true` and kept out of the "Latest
-  release" slot automatically.
+| version | npm dist-tag | GitHub |
+|---|---|---|
+| `X.Y.Z` | `@latest` | normal release |
+| `…-beta.N` | `@latest` | normal release |
+| `…-alpha.N` | `@alpha` | prerelease |
+| `…-rc.N` | `@rc` | prerelease |
+| anything else | `@next` | prerelease |
 
-Prerelease notes get the same package-scoped curation as a stable cut, but can be
-leaner (drop the lead paragraph, group only what changed, optionally add a
+**beta is the shipping channel until 1.0.0 lands.** A beta is what a plain
+`npm i <pkg>` serves, and its GitHub release is not flagged a preview — so cut one
+only when it is fit to be the default. alpha and rc stay off `latest`; testers opt
+into those with `npm i <pkg>@alpha`.
+
+This is a temporary policy, and the rule keys off the identifier rather than the
+version. **When a stable ships, revert the `beta` arm in `release.yml` to
+`DIST_TAG=beta` / `PRERELEASE=true`** — otherwise a later `2.0.0-beta.1` displaces
+stable `1.x` for everyone who just types `npm i`.
+
+The "Latest release" slot on the repo page is separate, and still reserved for
+`@subsquid/pipes` — a `pipes-ui` or `pipes-cli` release never claims it.
+
+Alpha and rc notes get the same package-scoped curation as a stable cut, but can
+be leaner (drop the lead paragraph, group only what changed, optionally add a
 one-line "what to test"). Keep the install line minimal — a bare
 `npm i <pkg>@alpha`. **Skip** prose about "published to the `@alpha` dist-tag /
-`@latest` is unaffected": it's obvious and just noise.
+`@latest` is unaffected": it's obvious and just noise. A beta ships as the default
+version, so give it stable-grade notes — including breaking changes.
 
 ## Dry runs
 
@@ -198,7 +215,8 @@ before touching anything else.
 - **`Multiple versions of pnpm specified`** — `pnpm/action-setup` must **not** pass
   a `version:`; the root `package.json` pins pnpm via `packageManager`. If a
   workflow drifted and re-added it, remove it.
-- **Prerelease served to a plain `npm i`** — shouldn't happen; the dist-tag logic
-  routes alpha/beta/rc off `latest`. If it did, inspect `npm view <pkg> dist-tags`
-  and repoint with `npm dist-tag add <pkg>@<stable> latest` (needs npm auth —
-  manual, outside the OIDC workflow).
+- **An alpha or rc served to a plain `npm i`** — shouldn't happen; the dist-tag
+  logic routes those off `latest`. (A beta on `latest` is the intended policy, not
+  this bug.) If it did, inspect `npm view <pkg> dist-tags` and repoint with
+  `npm dist-tag add <pkg>@<version> latest` (needs npm auth — manual, outside the
+  OIDC workflow).

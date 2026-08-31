@@ -149,18 +149,26 @@ jobs:
               ;;
           esac
 
-          # Prereleases must not land on 'latest', or a plain `npm i` serves an
-          # alpha. 'case' globbing (not grep) so the hyphen test can't be mistaken
-          # for a grep option across grep implementations.
+          # Channel routing. 'case' globbing (not grep) so the hyphen test can't
+          # be mistaken for a grep option across grep implementations.
+          #
+          # beta is the shipping channel until 1.0.0 lands: a plain `npm i` must
+          # serve the newest beta, and its GitHub release is not flagged a
+          # preview. alpha and rc stay off 'latest' so testers opt in explicitly.
+          #
+          # REVERT THE beta ARM to `DIST_TAG=beta; PRERELEASE=true` the moment a
+          # stable ships. The rule reads the identifier, not the version, so a
+          # later 2.0.0-beta.1 would otherwise displace stable 1.x for everyone
+          # who just types `npm i`.
           case "$VERSION" in
             *-*)
               LABEL="${VERSION#*-}"   # 1.0.0-alpha.14 -> alpha.14
               LABEL="${LABEL%%.*}"    #                -> alpha
               case "$LABEL" in
-                alpha|beta|rc) DIST_TAG="$LABEL" ;;
-                *) DIST_TAG=next ;;
+                beta)     DIST_TAG=latest;    PRERELEASE=false ;;
+                alpha|rc) DIST_TAG="$LABEL";  PRERELEASE=true  ;;
+                *)        DIST_TAG=next;      PRERELEASE=true  ;;
               esac
-              PRERELEASE=true
               ;;
             *)
               DIST_TAG=latest
