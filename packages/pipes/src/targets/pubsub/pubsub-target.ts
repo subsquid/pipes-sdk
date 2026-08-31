@@ -136,8 +136,7 @@ export type PubsubTargetOptions<T> = {
   topics?: { [K in keyof NoInfer<T>]?: TopicRoute<NoInfer<T>[K]> }
   /**
    * Attributes that are constant for this producer — `chain` and `table`, typically. They ride
-   * every message, control records included, so a subscription filtered on them still receives
-   * the statements the producer makes about its own feed. Per-draft `attributes` add to these.
+   * every message. Per-draft `attributes` add to these.
    */
   attributes?: Record<string, string>
   /**
@@ -147,20 +146,21 @@ export type PubsubTargetOptions<T> = {
    * Keeping it means one topic per producer: the counter is producer-wide, so a second topic
    * puts a hole in both runs. Set `false` to declare that no consumer of this producer reads
    * the barrier — that, and only that, permits several topics and unordered blocks.
+   *
+   * It also means one ROUTE per producer in practice. Operations are sequenced in the order
+   * they are mapped, and routes are mapped one after another, so a second route feeding the
+   * same topic restarts at the batch's first block and is refused (E2429) on any batch
+   * spanning more than one block. Merge such streams into one route's `map`.
    */
   sequenceBarrier?: boolean
-  /**
-   * How often the source's finalized head is republished as a control record, or `false` to
-   * publish none. It rides the producer's own progress rather than row traffic, so a quiet
-   * table's consumers keep receiving it.
-   */
-  finality?: FinalityOptions | false
   /**
    * Permit a run that starts with no state. Off by default, because a cold start under a
    * namespace that has already published restarts the change sequence: BigQuery discards the
    * republished lower numbers as stale and every affected row freezes with no downstream
    * symptom. Recovery from lost state is a fresh namespace and a consumer re-bootstrap, never
    * a restart — so set this only to bootstrap a namespace that has never published.
+   *
+   * A refused run leaves the state file untouched, so the refusal still holds on the retry.
    */
   allowColdStart?: boolean
   /** Cursor key inside the state file. Defaults to the pipe id (the CursorKey rule, ADR-2). */
@@ -208,13 +208,6 @@ export type PubsubTargetOptions<T> = {
   publisher?: Publisher
 }
 
-export type FinalityOptions = {
-  /** Republish once the finalized head has advanced this many blocks. Default 100. */
-  everyBlocks?: number
-  /** …or once this many seconds have passed, whichever comes first. Default 30. */
-  everySeconds?: number
-}
-
 const CAP_BYTES_PER_SECOND = 1024 * 1024
 const META_GO_LIVE = 'go_live_block'
 const META_WIRE_CONFIG = 'wire_config'
@@ -238,11 +231,6 @@ type ResolvedRoute = {
 }
 
 type EncoderKind = 'canonical' | 'custom'
-
-/** The one control record kind: the source's finalized head, as a reference value. */
-const FINALITY_RECORD = 'finality'
-const DEFAULT_FINALITY_EVERY_BLOCKS = 100
-const DEFAULT_FINALITY_EVERY_SECONDS = 30
 
 export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
   const messageOrdering = options.publish?.messageOrdering ?? false
@@ -298,13 +286,18 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
       const uidAttribute = options.publish?.uidAttribute ?? false
 
       const statePath = 'path' in options.state ? options.state.path : 'custom'
-      const { coldStart } = await state.open({ cursorKey: options.settings?.id ?? id ?? '', logger })
+      const allowColdStart = options.allowColdStart ?? false
+      const { coldStart } = await state.open({
+        cursorKey: options.settings?.id ?? id ?? '',
+        logger,
+        allowColdStart,
+      })
 
       // Everything past `open` runs under cleanup: the state holds an exclusive lock on its
       // file, so a failure in topic validation or the recovery drain would otherwise leave it
       // locked for the life of the process and make the retry fail as a second producer.
       try {
-        if (coldStart && !options.allowColdStart) {
+        if (coldStart && !allowColdStart) {
           throw new PubsubTargetError(PUBSUB_ERROR_CODES.COLD_START_REFUSED, [
             `The PubSub state at "${statePath}" is empty, so this run would restart the change sequence of ` +
               `namespace "${namespace}" at zero.`,
@@ -365,25 +358,26 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
           )
         }
 
+        const cursor = await state.getCursor()
+
         context = new WriteContext({
           state,
           publisher,
           routes,
-          topics,
           namespace,
           messageOrdering,
           logger,
           uidAttribute,
           constantAttributes: options.attributes ?? {},
           sequenceBarrier,
-          finality: options.finality ?? {},
           assumeNoForks: options.assumeNoForks ?? false,
           finalizedStream: finalizedStream ?? false,
           publishFrom: options.publishFrom ?? 'latest',
           coldStart,
+          // So the recovery drain below stamps a floor too, rather than handing a restarted
+          // consumer one batch of messages it cannot reason against.
+          finalized: cursor?.finalized?.number,
         })
-
-        const cursor = await state.getCursor()
 
         // Recovery needs no compensation of its own: the cursor only ever advances in the same
         // transaction that enqueues the outbox, so a crash leaves unpublished rows, never
@@ -421,18 +415,18 @@ type WriteContextOptions = {
   state: PubsubState
   publisher: Publisher
   routes: ResolvedRoute[]
-  topics: string[]
   namespace: string
   messageOrdering: boolean
   logger: Logger
   uidAttribute: boolean
   constantAttributes: Record<string, string>
   sequenceBarrier: boolean
-  finality: FinalityOptions | false
   assumeNoForks: boolean
   finalizedStream: boolean
   publishFrom: number | 'latest'
   coldStart: boolean
+  /** Persisted finalized head, so the recovery drain has one before the first batch arrives. */
+  finalized?: number
 }
 
 class WriteContext {
@@ -447,12 +441,17 @@ class WriteContext {
   #deferredDrains: DrainSample[] = []
   /** Highest block sequenced so far, for the forward block-order check. Reset by a fork. */
   #lastBlock = -1
-  /** Last finalized head published as a control record, and when. Deliberately not durable. */
-  #watermark?: { block: number; at: number }
+  /**
+   * The source's finalized head, stamped on every message as `_finalized`. Held in memory
+   * only: a consumer reads it by taking the maximum, so a value lost to a restart costs
+   * nothing the next batch does not restore.
+   */
+  #finalized?: number
 
   constructor(options: WriteContextOptions) {
     this.#options = options
     this.#routesByStream = new Map(options.routes.map((route) => [route.stream, route]))
+    this.#finalized = options.finalized
   }
 
   /** A fork rewinds the cursor, so the next forward batch legitimately steps back in blocks. */
@@ -476,6 +475,11 @@ class WriteContext {
       }
 
       this.#assertFinality(ctx)
+
+      // Read at publish time rather than stored per operation: it is a producer-wide reference
+      // value, and a batch that reports none leaves the last one standing.
+      this.#finalized = ctx.stream.head.finalized?.number ?? this.#finalized
+
       await this.#resolveGoLive(ctx)
       this.#warnSkippedStreams(data, logger)
 
@@ -497,7 +501,7 @@ class WriteContext {
       )
 
       for (const operation of operations) {
-        this.#metrics.ops.inc({ id: ctx.id, topic: operation.topic, kind: operation.kind, operation: operation.op }, 1)
+        this.#metrics.ops.inc({ id: ctx.id, topic: operation.topic, operation: operation.op }, 1)
       }
 
       let publishAckAt: number | undefined
@@ -755,10 +759,6 @@ class WriteContext {
 
     this.#assertBlockOrder(operations)
 
-    // Appended after the rows, so a subscriber reads the watermark against a run that already
-    // contains everything this batch produced.
-    operations.push(...this.#finalityRecords(ctx))
-
     return operations
   }
 
@@ -767,6 +767,10 @@ class WriteContext {
    * into a block boundary: reaching the first operation of block N+1 proves the producer's
    * output for block N is whole. A mapper that steps backwards would silently retire that
    * reading for every consumer, so the batch is refused instead.
+   *
+   * The check walks the batch in sequencing order, which is route by route. A second route on
+   * the same topic therefore restarts at the batch's first block and trips this — the barrier
+   * admits one multi-block route per producer.
    */
   #assertBlockOrder(operations: PendingOperation[]): void {
     if (!this.#options.sequenceBarrier) return
@@ -778,78 +782,15 @@ class WriteContext {
             `after one for block ${formatBlock(this.#lastBlock)}.`,
           'Operations are sequenced in the order they are mapped, and consumers read a contiguous ' +
             'sequence run as a block boundary — a backwards step makes that reading wrong.',
-          'Emit drafts in block order (across routes too, when several feed one topic), or set ' +
-            '`sequenceBarrier: false` if no consumer relies on it.',
+          'Emit drafts in block order. Routes are mapped one after another, so a second route on ' +
+            'this topic restarts at the batch’s first block and lands here too — merge such streams ' +
+            'into one `map`.',
+          'Set `sequenceBarrier: false` if no consumer relies on the block boundary.',
         ])
       }
 
       this.#lastBlock = operation.blockNumber
     }
-  }
-
-  /**
-   * The source's finalized head, as a reference value. It rides a control record rather than an
-   * attribute on rows because the maximum of nothing is nothing: stamped on rows it would stop
-   * advancing whenever the table is quiet, leaving a sparse feed's consumers as stale as the last
-   * row. Monotone, so a consumer keeps the maximum it has seen and a skipped one costs nothing —
-   * which is also why the producer keeps no durable record of what it last published.
-   */
-  #finalityRecords(ctx: BatchContext): PendingOperation[] {
-    const finality = this.#options.finality
-    if (finality === false) return []
-
-    const finalized = ctx.stream.head.finalized
-    if (!finalized) return []
-
-    const now = Date.now()
-    if (!this.#due(finalized.number, now, finality)) return []
-
-    this.#watermark = { block: finalized.number, at: now }
-
-    const id = `${this.#options.namespace}:${FINALITY_RECORD}`
-    const payload = encodeRow({
-      _id: id,
-      record: FINALITY_RECORD,
-      namespace: this.#options.namespace,
-      finalized_block_number: finalized.number,
-      finalized_block_hash: finalized.hash ?? null,
-    })
-
-    return this.#options.topics.map((topic) => {
-      const operation: PendingOperation = {
-        kind: 'control',
-        // No route owns it: a control record speaks for the producer, and is always canonical.
-        route: '',
-        topic,
-        orderingKey: this.#options.messageOrdering ? topic : '',
-        // Revised in place under one id, so a destination lands one current row per producer.
-        mode: 'materialized',
-        op: 'upsert',
-        id,
-        idSource: 'row',
-        attributes: {},
-        payload,
-        blockNumber: finalized.number,
-        rollbackable: false,
-      }
-
-      this.#assertOperationSize(operation, undefined, FINALITY_RECORD)
-
-      return operation
-    })
-  }
-
-  #due(finalizedNumber: number, now: number, finality: FinalityOptions): boolean {
-    // The first one goes out immediately, below go-live included: a consumer starting today needs
-    // a floor to reason against without waiting for the next republication interval.
-    if (!this.#watermark) return true
-
-    if (finalizedNumber <= this.#watermark.block) return false
-
-    const blocks = finality.everyBlocks ?? DEFAULT_FINALITY_EVERY_BLOCKS
-    const seconds = finality.everySeconds ?? DEFAULT_FINALITY_EVERY_SECONDS
-
-    return finalizedNumber - this.#watermark.block >= blocks || now - this.#watermark.at >= seconds * 1000
   }
 
   #assertDraftBlock(draft: MessageDraft, resolved: ResolvedRoute): void {
@@ -892,7 +833,7 @@ class WriteContext {
     validateUserAttributes(attributes, {
       topic: resolved.topic,
       route: resolved.stream,
-      // `_type` always, `_uid` on request, and the producer-wide set every message carries.
+      // `_finalized` always, `_uid` on request, and the producer-wide set every message carries.
       protocolAttributes: 1 + (uidAttribute ? 1 : 0) + Object.keys(this.#options.constantAttributes).length,
     })
 
@@ -916,7 +857,6 @@ class WriteContext {
         : undefined
 
     const operation: PendingOperation = {
-      kind: 'cdc',
       route: resolved.stream,
       topic: resolved.topic,
       orderingKey,
@@ -1023,13 +963,7 @@ class WriteContext {
     return { op: 'upsert', payload: encodeRow(inverse.data) }
   }
 
-  /**
-   * A control record states something about the feed rather than about a row, so it is always
-   * canonical: a route's encoder speaks that route's row schema and has nothing to say here.
-   */
   #encoderFor(row: OutboxRow): CdcEncoder | undefined {
-    if (row.kind === 'control') return undefined
-
     const route = this.#routesByStream.get(row.route)
     if (!route) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.ROUTE_NOT_CONFIGURED, [
@@ -1046,22 +980,30 @@ class WriteContext {
     const attributes = buildAttributes(row, this.#attributeOptions())
     const wire = { rowId: row.rowId, topic: row.topic, orderingKey: row.orderingKey, attributes, payload }
 
-    assertPublishRequestSize({ ...wire, payloadBytes: payload.byteLength }, { route: row.route || row.kind })
+    assertPublishRequestSize({ ...wire, payloadBytes: payload.byteLength }, { route: row.route })
 
     return wire
   }
 
-  #attributeOptions(): { namespace: string; uidAttribute: boolean; constant: Record<string, string> } {
+  #attributeOptions(finalized = this.#finalized): {
+    namespace: string
+    uidAttribute: boolean
+    constant: Record<string, string>
+    finalized?: number
+  } {
     return {
       namespace: this.#options.namespace,
       uidAttribute: this.#options.uidAttribute,
       constant: this.#options.constantAttributes,
+      finalized,
     }
   }
 
   #assertOperationSize(operation: PendingOperation, encode: CdcEncoder | undefined, route: string): void {
     const preview = { ...operation, rowId: 0, seq: MAX_SEQUENCE_VALUE }
-    const attributes = buildAttributes(preview, this.#attributeOptions())
+    // Both `_finalized` and `_uid` grow with the numbers they carry, so the bound is taken at
+    // their widest decimal form — the check has to hold for every later head too.
+    const attributes = buildAttributes(preview, this.#attributeOptions(MAX_SEQUENCE_VALUE))
     // A custom encoder can change the document arbitrarily, so it must run before commit.
     // The canonical path can derive the exact size from the already encoded row instead.
     const payloadBytes = encode ? encodeCdcMessage(preview, encode).byteLength : canonicalCdcMessageBytes(preview)
@@ -1132,7 +1074,7 @@ async function bindWireConfig(
 }
 
 type PubsubMetrics = {
-  ops: Counter<'id' | 'topic' | 'kind' | 'operation'>
+  ops: Counter<'id' | 'topic' | 'operation'>
   publishedBytes: Counter<string>
   publishDuration: Histogram<string>
   outboxDepth: Gauge<'id'>
@@ -1148,10 +1090,8 @@ function registerPubsubMetrics(metrics: Metrics): PubsubMetrics {
   return {
     ops: metrics.counter({
       name: 'sqd_pubsub_operations_total',
-      help:
-        'Wire operations enqueued for publishing. `kind` separates row changes (cdc) from the ' +
-        "producer's own control records; `operation` is the CDC op (upsert/delete).",
-      labelNames: ['id', 'topic', 'kind', 'operation'] as const,
+      help: 'Row changes enqueued for publishing, by `operation` — the CDC op (upsert/delete).',
+      labelNames: ['id', 'topic', 'operation'] as const,
     }),
     publishedBytes: metrics.counter({
       name: 'sqd_pubsub_published_bytes_total',

@@ -143,7 +143,7 @@ remains. Orphan guard: tracked data without sync rows → coded refusal *(probed
 table-wide rather than per key, so a first run into a table a co-resident pipe populates
 is refused — GAP-20)*.
 
-**IB-28 — Google Pub/Sub binding (class C).** Combined local state schema v2, one SQLite
+**IB-28 — Google Pub/Sub binding (class C).** Combined local state schema v4, one SQLite
 file per pipe (`synchronous = FULL`, exclusive locking mode as the single-writer lock):
 `meta(key, value)` (schema version, cursor key, go-live block, producer-wide sequence,
 wire configuration, and materialized-route id sources), `cursor(id, latest, finalized,
@@ -153,7 +153,9 @@ rollback chain for ancestor resolution — `manifest(route, topic, ordering_key,
 block_number, mode, op, id, attributes, payload)`, `materialized_baseline(route, topic,
 ordering_key, id, op, attributes, payload, block_number)`, `materialized_identity(id,
 route, topic, ordering_key, attributes)`, and `rollback_inverse(route, topic,
-ordering_key, id, op, payload)`. Schema v1 is refused rather than migrated in place.
+ordering_key, id, op, payload)`. An older schema version is refused rather than migrated in
+place, and a state file that started empty is refused unless `allowColdStart` declares the
+bootstrap (E2420, CN-46).
 
 Each payload is a plain-object BigQuery CDC row containing the author's columns plus
 target-owned `_id`, `_CHANGE_TYPE` (`UPSERT` | `DELETE`), and
@@ -166,9 +168,18 @@ primary-key column is present. The default encoder is normative canonical JSON (
 decimal string, byte views → lowercase `0x` hex, `Date` → RFC 3339, keys sorted by
 UTF-16 code unit, unrepresentable values refused — RP-24); a route may encode the complete
 CDC row itself; the destination column types the encoding implies are normative for a
-BigQuery subscription and are tabulated in `docs/pubsub-bigquery.md`. User attributes remain
-attributes; the only protocol attribute is optional `_uid`, a canonical JSON tuple
-`[namespace, topic, orderingKey, seq]` with decimal `seq`.
+BigQuery subscription and are tabulated in `docs/pubsub-bigquery.md`. Nothing but such a row
+is published on a topic (RP-45). User attributes remain attributes; the protocol attributes
+are `_finalized` — the source's finalized block number in decimal, on every message, absent
+only on a dataset that reports no finalized head — and optional `_uid`, a canonical JSON
+tuple `[namespace, topic, orderingKey, seq]` with decimal `seq`.
+
+One producer feeds one topic: `_CHANGE_SEQUENCE_NUMBER` is producer-wide, so a second topic
+is refused (E2428) and a batch whose operations step backwards in block order is refused
+(E2429), unless `sequenceBarrier: false` declares that no consumer reads the barrier. The
+order checked is the sequencing order, which is route by route, so the barrier admits one
+multi-block route per producer — a second route on the same topic restarts at the batch's
+first block and is refused (GAP-40).
 
 `publish.messageOrdering` is false by default. When enabled, the topic name is the default
 ordering key and a draft may override it; the subscription must also enable ordered

@@ -6,6 +6,9 @@ That is exactly the shape a [BigQuery subscription][bq-sub] applies through
 [BigQuery CDC][bq-cdc], so no consumer code is needed — Pub/Sub writes into the table
 itself, and the table converges on the producer's current state.
 
+Nothing else is published on a feed topic: no watermark record, no fork announcement, no
+status record. What the producer needs to say *about* the feed rides an attribute instead.
+
 The subscription does not have to live in the producer's project. A topic in one project
 and a subscription plus table in another is a supported Pub/Sub topology, and it is what
 makes the feed consumable by someone who only ever sees the topic name.
@@ -176,16 +179,15 @@ gcloud pubsub subscriptions create erc20-transfers-bq \
   --bigquery-table=my-project:my_dataset.erc20_transfers \
   --use-table-schema \
   --drop-unknown-fields \
-  --message-filter='attributes._type = "cdc"' \
   --dead-letter-topic=projects/my-project/topics/erc20-transfers-dlq \
   --max-delivery-attempts=5
 ```
 
-**Create the filter with the subscription.** A subscription's filter is immutable, and the
-topic carries the producer's own control records beside the rows (see below). Without
-`_type = "cdc"` those reach a table whose schema is not theirs and land in the dead-letter
-topic. The filter selects positively rather than excluding what you happen to know about
-today, so it stays correct when a new kind of control record appears.
+**No message filter, deliberately.** Every message on the topic is a row change of this table
+and nothing else, so there is nothing to exclude. That is a producer guarantee rather than a
+convenience: a subscription's filter is immutable once created and belongs to the subscriber,
+so anything a landing would one day have to filter out could never start being published in
+the first place. What the producer has to say *about* the feed rides an attribute instead.
 
 After the source subscription exists, grant its service agent permission to forward failed
 messages to the dead-letter topic and acknowledge them on the source subscription
@@ -266,60 +268,61 @@ a `REQUIRED` one, breaks subscribers whose tables no longer match.
 
 **No finality marker on a CDC row.** The feed converges after a chain reorg — a fork
 publishes a `DELETE` or a restoring `UPSERT` with a higher sequence number — but nothing in
-the CDC envelope says when a row became reorg-proof. The producer publishes the source's
-finalized head as a control record instead, and that is a reference value, not a proof about
-any row: "act only on finalized values" is a policy a consumer applies, and a BigQuery
-subscription filtered on `_type = "cdc"` never sees the record at all.
+the CDC envelope says when a row became reorg-proof. The source's finalized head rides the
+`_finalized` attribute instead (see below), and it is a reference value about the chain, not
+a statement about the row it happens to travel with.
 
 **Quotas.** 10 000 attached subscriptions per topic, and a per-region cap on BigQuery
 subscription throughput.
 
-## The control channel
+## The finality watermark
 
-Everything on the topic is a complete CDC row, including what the producer says *about* the
-feed. There is no second payload shape: a BigQuery subscription can attach to any of it, and
-a consumer that already parses the feed needs no second parser. What separates the two is one
-attribute, `_type`, carried by **every** message:
+The one input a stateful consumer cannot derive from the rows. An aggregator folding rows into
+state cannot keep per-block detail forever, and compacting it into a base needs two answers:
+can anything below this height still be taken back, and has everything below it arrived? The
+row stream answers neither on its own — there is no count, no end marker, and on an unordered
+subscription silence is not proof. The sequence run answers the second question (see below).
+This attribute answers the first.
 
-| `_type` | Body |
-| --- | --- |
-| `cdc` | a row change from one of the `topics` routes |
-| `control` | a statement the producer makes about its own feed |
+So the producer stamps the source's finalized head on **every** message, as the `_finalized`
+attribute — the block number, decimal, as a string:
 
-The marker is deliberately coarse — data or not-data — so an immutable filter stays correct
-when a new kind of control record appears. Each kind discriminates itself in its own body,
-under a `record` field.
-
-Today there is one kind: the **finality watermark**.
-
-```json
-{
-  "_id": "us-ethereum-logs:finality",
-  "_CHANGE_TYPE": "UPSERT",
-  "_CHANGE_SEQUENCE_NUMBER": "2B",
-  "record": "finality",
-  "namespace": "us-ethereum-logs",
-  "finalized_block_number": 19000000,
-  "finalized_block_hash": "0x3f…"
-}
+```
+_finalized: "19000000"
 ```
 
-It carries the source's finalized head, and it rides the producer's own progress rather than
-row traffic: stamped on rows, a watermark stops advancing whenever the table is quiet, and a
-sparse feed's consumers would be as stale as the last row. The value is monotone, so a
-consumer keeps the maximum it has seen — no `_CHANGE_SEQUENCE_NUMBER` comparison is involved,
-which makes the read robust to duplicates and reordering, and makes a skipped publication
-harmless. A consumer that starts today gets one immediately rather than waiting for the next
-interval.
+It is an attribute because the body is the table's row and nothing else, and it is on every
+message rather than on a topic of its own because the alternative asks every consumer to hold a
+second subscription and keep it aligned with the first.
 
-**It is a reference value, never a proof about a row.** Providers disagree about finality and
-a pipe may widen its window deliberately, so the number is an input to whatever confirmation
+**Read it by taking the maximum.** No `_CHANGE_SEQUENCE_NUMBER` comparison is involved, which
+makes the read robust to duplicates and reordering for free and makes a stale value harmless —
+which is in turn why the producer keeps no durable record of what it last published. A consumer
+starting today has a floor to reason against from its very first message, with no go-live gate
+to clear and no republication interval to wait out.
+
+**It is a reference value, never a proof about a row.** Providers disagree about finality and a
+pipe may widen its window deliberately, so the number is an input to whatever confirmation
 policy a consumer has chosen. Nothing on this feed says a given row can no longer change.
 
-The producer sets the interval with `finality: { everyBlocks, everySeconds }`, or turns the
-record off entirely with `finality: false`. Attributes declared in the target's `attributes`
-option ride control records too — otherwise a subscriber filtered on `table` would be blind
-to the statements about its own feed in exactly the case they exist for.
+**It bounds retraction, not arrival.** At or below it, nothing already published will be taken
+back: an operation enters the rollback manifest only above the finalized head, and the manifest
+is pruned to that head on every commit. It says nothing about what has been *sent*. The number
+is the source's head, not the producer's position in the chain — a producer backfilling, or
+catching up after an outage, stamps a head far above the blocks it is currently publishing.
+
+So retire state below the lower of two numbers: this one, and the highest block the contiguous
+sequence run has closed. The first says nothing below it will be taken back; the second says
+nothing below it is still on its way. Neither is sufficient alone, and a filtered subscription
+has traded the second away with the barrier — it has to bound arrival some other way.
+
+**A quiet table stalls it.** Riding rows means the value stops advancing while nothing is
+published. That is a stated limit, not a defect: on a producer that has caught up, the next
+message a consumer receives is both the next watermark and the next row that could add to what
+it holds. Quiet delays compaction without growing what waits to be compacted.
+
+The attribute is absent only on a dataset that reports no finalized head at all, which the
+producer refuses to publish from unless `assumeNoForks: true` declares it fork-free.
 
 ## What the sequence guarantees
 
@@ -335,7 +338,9 @@ Two rules rest on the same counter:
 - **forward operations are sequenced in block order**, checked per batch rather than assumed.
   A run that reaches the first operation of block *N+1* proves the producer's output for block
   *N* is whole — and it is the only way to tell a block that produced no rows from one whose
-  rows have not arrived;
+  rows have not arrived. Operations are sequenced in the order the producer maps them, route
+  after route, so the barrier admits **one multi-block route**: a second route on the same
+  topic restarts at the batch's first block and is refused. Merge such streams into one route;
 - **a compensation is sequenced ahead of the operation that replaces it.** The cursor rewind
   and the fork's compensations are one transaction, and the replacement branch comes from later
   batches. That is what lets a consumer folding rows into state undo a reorg from the row
@@ -359,7 +364,7 @@ Exported by the pipe's metrics server. Alert on the first two.
 | --- | --- | --- |
 | `sqd_pubsub_block_to_commit_lag_seconds` | histogram | Seconds from the committed block's chain timestamp to the Pub/Sub ack. End-to-end freshness, including block production and chain-to-portal propagation — a service level, not an attribution. Empty below the go-live block, or when the pipe's query selects no block `timestamp`. |
 | `sqd_pubsub_portal_to_commit_lag_seconds` | histogram | Seconds from the portal stamping the batch to the Pub/Sub ack. In-process latency, covering stream-buffer dwell and the pipe's transformers as well as this target. |
-| `sqd_pubsub_operations_total` | counter | Operations enqueued, by `topic`, `kind` (`cdc`/`control`) and `operation` (`upsert`/`delete`). |
+| `sqd_pubsub_operations_total` | counter | Row changes enqueued, by `topic` and `operation` (`upsert`/`delete`). |
 | `sqd_pubsub_publish_duration_seconds` | histogram | Wallclock of one outbox drain. Split a `portal_to_commit` regression against this. |
 | `sqd_pubsub_published_bytes_total` | counter | Payload bytes confirmed published, attributes excluded. |
 | `sqd_pubsub_outbox_depth` | gauge | Rows queued but unconfirmed. Sustained growth means the publisher is not keeping up. |

@@ -42,7 +42,6 @@ async function run({
       state: { path: tempStatePath() },
       publishFrom: 0,
       allowColdStart: true,
-      finality: false,
       topics: { blocks: route },
     }),
   )
@@ -150,6 +149,12 @@ describe('pubsubTarget — fork compensation', () => {
     ])
   })
 
+  it('stamps the finalized head on a compensation too, so no message is missing it', async () => {
+    const publisher = await run({ responses: shallowFork, route: eventRoute, to: 3 })
+
+    expect(publisher.published.map((message) => message.attributes['_finalized'])).toEqual(['1', '1', '1', '1', '1'])
+  })
+
   it('leaves the finalized prefix alone — it was never rollbackable', async () => {
     const publisher = await run({ responses: shallowFork, route: eventRoute, to: 3 })
 
@@ -254,7 +259,6 @@ describe('pubsubTarget — fork compensation', () => {
         state: { path: tempStatePath() },
         publishFrom: 0,
         allowColdStart: true,
-        finality: false,
         topics: { blocks: eventRoute },
       }),
     )

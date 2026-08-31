@@ -25,15 +25,8 @@ const MAX_TOPIC_RESOURCE_BYTES = 'projects/'.length + 30 + '/topics/'.length + 2
 
 export type PubsubOp = 'upsert' | 'delete'
 
-/**
- * What a message says. `cdc` is a row change; `control` is a statement the producer makes about
- * the feed itself. Both are complete CDC rows — the marker is deliberately coarse, so a filter
- * written today stays correct when a new kind of control record appears.
- */
-export type MessageKind = 'cdc' | 'control'
-
 /** Protocol-owned PubSub attributes; row metadata lives in `data`. */
-export const PROTOCOL_ATTRIBUTES = ['_type', '_uid'] as const
+export const PROTOCOL_ATTRIBUTES = ['_finalized', '_uid'] as const
 
 export const CDC_FIELDS = {
   id: '_id',
@@ -366,7 +359,6 @@ export function encodeCdcMessage(operation: CdcOperation, encode?: CdcEncoder): 
 // ─── Wire attributes ──────────────────────────────────────────────────────────
 
 export type WireOperation = {
-  kind: MessageKind
   topic: string
   op: PubsubOp
   id: string
@@ -378,21 +370,29 @@ export type WireOperation = {
 }
 
 /**
- * Build business filter attributes plus `_type` and the optional Dataflow deduplication id. Row
- * identity, operation, and version are fields in the BigQuery CDC payload.
+ * Build business filter attributes plus the source's finalized head and the optional Dataflow
+ * deduplication id. Row identity, operation, and version are fields in the BigQuery CDC payload.
  *
- * `constant` is the producer's topic-wide attribute set. It rides control records too, so a
- * subscription filtered on it still receives the statements the producer makes about its feed.
+ * `constant` is the producer's topic-wide attribute set.
  */
 export function buildAttributes(
   operation: Omit<WireOperation, 'seq'> & { seq: number | string },
-  options: { namespace: string; uidAttribute?: boolean; constant?: Record<string, string> },
+  options: {
+    namespace: string
+    uidAttribute?: boolean
+    constant?: Record<string, string>
+    /** The source's finalized head, or `undefined` on a dataset that reports none. */
+    finalized?: number
+  },
 ): Record<string, string> {
   const attributes: Record<string, string> = { ...options.constant, ...operation.attributes }
 
-  // Carried by every message, so a subscription selects what it wants rather than excluding
-  // what it happens to know about today.
-  attributes['_type'] = operation.kind
+  // The one input a stateful consumer cannot derive from the rows. It rides an attribute
+  // because the body is the table's row, and every message because it is read by taking the
+  // maximum — which makes a duplicate, a reordering and a skipped value all cost nothing.
+  if (options.finalized !== undefined) {
+    attributes['_finalized'] = String(options.finalized)
+  }
 
   if (options.uidAttribute) {
     // Fully qualified so independently configured producers cannot collide even if they reuse

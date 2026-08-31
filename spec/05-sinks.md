@@ -138,6 +138,44 @@ head gives the sink nothing to record and MUST be refused, unless the operator e
 declares it fork-free; a fork arriving under that declaration is fatal and uncompensatable
 (the assertion was wrong and the data has left).
 
+**RP-45 — Shared-feed contract (class C).** [MUST] A topic carries one payload shape:
+every message is a row change of the sink's output and the sink publishes nothing else on
+it — no watermark record, no fork announcement, no status record. A second shape is a
+second data plane, and a subscriber's server-side filter is immutable and owned by the
+subscriber, so anything a subscriber would one day have to exclude can never start being
+published at all. What the producer needs to say *about* the feed rides message metadata.
+
+Two statements ride that constraint:
+
+- **The barrier.** Operations take their versions from one producer-wide counter, in the
+  same local transaction that records them for publication, and in forward block order.
+  A contiguous run of versions is then a completeness statement, and a run reaching the
+  first operation of block *N+1* proves the producer's output for block *N* is whole —
+  which is the only way to tell a block that produced no rows from one whose rows have not
+  arrived. The sink MUST keep the run gap-free on a topic, refusing a configuration that
+  splits the counter across topics, and MUST refuse a batch whose operations step backwards
+  in block order; both may be waived only by an explicit declaration that no consumer of
+  this producer reads the barrier. The barrier is a statement about transport alone: it
+  establishes neither that the source produced every row it should have, nor that any row
+  is final. A server-side filter removes messages, every removal reads as a gap, and
+  filtering therefore trades the barrier away — so the sink MUST NOT offer an affordance
+  that looks like "filtered and still complete".
+- **The finality reference.** The source's finalized head rides metadata on **every**
+  message. It is the one input a consumer folding rows into state cannot derive: the row
+  stream carries no count, no end marker, and on an unordered subscription silence is not
+  proof. It is monotone and read by taking the maximum — no version comparison is involved,
+  which makes the read robust to duplicate and reordered delivery and a stale value
+  harmless, and is why the sink needs no durable record of what it last published. It is a
+  reference value feeding whatever confirmation policy the consumer chose, never a proof
+  about the row it travels with. It bounds **retraction alone**: nothing at or below it is
+  compensated, because an operation is recorded for compensation only above the finalized
+  head. It bounds arrival not at all — it is the source's head, not the sink's position, so
+  a sink that is backfilling or catching up publishes rows far below the head it stamps on
+  them. What bounds arrival is the barrier, and a consumer retiring state holds below both.
+  Riding rows, the reference stalls while the output is quiet: a stated limit, not a defect,
+  since on a sink that has caught up the next message a consumer receives is both the next
+  reference and the next row that could add to what it holds.
+
 ## Error taxonomy (sink-visible)
 
 Closed, banded, coded (ADR-4); concrete codes in IB-50…IB-52. Classes: configuration

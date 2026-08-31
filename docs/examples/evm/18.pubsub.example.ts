@@ -24,11 +24,13 @@
  * contiguous run is missing no operation the producer committed inside it. A second topic is
  * refused for that reason unless `sequenceBarrier: false` says no consumer reads the barrier.
  *
- * Beside the rows, the producer publishes the source's finalized head as a control record —
- * `_type: "control"` in the attributes, `record: "finality"` in the body. It advances off the
- * pipe's own progress rather than row traffic, and it is a reference value a consumer folds into
- * its own confirmation policy, never a proof that a row can no longer change. A BigQuery
- * subscription filters it out with `attributes._type = "cdc"`.
+ * Nothing but row changes is published on the topic, so a BigQuery subscription needs no message
+ * filter. The one thing a consumer cannot derive from the rows — the source's finalized head —
+ * rides the `_finalized` attribute on every message. It is read by taking the maximum, and it is
+ * a reference value a consumer folds into its own confirmation policy, never a proof that a row
+ * can no longer change. It bounds retraction, not arrival: it is the source's head, not this
+ * producer's position, so while the pipe is catching up it stands well above the blocks being
+ * published — what bounds arrival is the sequence run.
  *
  * Business attributes remain on the PubSub message for subscription filters. A compensation
  * copies the attributes of the operation it repairs, so a filter such as
@@ -88,8 +90,8 @@ async function main() {
       // Drop this once the namespace has published: it exists to make bootstrapping a deliberate
       // act, so a lost state file cannot quietly restart the sequence.
       allowColdStart: true,
-      // Constant for the whole producer, and mirrored onto control records — a subscriber
-      // filtered on `table` would otherwise miss the statements about its own feed.
+      // Constant for the whole producer: they ride every message, so a subscription can filter
+      // on them without splitting the feed.
       attributes: { chain: 'base', table: 'erc20_transfers' },
       publish: {
         // The target generates the value. Dataflow must separately be told to use `_uid` as

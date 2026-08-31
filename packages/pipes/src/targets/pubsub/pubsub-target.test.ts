@@ -45,6 +45,9 @@ function blocksRoute(topic = 'blocks') {
 const CHAIN_GENESIS_SECONDS = 1_700_000_000
 const chainTime = (blockNumber: number) => CHAIN_GENESIS_SECONDS + blockNumber * 12
 
+/** One block header. Single-argument on purpose, so `numbers.map(header)` is safe. */
+const header = (number: number) => ({ number, hash: `0x${number}`, timestamp: chainTime(number) })
+
 /** Drives `target.write()` one block per batch, so batch boundaries are the test's to choose. */
 async function driveBatches({
   statePath,
@@ -62,7 +65,7 @@ async function driveBatches({
   blocks: number[]
   finalized: number
   /** Finalized head per block, for the cases that watch the watermark move. */
-  finalizedAt?: (blockNumber: number) => number
+  finalizedAt?: (blockNumber: number) => number | undefined
   targetOptions?: Partial<Parameters<typeof pubsubTarget<Blocks>>[0]>
   metrics?: ReturnType<typeof mockMetricsServer>
   lastBlockReceivedAt?: Date
@@ -75,20 +78,19 @@ async function driveBatches({
     state: { path: statePath },
     publishFrom: 0,
     allowColdStart: true,
-    // Opted out unless a case is about it: it would otherwise add a control record to every
-    // published list these cases count.
-    finality: false,
     topics: { blocks: blocksRoute() },
     ...targetOptions,
   })
 
   async function* read() {
     for (const number of blocks) {
+      const head = finalizedAt(number)
+
       yield {
         data: { blocks: [{ number, hash: `0x${number}`, timestamp: number }] },
         ctx: makeBatchContext({
           current: { number, hash: `0x${number}`, timestamp: blockTimestamp(number) },
-          finalized: { number: finalizedAt(number), hash: `0x${finalizedAt(number)}` },
+          finalized: head === undefined ? undefined : { number: head, hash: `0x${head}` },
           rollbackChain: [{ number, hash: `0x${number}` }],
           metrics: metrics?.server.metrics,
           lastBlockReceivedAt,
@@ -131,7 +133,6 @@ async function runPipe({
       state: { path: statePath },
       publishFrom: 0,
       allowColdStart: true,
-      finality: false,
       topics: { blocks: blocksRoute() },
       ...targetOptions,
     }),
@@ -153,7 +154,7 @@ describe('pubsubTarget', () => {
     expect(publisher.published[0]).toEqual({
       topic: 'blocks',
       orderingKey: '',
-      attributes: { _type: 'cdc', chain: 'mock' },
+      attributes: { _finalized: '2', chain: 'mock' },
       payload:
         '{"_CHANGE_SEQUENCE_NUMBER":"1","_CHANGE_TYPE":"UPSERT",' + '"_id":"test-pipe:blocks:1:0x1:0","number":1}',
     })
@@ -341,7 +342,6 @@ describe('pubsubTarget', () => {
         publisher: resumed,
         state: { path: statePath },
         publishFrom: 0,
-        finality: false,
         topics: { blocks: blocksRoute() },
       }),
     )
@@ -409,7 +409,6 @@ describe('pubsubTarget', () => {
           publisher: resumed,
           state: { path: statePath },
           publishFrom: 'latest',
-          finality: false,
           topics: { blocks: blocksRoute() },
         }),
       )
@@ -505,7 +504,6 @@ describe('pubsubTarget', () => {
       expect(metrics.counter('sqd_pubsub_operations_total').total).toBe(2)
       expect(metrics.counter('sqd_pubsub_operations_total').calls[0].labels).toMatchObject({
         topic: 'blocks',
-        kind: 'cdc',
         operation: 'upsert',
       })
     })
@@ -738,7 +736,6 @@ describe('pubsubTarget', () => {
         state: { path: tempStatePath() },
         publishFrom: 0,
         allowColdStart: true,
-        finality: false,
         topics: {
           blocks: {
             topic: 'blocks',
@@ -1013,132 +1010,167 @@ describe('pubsubTarget', () => {
 
       expect(publisher.operations()).toHaveLength(2)
     })
+
+    /** Two routes onto one topic, over a single batch spanning two blocks. */
+    async function writeSharedTopic(publisher: FakePublisher, sequenceBarrier?: boolean) {
+      const headers = [100, 101].map(header)
+
+      const target = pubsubTarget<Blocks & { approvals: Blocks['blocks'] }>({
+        pubsub: {} as never,
+        publisher,
+        state: { path: tempStatePath() },
+        publishFrom: 0,
+        allowColdStart: true,
+        sequenceBarrier,
+        topics: { blocks: blocksRoute(), approvals: blocksRoute() },
+      })
+
+      async function* read() {
+        yield {
+          data: { blocks: headers, approvals: headers },
+          ctx: makeBatchContext({
+            current: headers[1],
+            finalized: header(90),
+            rollbackChain: headers,
+          }),
+        }
+      }
+
+      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
+    }
+
+    /**
+     * The barrier admits one multi-block route per producer (GAP-40): operations are sequenced
+     * route after route, so the second route restarts at the batch's first block. No draft order
+     * the mapper can supply avoids it — this pins the limit the docs state.
+     */
+    it('refuses a second route on the same topic once a batch spans several blocks', async () => {
+      await expect(writeSharedTopic(new FakePublisher())).rejects.toMatchObject({
+        code: PUBSUB_ERROR_CODES.BLOCK_ORDER,
+      })
+    })
+
+    it('takes a second route on the same topic once the barrier is declared off', async () => {
+      const publisher = new FakePublisher()
+
+      await writeSharedTopic(publisher, false)
+
+      expect(publisher.operations()).toHaveLength(4)
+    })
   })
 
   describe('the finality watermark', () => {
-    const finality = { everyBlocks: 10 }
+    const finalizedOf = (publisher: FakePublisher) =>
+      publisher.published.map((message) => message.attributes['_finalized'])
 
-    it('publishes the source finalized head as a control record on the feed topic', async () => {
+    it('stamps the source finalized head on every message', async () => {
       const publisher = new FakePublisher()
 
-      await driveBatches({
-        statePath: tempStatePath(),
-        publisher,
-        blocks: [1, 2],
-        finalized: 1,
-        targetOptions: { finality },
-      })
+      await driveBatches({ statePath: tempStatePath(), publisher, blocks: [1, 2], finalized: 5 })
 
-      expect(publisher.controlRecords()).toEqual([
-        {
-          _CHANGE_SEQUENCE_NUMBER: expect.any(String),
-          _CHANGE_TYPE: 'UPSERT',
-          _id: 'test-pipe:finality',
-          record: 'finality',
-          namespace: 'test-pipe',
-          finalized_block_number: 1,
-          finalized_block_hash: '0x1',
-        },
-      ])
-      expect(publisher.published.every((message) => message.topic === 'blocks')).toBe(true)
+      // Not a per-row reading: the same reference value rides every message of the batch.
+      expect(finalizedOf(publisher)).toEqual(['5', '5'])
     })
 
-    it('declares the kind of every message, so a subscription selects rows positively', async () => {
-      const publisher = new FakePublisher()
-
-      await driveBatches({
-        statePath: tempStatePath(),
-        publisher,
-        blocks: [1],
-        finalized: 1,
-        targetOptions: { finality },
-      })
-
-      expect(publisher.published.map((message) => message.attributes['_type'])).toEqual(['cdc', 'control'])
-    })
-
-    it('carries the producer-wide attributes onto the control record too', async () => {
-      const publisher = new FakePublisher()
-
-      await driveBatches({
-        statePath: tempStatePath(),
-        publisher,
-        blocks: [1],
-        finalized: 1,
-        targetOptions: { finality, attributes: { chain: 'mock', table: 'blocks' } },
-      })
-
-      // A subscriber filtered on `table` would otherwise miss the statements about its own feed.
-      expect(publisher.published.map((message) => message.attributes['table'])).toEqual(['blocks', 'blocks'])
-    })
-
-    it('publishes the first one immediately, below the go-live block included', async () => {
-      const publisher = new FakePublisher()
-
-      await driveBatches({
-        statePath: tempStatePath(),
-        publisher,
-        blocks: [1, 2],
-        finalized: 1,
-        targetOptions: { finality, publishFrom: 100 },
-      })
-
-      expect(publisher.operations()).toHaveLength(0)
-      expect(publisher.controlRecords()).toHaveLength(1)
-    })
-
-    it('advances off the producer’s own progress while the routes map nothing', async () => {
+    it('advances the stamp as the source finalizes more blocks', async () => {
       const publisher = new FakePublisher()
 
       await driveBatches({
         statePath: tempStatePath(),
         publisher,
         blocks: [1, 2, 3],
-        finalized: 1,
+        finalized: 0,
         finalizedAt: (block) => block * 100,
-        targetOptions: { topics: { blocks: { topic: 'blocks', map: () => [] } }, finality },
       })
 
-      expect(publisher.controlRecords().map((record) => record['finalized_block_number'])).toEqual([100, 200, 300])
+      expect(finalizedOf(publisher)).toEqual(['100', '200', '300'])
     })
 
-    it('republishes only once the head has advanced past the throttle', async () => {
+    it('stalls while the table is quiet, and the next row carries the head it reached', async () => {
       const publisher = new FakePublisher()
 
       await driveBatches({
         statePath: tempStatePath(),
         publisher,
-        blocks: [1, 2, 3, 4],
-        finalized: 1,
-        // +1, +1, +10 — only the last clears `everyBlocks: 10`, and the first is unconditional.
-        finalizedAt: (block) => (block < 4 ? block : 13),
-        targetOptions: { finality },
+        blocks: [1, 2, 3],
+        finalized: 0,
+        finalizedAt: (block) => block * 100,
+        // Riding rows means a stretch that publishes nothing publishes no watermark either. That
+        // only delays compaction: nothing accrues downstream while nothing arrives.
+        targetOptions: {
+          topics: {
+            blocks: {
+              ...blocksRoute(),
+              map: ({ data }) => (data[0].number < 3 ? [] : [{ data: { number: 3 }, block: data[0] }]),
+            },
+          },
+        },
       })
 
-      expect(publisher.controlRecords().map((record) => record['finalized_block_number'])).toEqual([1, 13])
+      expect(finalizedOf(publisher)).toEqual(['300'])
     })
 
-    it('never publishes a head below the last one, so the maximum a consumer keeps is safe', async () => {
+    it('keeps the last known head when a batch reports none', async () => {
       const publisher = new FakePublisher()
 
       await driveBatches({
         statePath: tempStatePath(),
         publisher,
         blocks: [1, 2],
-        finalized: 1,
-        finalizedAt: (block) => (block === 1 ? 50 : 20),
-        targetOptions: { finality: { everyBlocks: 1 } },
+        finalized: 0,
+        finalizedAt: (block) => (block === 1 ? 50 : undefined),
       })
 
-      expect(publisher.controlRecords().map((record) => record['finalized_block_number'])).toEqual([50])
+      expect(finalizedOf(publisher)).toEqual(['50', '50'])
     })
 
-    it('publishes none when the producer declares it off', async () => {
+    it('stamps the persisted head on a restart’s recovery drain, before any batch arrives', async () => {
+      const statePath = tempStatePath()
+
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+      await expect(driveBatches({ statePath, publisher: failing, blocks: [1], finalized: 50 })).rejects.toThrow(
+        'network down',
+      )
+
+      // No batches at all: everything published here comes from the recovery drain, and a cold
+      // consumer still gets a floor to reason against on its very first message.
+      const restarted = new FakePublisher()
+      await driveBatches({ statePath, publisher: restarted, blocks: [], finalized: 0 })
+
+      expect(finalizedOf(restarted)).toEqual(['50'])
+    })
+
+    it('rides the producer-wide attributes rather than replacing them', async () => {
       const publisher = new FakePublisher()
 
-      await driveBatches({ statePath: tempStatePath(), publisher, blocks: [1], finalized: 1 })
+      await driveBatches({
+        statePath: tempStatePath(),
+        publisher,
+        blocks: [1],
+        finalized: 5,
+        targetOptions: { attributes: { chain: 'mock', table: 'blocks' } },
+      })
 
-      expect(publisher.controlRecords()).toHaveLength(0)
+      expect(publisher.published[0].attributes).toEqual({
+        _finalized: '5',
+        chain: 'mock',
+        table: 'blocks',
+      })
+    })
+
+    it('omits it on a dataset that reports no finalized head at all', async () => {
+      const publisher = new FakePublisher()
+
+      await runPipe({
+        publisher,
+        statePath: tempStatePath(),
+        responses: [{ statusCode: 200, data: portalBlocks([1]) }],
+        to: 1,
+        targetOptions: { assumeNoForks: true },
+      })
+
+      expect(publisher.published[0].attributes).not.toHaveProperty('_finalized')
     })
   })
 
@@ -1170,6 +1202,46 @@ describe('pubsubTarget', () => {
 
       expect(publisher.published).toHaveLength(0)
       expect(publisher.setupCalls).toHaveLength(0)
+    })
+
+    /**
+     * The refusal is worthless if it disarms itself: a state file stamped on the way out reads
+     * as a warm start, so the retry would publish from sequence zero with no error, no warning
+     * and a `cold_start` gauge of 0 — quieter than the warning this replaced.
+     */
+    it('leaves the state untouched, so a retry meets the same refusal', async () => {
+      const statePath = tempStatePath()
+
+      for (const _ of [1, 2, 3]) {
+        await expect(
+          driveBatches({
+            statePath,
+            publisher: new FakePublisher(),
+            blocks: [1],
+            finalized: 1,
+            targetOptions: { allowColdStart: false },
+          }),
+        ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.COLD_START_REFUSED })
+      }
+    })
+
+    it('still bootstraps once the declaration arrives, sequencing from the start', async () => {
+      const statePath = tempStatePath()
+
+      await expect(
+        driveBatches({
+          statePath,
+          publisher: new FakePublisher(),
+          blocks: [1],
+          finalized: 1,
+          targetOptions: { allowColdStart: false },
+        }),
+      ).rejects.toThrow()
+
+      const declared = new FakePublisher()
+      await driveBatches({ statePath, publisher: declared, blocks: [1], finalized: 1 })
+
+      expect(declared.operations().map((operation) => operation.seq)).toEqual([1])
     })
 
     it('needs no declaration on a warm restart', async () => {

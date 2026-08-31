@@ -51,7 +51,6 @@ function block(number: number, suffix = 'a'): BlockCursor {
 
 function operation(overrides: Partial<PendingOperation> & { id?: string } = {}): PendingOperation {
   return {
-    kind: 'cdc',
     route: 'transfers',
     topic: 'transfers',
     orderingKey: '',
@@ -77,6 +76,21 @@ describe('SqlitePubsubState', () => {
 
     const second = await openState(path)
     expect(second.coldStart).toBe(false)
+  })
+
+  // Stamping the schema version is what makes the next open read as warm, so a caller that
+  // refuses a cold start must not have it written behind its back.
+  it('writes no bootstrap markers when the caller forbids a cold start', async () => {
+    const path = statePath()
+
+    const state = new SqlitePubsubState({ path })
+    opened.push(state)
+    const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger(), allowColdStart: false })
+    expect(coldStart).toBe(true)
+    expect(await state.getMeta('schema_version')).toBeUndefined()
+    await state.close()
+
+    expect((await openState(path)).coldStart).toBe(true)
   })
 
   it('round-trips the cursor with an explicit finalized floor', async () => {
@@ -236,7 +250,7 @@ describe('SqlitePubsubState', () => {
     expect(result.coldStart).toBe(false)
   })
 
-  // Only v2 has an in-place migration to v3; anything older is refused rather than guessed at.
+  // No in-place migration: a file another version wrote is refused rather than guessed at.
   it('refuses a state file written by another schema version', async () => {
     const path = statePath()
     const first = await openState(path)
