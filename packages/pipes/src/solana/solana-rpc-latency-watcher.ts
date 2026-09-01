@@ -1,6 +1,8 @@
 import { RpcLatencyWatcher, WebSocketListener, rpcLatencyWatcher } from '~/monitoring/index.js'
 import { solanaQuery } from '~/solana/solana-query-builder.js'
 
+export type { LatencySample, RpcObservation } from '~/monitoring/index.js'
+
 type Notification = {
   params?: {
     result?: {

@@ -1,6 +1,8 @@
 import { evmQuery } from '~/evm/evm-query-builder.js'
 import { RpcLatencyWatcher, WebSocketListener, rpcLatencyWatcher } from '~/monitoring/index.js'
 
+export type { LatencySample, RpcObservation } from '~/monitoring/index.js'
+
 class EvmRpcLatencyWatcher extends RpcLatencyWatcher {
   watch(url: string): WebSocketListener {
     const listener = new WebSocketListener(url)
