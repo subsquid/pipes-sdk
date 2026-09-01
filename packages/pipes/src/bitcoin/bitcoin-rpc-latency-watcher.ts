@@ -2,6 +2,8 @@ import { PollingClient, RpcLatencyWatcher, rpcLatencyWatcher } from '~/monitorin
 
 import { bitcoinQuery } from './bitcoin-query-builder.js'
 
+export type { LatencySample, RpcObservation } from '~/monitoring/index.js'
+
 const DEFAULT_INTERVAL_MS = 4_000
 
 type BlockHeader = {
