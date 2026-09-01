@@ -570,6 +570,50 @@ new feed. Reusing the old namespace or destination state can make new CDC change
 
 ---
 
+## 19. RPC latency watcher emits an array of two-sided samples
+
+`evmRpcLatencyWatcher` / `solanaRpcLatencyWatcher` / `bitcoinRpcLatencyWatcher` used to emit
+`LatencySample | null` at the moment the portal delivered a head, joining against whatever the
+reference RPC happened to hold *right then*. Heads the reference had not reported yet produced
+`null` and were dropped — which is precisely the case where the portal won. The delay distribution
+was therefore truncated at zero and its tail described the reference node, not the portal.
+
+Each head is now held until both sides have reported it (or the wait window closes), and every batch
+emits the samples that became decidable, so iterate the result:
+
+```ts
+// before
+for await (const { data } of stream) {
+  if (!data) continue
+  console.table(data.rpc)
+}
+
+// after
+for await (const { data } of stream) {
+  for (const sample of data) {
+    console.table(sample.rpc)
+  }
+}
+```
+
+`rpc[]` now carries one row per configured endpoint — including endpoints that did not report the
+head — and the rows changed shape:
+
+- **`portalDelayMs` is signed.** Negative means the portal delivered the head first. Histogram
+  buckets and any `max(0, …)` clamping downstream must be revisited, or portal leads will be folded
+  back into the zero bucket.
+- **`portalDelayMs` and `receivedAt` are absent when `unresolved` is set.** `rpc-behind` — the
+  endpoint had not reached the head before the window closed, so the portal is ahead by at least
+  that window; `rpc-missing` — the endpoint is already past the head but never recorded it (reorged
+  away, dropped update, or evicted while the portal was backfilling), which carries no latency
+  information at all. Count these, do not chart them, and never read a missing delay as zero.
+
+The window defaults to 60s and is configurable per watcher via `resolveTimeoutMs`. Samples surface
+one portal batch after they become decidable — the delay they carry is computed from recorded
+timestamps and is unaffected by that.
+
+---
+
 ## Quick checklist
 
 - [ ] `evmPortalSource` → `evmPortalStream`
@@ -601,4 +645,6 @@ new feed. Reusing the old namespace or destination state can make new CDC change
 - [ ] Prometheus dashboards: `sqd_current_block` → `sqd_processed_block`, `sqd_last_block` → `sqd_end_block`
 - [ ] Pub/Sub: migrate delivery configuration and consumers to BigQuery CDC rows; use fresh v2 state, a fresh namespace, and a re-bootstrapped destination
 - [ ] Pub/Sub destination tables: `Date` columns are now RFC 3339 `TIMESTAMP`, not `INT64` unix seconds
+- [ ] RPC latency watchers: output is now `LatencySample[]` — iterate it instead of null-checking a single sample
+- [ ] RPC latency consumers: `portalDelayMs` is signed (negative = portal first) and absent on `unresolved` rows; stop treating a missing delay as `0`
 - [ ] Upgrade `@subsquid/pipes-ui` together with the SDK

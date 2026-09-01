@@ -86,8 +86,8 @@ describe('evmRpcLatencyWatcher subscription', () => {
       makeBatchContext(new Date('2026-05-09T00:00:10Z')),
     )
 
-    expect(result?.number).toBe(100)
-    expect(result?.rpc[0]).toMatchObject({ url: 'ws://rpc', hash: '0xabc' })
+    expect(result[0]?.number).toBe(100)
+    expect(result[0]?.rpc[0]).toMatchObject({ url: 'ws://rpc', hash: '0xabc' })
   })
 
   it('ignores a subscription frame with no head instead of crashing', async () => {
@@ -104,7 +104,7 @@ describe('evmRpcLatencyWatcher subscription', () => {
       [{ header: { number: 1, timestamp: 0 } }] as never,
       makeBatchContext(new Date()),
     )
-    expect(result).toBeNull()
+    expect(result[0]?.rpc).toEqual([{ url: 'ws://rpc', unresolved: 'rpc-missing' }])
   })
 
   it('closes the socket on stop', async () => {

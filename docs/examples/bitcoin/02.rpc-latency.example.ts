@@ -15,6 +15,12 @@ import { bitcoinPortalStream, bitcoinRpcLatencyWatcher } from '@subsquid/pipes/b
  * and the watcher will emit `Authorization: Basic <...>` automatically (Node's
  * `fetch` does not honor URL credentials by itself).
  *
+ * A sample is emitted once both sides have reported the head, so `portalDelayMs` is
+ * signed: positive when the portal was later than the node, negative when it was first.
+ * If the node never reports the head within `resolveTimeoutMs` (default 60s), the row
+ * carries `unresolved` instead of a delay — `rpc-behind` when the node had not reached
+ * the head, `rpc-missing` when it is already past it (backfill, reorg, dropped update).
+ *
  * ⚠️ The reported latency includes client-side network RTT and does NOT capture
  * the node's internal block-validation time.
  */
@@ -33,11 +39,11 @@ async function main() {
   })
 
   for await (const { data } of stream) {
-    if (!data) continue
-
-    console.log(`-------------------------------------`)
-    console.log(`BLOCK DATA: ${formatBlock(data.number)} / ${data.timestamp.toString()}`)
-    console.table(data.rpc)
+    for (const sample of data) {
+      console.log(`-------------------------------------`)
+      console.log(`BLOCK DATA: ${formatBlock(sample.number)} / ${sample.timestamp.toString()}`)
+      console.table(sample.rpc)
+    }
   }
 
   /*
@@ -48,6 +54,7 @@ async function main() {
   │   │ url                                   │ receivedAt               │ portalDelayMs │
   ├───┼───────────────────────────────────────┼──────────────────────────┼───────────────┤
   │ 0 │ https://bitcoin-rpc.publicnode.com    │ 2025-01-06T08:34:56.812Z │ 1843          │
+  │ 1 │ https://another-bitcoin-rpc.example   │ 2025-01-06T08:35:00.021Z │ -1366         │
   └───┴───────────────────────────────────────┴──────────────────────────┴───────────────┘
   */
 }

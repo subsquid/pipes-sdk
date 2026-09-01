@@ -113,15 +113,19 @@ export function bitcoinRpcLatencyWatcher({
   rpcUrl,
   intervalMs = DEFAULT_INTERVAL_MS,
   requestTimeoutMs,
+  resolveTimeoutMs,
 }: {
   rpcUrl: string[]
   intervalMs?: number
   /** Per-RPC request timeout. Defaults to `max(1000, intervalMs)` so a stalled
    *  endpoint can never block the polling loop indefinitely. */
   requestTimeoutMs?: number
+  /** How long to wait for the node to report a head before recording it as `rpc-behind`. */
+  resolveTimeoutMs?: number
 }) {
   const transformer = rpcLatencyWatcher({
     watcher: new BitcoinRpcLatencyWatcher(rpcUrl, intervalMs, requestTimeoutMs),
+    resolveTimeoutMs,
   })
 
   return bitcoinQuery()
