@@ -67,9 +67,10 @@ class SolanaRpcLatencyWatcher extends RpcLatencyWatcher {
   }
 }
 
-export function solanaRpcLatencyWatcher({ rpcUrl }: { rpcUrl: string[] }) {
+export function solanaRpcLatencyWatcher({ rpcUrl, resolveTimeoutMs }: { rpcUrl: string[]; resolveTimeoutMs?: number }) {
   const transformer = rpcLatencyWatcher({
     watcher: new SolanaRpcLatencyWatcher(rpcUrl),
+    resolveTimeoutMs,
   })
 
   return solanaQuery()

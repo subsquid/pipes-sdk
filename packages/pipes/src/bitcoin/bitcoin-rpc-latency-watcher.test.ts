@@ -108,7 +108,7 @@ describe('BitcoinRpcLatencyWatcher', () => {
       expect(call.auth).toBe(expected)
     }
 
-    // Critically: `lookup()` (and therefore the `Latency.rpc[].url` surfaced
+    // Critically: `lookup()` (and therefore the `LatencySample.rpc[].url` surfaced
     // to the pipeline / metrics / logs) must never echo back the credentials.
     const [entry] = watcher!.lookup(1)
     // URL is normalized through WHATWG `URL` (which appends a trailing slash);

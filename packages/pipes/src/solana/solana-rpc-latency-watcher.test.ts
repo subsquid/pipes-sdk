@@ -86,9 +86,9 @@ describe('solanaRpcLatencyWatcher subscription', () => {
       makeBatchContext(new Date('2026-05-09T00:00:01Z')),
     )
 
-    expect(result?.number).toBe(500)
-    expect(result?.rpc[0]?.url).toBe('ws://rpc')
-    expect(result?.rpc[0]?.hash).toBeUndefined()
+    expect(result[0]?.number).toBe(500)
+    expect(result[0]?.rpc[0]?.url).toBe('ws://rpc')
+    expect(result[0]?.rpc[0]?.hash).toBeUndefined()
   })
 
   it('ignores slot updates that have not reached optimisticConfirmation', async () => {
@@ -103,6 +103,6 @@ describe('solanaRpcLatencyWatcher subscription', () => {
       [{ header: { number: 501, timestamp: 0 } }] as never,
       makeBatchContext(new Date()),
     )
-    expect(result).toBeNull()
+    expect(result[0]?.rpc).toEqual([{ url: 'ws://rpc', unresolved: 'rpc-missing' }])
   })
 })

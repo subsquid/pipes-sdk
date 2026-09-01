@@ -32,9 +32,10 @@ class EvmRpcLatencyWatcher extends RpcLatencyWatcher {
   }
 }
 
-export function evmRpcLatencyWatcher({ rpcUrl }: { rpcUrl: string[] }) {
+export function evmRpcLatencyWatcher({ rpcUrl, resolveTimeoutMs }: { rpcUrl: string[]; resolveTimeoutMs?: number }) {
   const transformer = rpcLatencyWatcher({
     watcher: new EvmRpcLatencyWatcher(rpcUrl),
+    resolveTimeoutMs,
   })
 
   return evmQuery()
