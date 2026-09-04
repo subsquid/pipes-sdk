@@ -1,6 +1,6 @@
 import { AbiEvent } from '@subsquid/evm-abi'
 
-import { SqliteOptions, SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
+import { SqliteOptions, SqliteSync, loadSqlite, rollbackQuietly } from '~/drivers/sqlite/sqlite.js'
 import { jsonParse, jsonStringify } from '~/internal/json.js'
 
 import { IndexedParams } from '../evm-decoder.js'
@@ -29,29 +29,46 @@ class SqliteFactoryAdapter<T extends EventArgs> implements FactoryPersistentAdap
     this.#db = db
   }
 
-  async migrate(): Promise<void> {
+  /**
+   * Every write goes through here: a transaction left open by a failed statement makes the
+   * next `BEGIN` fail with an error about the transaction rather than about what went wrong.
+   */
+  #transaction(body: () => void): void {
     this.#db.exec('BEGIN TRANSACTION')
-    this.#db.exec(`CREATE TABLE IF NOT EXISTS "metadata" (id TEXT, value TEXT, PRIMARY KEY (id))`)
-    this.#db.exec(
-      `INSERT INTO "metadata" (id, value) VALUES (?, ?)  ON CONFLICT (id) DO UPDATE SET "value" = excluded.value`,
-      ['version', VERSION],
-    )
-    this.#db.exec('COMMIT')
 
-    this.#db.exec('BEGIN TRANSACTION')
-    this.#db.exec(`
-      CREATE TABLE IF NOT EXISTS factory (
-        address             TEXT,
-        factory             TEXT,
-        block_number        INTEGER,
-        transaction_index   INTEGER,
-        log_index           INTEGER,
-        event               BLOB,
-        PRIMARY KEY (address)
+    try {
+      body()
+      this.#db.exec('COMMIT')
+    } catch (error) {
+      rollbackQuietly(this.#db)
+
+      throw error
+    }
+  }
+
+  async migrate(): Promise<void> {
+    this.#transaction(() => {
+      this.#db.exec(`CREATE TABLE IF NOT EXISTS "metadata" (id TEXT, value TEXT, PRIMARY KEY (id))`)
+      this.#db.exec(
+        `INSERT INTO "metadata" (id, value) VALUES (?, ?)  ON CONFLICT (id) DO UPDATE SET "value" = excluded.value`,
+        ['version', VERSION],
       )
-    `)
-    this.#db.exec(`CREATE INDEX IF NOT EXISTS factory_block_number_idx ON factory (block_number)`)
-    this.#db.exec('COMMIT')
+    })
+
+    this.#transaction(() => {
+      this.#db.exec(`
+        CREATE TABLE IF NOT EXISTS factory (
+          address             TEXT,
+          factory             TEXT,
+          block_number        INTEGER,
+          transaction_index   INTEGER,
+          log_index           INTEGER,
+          event               BLOB,
+          PRIMARY KEY (address)
+        )
+      `)
+      this.#db.exec(`CREATE INDEX IF NOT EXISTS factory_block_number_idx ON factory (block_number)`)
+    })
   }
 
   /**
@@ -124,8 +141,7 @@ class SqliteFactoryAdapter<T extends EventArgs> implements FactoryPersistentAdap
   }
 
   async save(entities: InternalFactoryEvent<any>[]): Promise<void> {
-    this.#db.exec('BEGIN TRANSACTION')
-    try {
+    this.#transaction(() => {
       for (const entity of entities) {
         this.#db.exec(
           `INSERT OR IGNORE INTO factory ('address', 'factory', 'block_number', 'transaction_index', 'log_index', 'event') VALUES (?,?,?,?,?,?)`,
@@ -139,11 +155,8 @@ class SqliteFactoryAdapter<T extends EventArgs> implements FactoryPersistentAdap
           ],
         )
       }
-      this.#db.exec('COMMIT')
-    } catch (error) {
-      this.#db.exec('ROLLBACK')
-      throw error
-    }
+    })
+
     this.clearCache()
   }
 

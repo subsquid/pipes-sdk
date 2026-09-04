@@ -15,6 +15,43 @@ export interface SqliteSync {
   close(): void
 }
 
+/**
+ * SQLite aborts the transaction itself on SQLITE_FULL, SQLITE_IOERR, SQLITE_NOMEM,
+ * SQLITE_BUSY and SQLITE_INTERRUPT. An unconditional `ROLLBACK` in a catch block then fails
+ * with "cannot rollback - no transaction is active" and replaces the failure that actually
+ * happened, so every rollback path has to swallow it and rethrow the original.
+ *
+ * Returns false when the connection may still hold an open transaction — the rollback failed
+ * for some other reason, and the next `BEGIN` on this connection would fail over the top of
+ * the real error with the previous statements still uncommitted.
+ */
+export function rollbackQuietly(client: SqliteSync): boolean {
+  try {
+    client.exec('ROLLBACK')
+
+    return true
+  } catch (e) {
+    return isNoActiveTransaction(e)
+  }
+}
+
+/** SQLite's own wording when the failing statement already unwound the transaction. */
+function isNoActiveTransaction(e: unknown): boolean {
+  const message = e instanceof Error ? e.message : String(e)
+
+  return /no transaction is active/i.test(message)
+}
+
+/**
+ * Errors for which the store, not the statement, is at fault: the volume is full, gone,
+ * unreadable, or has been remounted read-only under the process.
+ */
+export function isStorageFailure(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code
+
+  return typeof code === 'string' && /^SQLITE_(FULL|IOERR|NOMEM|READONLY|CANTOPEN)/.test(code)
+}
+
 function setupClient(client: SqliteSync, options: SqliteOptions): SqliteSync {
   if (options.enableWAL ?? true) {
     client.exec('PRAGMA journal_mode = WAL;')

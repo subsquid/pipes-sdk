@@ -88,6 +88,11 @@ export const PUBSUB_ERROR_CODES = {
   /** No routes were configured. */
   NO_ROUTES: 'E2425',
   /**
+   * A state write failed on the store itself rather than on the data: the volume is out of
+   * space, or the file could not be read back. The batch was rolled back and nothing shipped.
+   */
+  STATE_WRITE_FAILED: 'E2426',
+  /**
    * The producer feeds more than one topic, which splits its sequence counter and puts a hole
    * in every topic's run. Declare `sequenceBarrier: false` if no consumer reads the barrier.
    */

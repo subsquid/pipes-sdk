@@ -5,10 +5,11 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { BlockCursor } from '~/core/index.js'
+import { SqliteOptions, SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
 import { testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { CommitInput, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
+import { CommitInput, INTERNAL_DRIVER, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
 
 const encoder = new TextEncoder()
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -32,12 +33,58 @@ function statePath(): string {
   return join(dir, 'state.sqlite')
 }
 
-async function openState(path: string) {
-  const state = new SqlitePubsubState({ path })
+async function openState(path: string, driver?: SqlitePubsubStateDriver) {
+  const state = new SqlitePubsubState({ path, [INTERNAL_DRIVER]: driver })
   const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
   opened.push(state)
 
   return { state, coldStart }
+}
+
+type SqlitePubsubStateDriver = (options: SqliteOptions) => Promise<SqliteSync>
+
+type Fault = { error: Error; selfRollback: boolean }
+
+/**
+ * A real driver with one statement rigged to fail. `selfRollback` models the SQLITE_FULL /
+ * SQLITE_IOERR class, where SQLite unwinds the transaction before handing the error back.
+ */
+class FaultyDriver {
+  #inner?: SqliteSync
+  faultOn?: (sql: string) => Fault | undefined
+
+  readonly load: SqlitePubsubStateDriver = async (options) => {
+    const inner = await loadSqlite(options)
+    this.#inner = inner
+
+    return {
+      get: (sql, params) => inner.get(sql, params),
+      all: (sql, params) => inner.all(sql, params),
+      stream: (sql, params) => inner.stream(sql, params),
+      close: () => inner.close(),
+      exec: (sql, params) => {
+        const fault = this.faultOn?.(sql)
+        if (!fault) {
+          return inner.exec(sql, params)
+        }
+
+        if (fault.selfRollback) {
+          inner.exec('ROLLBACK')
+        }
+
+        throw fault.error
+      },
+    }
+  }
+
+  /** Reads bypass the fault, so a test can assert what the failed transaction left behind. */
+  count(table: string): number {
+    return this.#inner!.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`)!.n
+  }
+}
+
+function sqliteError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code })
 }
 
 /** Every case here exercises a fork-capable pipe; `forkCapable` is the interesting default. */
@@ -781,6 +828,154 @@ describe('SqlitePubsubState', () => {
       const pending = await state.pending()
       expect(pending).toHaveLength(1)
       expect(pending[0].op).toBe('delete')
+    })
+  })
+
+  describe('storage faults', () => {
+    it('reports the disk failure, not the rollback that SQLite already performed', async () => {
+      const driver = new FaultyDriver()
+      const { state } = await openState(statePath(), driver.load)
+
+      driver.faultOn = (sql) =>
+        sql.startsWith('INSERT INTO manifest')
+          ? { error: sqliteError('SQLITE_FULL', 'database or disk is full'), selfRollback: true }
+          : undefined
+
+      const failure = await commit(state, {
+        operations: [operation()],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: null,
+      }).catch((e) => e)
+
+      expect(failure).toBeInstanceOf(PubsubTargetError)
+      expect(failure.code).toBe(PUBSUB_ERROR_CODES.STATE_WRITE_FAILED)
+      expect(failure.message).toContain('database or disk is full')
+      expect(failure.message).toContain('nothing was published')
+      expect(failure.message).not.toContain('no transaction is active')
+      expect(failure.cause).toMatchObject({ code: 'SQLITE_FULL' })
+    })
+
+    it('leaves nothing of the failed batch behind', async () => {
+      const driver = new FaultyDriver()
+      const { state } = await openState(statePath(), driver.load)
+
+      driver.faultOn = (sql) =>
+        sql.startsWith('INSERT INTO ledger_blocks')
+          ? { error: sqliteError('SQLITE_FULL', 'database or disk is full'), selfRollback: true }
+          : undefined
+
+      await expect(
+        commit(state, { operations: [operation()], ledger: [block(100)], cursor: block(100), finalized: null }),
+      ).rejects.toThrow(PubsubTargetError)
+
+      driver.faultOn = undefined
+      expect(driver.count('outbox')).toBe(0)
+      expect(driver.count('manifest')).toBe(0)
+      expect(await state.getCursor()).toBeUndefined()
+    })
+
+    it('still rolls back a failure that leaves the transaction open', async () => {
+      const driver = new FaultyDriver()
+      const { state } = await openState(statePath(), driver.load)
+
+      driver.faultOn = (sql) =>
+        sql.startsWith('INSERT INTO manifest')
+          ? { error: sqliteError('SQLITE_CONSTRAINT_PRIMARYKEY', 'UNIQUE constraint failed'), selfRollback: false }
+          : undefined
+
+      const failure = await commit(state, {
+        operations: [operation()],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: null,
+      }).catch((e) => e)
+
+      // Not a storage failure: the driver error reaches the caller untranslated.
+      expect(failure).not.toBeInstanceOf(PubsubTargetError)
+      expect(failure.code).toBe('SQLITE_CONSTRAINT_PRIMARYKEY')
+
+      driver.faultOn = undefined
+      expect(driver.count('outbox')).toBe(0)
+    })
+
+    it('reports a disk failure while draining the outbox', async () => {
+      const driver = new FaultyDriver()
+      const { state } = await openState(statePath(), driver.load)
+
+      await commit(state, { operations: [operation()], ledger: [block(100)], cursor: block(100), finalized: null })
+      const [row] = await state.pending()
+
+      driver.faultOn = (sql) =>
+        sql.startsWith('DELETE FROM outbox')
+          ? { error: sqliteError('SQLITE_IOERR_WRITE', 'disk I/O error'), selfRollback: true }
+          : undefined
+
+      const failure = await state.confirm([row.rowId]).catch((e) => e)
+
+      expect(failure.code).toBe(PUBSUB_ERROR_CODES.STATE_WRITE_FAILED)
+      expect(failure.message).toContain('disk I/O error')
+
+      // The batch is already on the wire here. Saying it was not would send an operator
+      // rewinding the cursor and replaying messages consumers have seen.
+      expect(failure.message).toContain('already published')
+      expect(failure.message).not.toContain('nothing was published')
+
+      // The row stays queued: an unconfirmed publish is retried, never dropped.
+      driver.faultOn = undefined
+      expect(await state.pending()).toHaveLength(1)
+    })
+
+    it('reports a volume remounted read-only under the producer', async () => {
+      const driver = new FaultyDriver()
+      const { state } = await openState(statePath(), driver.load)
+
+      driver.faultOn = (sql) =>
+        sql.startsWith('INSERT INTO outbox')
+          ? { error: sqliteError('SQLITE_READONLY', 'attempt to write a readonly database'), selfRollback: false }
+          : undefined
+
+      const failure = await commit(state, {
+        operations: [operation()],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: null,
+      }).catch((e) => e)
+
+      expect(failure.code).toBe(PUBSUB_ERROR_CODES.STATE_WRITE_FAILED)
+      expect(failure.message).toContain('attempt to write a readonly database')
+    })
+
+    it('clears a transaction left open by a rollback that could not run', async () => {
+      const driver = new FaultyDriver()
+      const { state } = await openState(statePath(), driver.load)
+
+      // Neither the write nor the rollback after it gets through, so the transaction that the
+      // failed batch opened is still there when the next one starts.
+      driver.faultOn = (sql) => {
+        if (sql.startsWith('INSERT INTO manifest')) {
+          return { error: sqliteError('SQLITE_CONSTRAINT_PRIMARYKEY', 'UNIQUE constraint failed'), selfRollback: false }
+        }
+        if (sql === 'ROLLBACK') {
+          return { error: sqliteError('SQLITE_BUSY', 'database is locked'), selfRollback: false }
+        }
+
+        return undefined
+      }
+
+      await expect(
+        commit(state, { operations: [operation()], ledger: [block(100)], cursor: block(100), finalized: null }),
+      ).rejects.toThrow('UNIQUE constraint failed')
+
+      driver.faultOn = undefined
+      await commit(state, {
+        operations: [operation({ id: 'row-2' })],
+        ledger: [block(101)],
+        cursor: block(101),
+        finalized: null,
+      })
+
+      expect((await state.getCursor())?.latest).toEqual(block(101))
     })
   })
 })
