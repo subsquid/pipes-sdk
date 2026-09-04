@@ -7,7 +7,7 @@ import {
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
-import { SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
+import { SqliteOptions, SqliteSync, isStorageFailure, loadSqlite, rollbackQuietly } from '~/drivers/sqlite/sqlite.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 import { MAX_SEQUENCE_VALUE, PubsubOp } from './protocol.js'
@@ -183,17 +183,44 @@ function lockedError(path: string, cause: unknown): PubsubTargetError {
   ])
 }
 
+/**
+ * The seam the storage-fault suites inject a driver through — a full or failing volume cannot
+ * be staged against a real file. Symbol-keyed so it stays out of the option surface consumers
+ * see, and absent from the public entrypoint.
+ *
+ * @internal
+ */
+export const INTERNAL_DRIVER: unique symbol = Symbol.for('@subsquid/pipes:pubsub-state:driver')
+
 export type SqlitePubsubStateOptions = {
   path: string
   /** Cursor key override; defaults to the pipe id once `open` binds it (ADR-2). */
   id?: string
+  /** @internal */
+  [INTERNAL_DRIVER]?: (options: SqliteOptions) => Promise<SqliteSync>
 }
+
+/**
+ * What a rolled-back transaction means for whoever reads E2426. `confirm` runs after the
+ * batch is on the wire, so the one message that fits every site would tell an operator the
+ * opposite of what happened and invite a replay.
+ */
+const ROLLED_BACK = {
+  schema: 'The state file is unchanged.',
+  commit: 'The batch was rolled back and nothing was published.',
+  confirm:
+    'The batch was already published — only its outbox acknowledgement was rolled back, so those ' +
+    'rows stay queued and will be delivered again.',
+  fork: 'The fork compensation was rolled back, so the state still describes the pre-fork chain.',
+} as const
 
 export class SqlitePubsubState implements PubsubState {
   readonly #options: SqlitePubsubStateOptions
   readonly #key: CursorKey
   #db?: SqliteSync
   #logger?: Logger
+  /** False once a rollback could not run: the connection may still hold an open transaction. */
+  #unwound = true
 
   constructor(options: SqlitePubsubStateOptions) {
     this.#options = options
@@ -218,7 +245,7 @@ export class SqlitePubsubState implements PubsubState {
 
     let db: SqliteSync
     try {
-      db = await loadSqlite({ path: this.#options.path })
+      db = await (this.#options[INTERNAL_DRIVER] ?? loadSqlite)({ path: this.#options.path })
     } catch (e) {
       // A live producer holds the file in exclusive locking mode, so the second one fails
       // right here — on the driver's own WAL pragma, before any target code runs.
@@ -236,6 +263,11 @@ export class SqlitePubsubState implements PubsubState {
     // file on the way out: otherwise a caller that retries in the same process meets its own
     // dead connection and reads the mismatch as a second producer.
     try {
+      // WAL is the shared driver's own default, re-asserted here because an injected one may
+      // never have been through it, and rollback-journal mode would change the durability the
+      // pragma below is buying.
+      db.exec('PRAGMA journal_mode = WAL;')
+
       // The shared driver defaults to synchronous = NORMAL, under which an OS crash can roll
       // back the most recent commits. Here a rolled-back commit is a published operation the
       // state has no record of, so the target pays for FULL.
@@ -312,11 +344,52 @@ export class SqlitePubsubState implements PubsubState {
     }
   }
 
+  /**
+   * The single write path. On failure the transaction is unwound and the caller sees the
+   * failure that caused it: SQLite has already aborted the transaction itself for a full or
+   * failing volume, and a bare `ROLLBACK` would throw over the top of the real error.
+   */
+  #transaction<T>(begin: 'BEGIN' | 'BEGIN IMMEDIATE', rolledBack: string, body: () => T): T {
+    const db = this.#db!
+
+    // A rollback that could not run at all left the transaction open. Clearing it here keeps
+    // the next BEGIN from failing over the top of that error, one call late.
+    if (!this.#unwound) {
+      this.#unwound = rollbackQuietly(db)
+    }
+
+    try {
+      db.exec(begin)
+      const result = body()
+      db.exec('COMMIT')
+
+      return result
+    } catch (e) {
+      this.#unwound = rollbackQuietly(db)
+
+      throw this.#storageError(e, rolledBack)
+    }
+  }
+
+  /** A full or unreadable volume is the store failing, not the batch — say so by that name. */
+  #storageError(e: unknown, rolledBack: string): unknown {
+    if (!isStorageFailure(e)) return e
+
+    const error = new PubsubTargetError(PUBSUB_ERROR_CODES.STATE_WRITE_FAILED, [
+      `The PubSub state at "${this.#options.path}" could not be written: ` +
+        (e instanceof Error ? e.message : String(e)),
+      `${rolledBack} The state is the producer’s sequencer — check the free space and the ` +
+        'health of the volume that holds it.',
+    ])
+    error.cause = e
+
+    return error
+  }
+
   #initializeSchema(): void {
     const db = this.#db!
 
-    db.exec('BEGIN')
-    try {
+    this.#transaction('BEGIN', ROLLED_BACK.schema, () => {
       db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`)
       db.exec(`
         CREATE TABLE IF NOT EXISTS cursor (
@@ -393,11 +466,7 @@ export class SqlitePubsubState implements PubsubState {
           payload       BLOB,
           PRIMARY KEY (topic, ordering_key, id)
         )`)
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
+    })
   }
 
   // ─── meta ───────────────────────────────────────────────────────────────────
@@ -485,8 +554,7 @@ export class SqlitePubsubState implements PubsubState {
   async commit({ operations, ledger, cursor, finalized, forkCapable }: CommitInput): Promise<void> {
     const db = this.#db!
 
-    db.exec('BEGIN IMMEDIATE')
-    try {
+    this.#transaction('BEGIN IMMEDIATE', ROLLED_BACK.commit, () => {
       for (const operation of operations) {
         const seq = this.#nextSeq(operation)
         this.#enqueue(operation, seq)
@@ -566,12 +634,7 @@ export class SqlitePubsubState implements PubsubState {
       if (finalized) {
         this.#foldFinalized(finalized.number)
       }
-
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
+    })
   }
 
   /**
@@ -762,16 +825,12 @@ export class SqlitePubsubState implements PubsubState {
     if (!rowIds.length) return
 
     const db = this.#db!
-    db.exec('BEGIN IMMEDIATE')
-    try {
+
+    this.#transaction('BEGIN IMMEDIATE', ROLLED_BACK.confirm, () => {
       for (const rowId of rowIds) {
         db.exec('DELETE FROM outbox WHERE row_id = ?', [rowId])
       }
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
+    })
   }
 
   async stats(): Promise<{ outbox: number; manifest: number }> {
@@ -798,8 +857,7 @@ export class SqlitePubsubState implements PubsubState {
     const rollbackTo = safe ?? finalized ?? null
     const floor = rollbackTo?.number ?? -1
 
-    db.exec('BEGIN IMMEDIATE')
-    try {
+    this.#transaction('BEGIN IMMEDIATE', ROLLED_BACK.fork, () => {
       const compensations = this.#compensate(floor)
       this.#logger?.debug(
         `fork at block ${floor}: ${compensations} compensating operation(s) enqueued${safe ? '' : ' (dead-end fork)'}`,
@@ -819,12 +877,7 @@ export class SqlitePubsubState implements PubsubState {
       if (rollbackTo) {
         this.#saveCursor(rollbackTo, finalized ?? null)
       }
-
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
+    })
 
     return safe
   }

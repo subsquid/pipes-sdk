@@ -753,6 +753,16 @@ exclusive lock, and publish nothing.
 
 **Fix** — configure at least one topic route.
 
+### E2426 · State write failed
+
+A write to the producer's state file failed because the volume that holds it is full, gone,
+unreadable, or has been remounted read-only. The transaction was rolled back; the message says
+whether the batch had already been published, which decides whether anything needs redelivering.
+
+**Fix** — free space on the volume that holds the state file, or check its health, and restart.
+The state is the producer's sequencer: it must live on a persistent volume sized for the outbox
+backlog, not on ephemeral container storage.
+
 ### E2428 · Producer feeds more than one topic
 
 The change sequence is one producer-wide counter, so a producer that feeds several topics leaves
