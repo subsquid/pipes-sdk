@@ -276,6 +276,26 @@ describe('PortalClient request accounting', () => {
       503: 1,
     })
   })
+
+  // 529 is what the portal answers under load instead of 503; surfacing it would fail a stream
+  // the portal expects the client to simply retry.
+  it('retries an overloaded portal', async () => {
+    portal = await mockPortal([
+      { statusCode: 529 },
+      {
+        statusCode: 200,
+        data: [block(1), block(2), block(3)],
+        head: { finalized: { number: 3, hash: '0x3' } },
+      },
+    ] satisfies MockResponse[])
+
+    const client = new PortalClient({ url: portal.url })
+
+    expect(await countRequests(client, false, { request: { retryAttempts: 2, retrySchedule: [1] } })).toEqual({
+      200: 1,
+      529: 1,
+    })
+  })
 })
 
 describe('PortalClient bounded range above the finalized head', () => {
