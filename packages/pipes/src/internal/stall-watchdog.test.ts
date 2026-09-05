@@ -91,6 +91,42 @@ describe('stallWatchdog', () => {
     watchdog.end()
   })
 
+  it('does not call a phase that was aborted recovered', async () => {
+    // The caller aborts when the phase threw or was cancelled. Reporting a recovery there tells
+    // the operator the opposite of what happened, on the one line they have to go on.
+    const onStall = vi.fn()
+    const onRecover = vi.fn()
+    const watchdog = stallWatchdog({ thresholdMs: 1_000, onStall, onRecover })
+
+    watchdog.begin('commit')
+    await vi.advanceTimersByTimeAsync(1_500)
+    watchdog.abort()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(onStall).toHaveBeenCalledOnce()
+    expect(onRecover).not.toHaveBeenCalled()
+  })
+
+  it('keeps watching after a report that threw', async () => {
+    // A reporter can fail — a log transport torn down at shutdown throws on write. The watchdog
+    // must neither die with it nor let the throw escape a timer callback and end the process.
+    const onStall = vi.fn().mockImplementationOnce(() => {
+      throw new Error('log transport is gone')
+    })
+    const watchdog = stallWatchdog({ thresholdMs: 1_000, onStall })
+
+    watchdog.begin('commit')
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(onStall).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(onStall).toHaveBeenLastCalledWith({ phase: 'commit', elapsedMs: 3_000, count: 2 })
+
+    watchdog.end()
+  })
+
   it('goes quiet after end()', async () => {
     const onStall = vi.fn()
     const watchdog = stallWatchdog({ thresholdMs: 1_000, onStall })

@@ -1396,6 +1396,108 @@ describe('BigQueryWriter — append reporting', () => {
     expect(logger.info).not.toHaveBeenCalled()
   })
 
+  it('closes out a reported append when it finally returns', async () => {
+    vi.useFakeTimers()
+
+    const logger = captureLogger()
+    let ack = () => {}
+    const store = makeStore(() => ({
+      appendRows: () => ({
+        getResult: () =>
+          new Promise((resolve) => {
+            ack = () => resolve({})
+          }),
+      }),
+      close: () => {},
+    }))
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    const commit = store.commitBatch()
+
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(logger.warn).toHaveBeenCalledOnce()
+
+    ack()
+    await commit
+
+    expect(logger.info).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: `appendRows(${EVENTS_TABLE}, offset=0) returned after 20s`,
+        table: EVENTS_TABLE,
+        offset: 0,
+      }),
+    )
+  })
+
+  it('does not say an append returned when it failed', async () => {
+    // "returned" reads as "succeeded". Logging it on the way out of a failure sends whoever is
+    // triaging the hang looking for the next problem instead of at this one.
+    vi.useFakeTimers()
+
+    const logger = captureLogger()
+    const store = makeStore(() => ({
+      appendRows: () => ({
+        getResult: () =>
+          new Promise((_, reject) => {
+            setTimeout(() => reject(Object.assign(new Error('INVALID_ARGUMENT'), { code: 3 })), 20_000)
+          }),
+      }),
+      close: () => {},
+    }))
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    const commit = store.commitBatch().catch((error) => error)
+
+    await vi.advanceTimersByTimeAsync(20_000)
+
+    expect(await commit).toBeInstanceOf(Error)
+    expect(logger.warn).toHaveBeenCalledOnce()
+    expect(logger.info).not.toHaveBeenCalled()
+  })
+
+  it('does not report an append whose attempts each return in time', async () => {
+    // The watchdog is armed per attempt: neither the retry budget's own backoff nor the time
+    // spent by earlier attempts may add up into a stall report for a call that is progressing.
+    vi.useFakeTimers()
+
+    const logger = captureLogger()
+    let attempts = 0
+    const store = makeStore(() => ({
+      appendRows: () => ({
+        getResult: () =>
+          new Promise((resolve, reject) => {
+            attempts++
+            const attempt = attempts
+
+            setTimeout(() => {
+              if (attempt < 4) {
+                reject(Object.assign(new Error('UNAVAILABLE'), { code: 14 }))
+              } else {
+                resolve({})
+              }
+            }, 10_000)
+          }),
+      }),
+      close: () => {},
+    }))
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    const commit = store.commitBatch()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await commit
+
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: `appendRows(${EVENTS_TABLE}, offset=0) succeeded after 3 retries`,
+      }),
+    )
+    expect(logger.info).not.toHaveBeenCalled()
+  })
+
   it('reports a transport error the client delivers only as a connection event', async () => {
     // The connection listener exists to keep an EventEmitter throw from killing the process.
     // Swallowing the event as well loses the only signal of a stream that broke without ever
@@ -1418,6 +1520,27 @@ describe('BigQueryWriter — append reporting', () => {
         table: EVENTS_TABLE,
       }),
     )
+  })
+
+  it('survives a transport error delivered after the logger has gone', async () => {
+    // The listener's whole job is to keep an EventEmitter throw off the process. A write to a
+    // log transport already torn down at shutdown throws, and would put it right back.
+    const logger = captureLogger()
+    const store = makeStore(fakeProtoWriterFactory)
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    await store.commitBatch()
+
+    const createStreamConnection = store.writerClient.createStreamConnection as unknown as Mock
+    const connection = await createStreamConnection.mock.results[0].value
+    const onError = connection.on.mock.calls.find(([event]: [string]) => event === 'error')?.[1]
+
+    logger.warn.mockImplementation(() => {
+      throw new Error('log transport is gone')
+    })
+
+    expect(() => onError(Object.assign(new Error('UNAVAILABLE'), { code: 14 }))).not.toThrow()
   })
 
   it('reports a transient append failure once, after the retries have carried it', async () => {

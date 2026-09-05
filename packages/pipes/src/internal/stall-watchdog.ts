@@ -23,8 +23,10 @@ export type StallWatchdogOptions = {
 export interface StallWatchdog {
   /** Start (or restart) the clock for a new phase. */
   begin(phase: string): void
-  /** Stop the clock without starting a new phase. */
+  /** Stop the clock for a phase that completed; reports the recovery if it had stalled. */
   end(): void
+  /** Stop the clock for a phase that threw or was cancelled. Never reports a recovery. */
+  abort(): void
 }
 
 /**
@@ -54,19 +56,25 @@ export function stallWatchdog({
 
   function fire() {
     reports += 1
-    onStall({ phase, elapsedMs: Date.now() - startedAt, count: reports })
+
+    try {
+      onStall({ phase, elapsedMs: Date.now() - startedAt, count: reports })
+    } catch {
+      // Diagnostics must not take the process down, and a reporter that throws once (a torn-down
+      // log transport, say) must not leave the watchdog disarmed for the rest of the phase.
+    }
 
     gap = Math.min(gap * 2, maxIntervalMs)
     arm()
   }
 
-  function settle() {
+  function settle(recovered: boolean) {
     if (timer) {
       clearTimeout(timer)
       timer = undefined
     }
 
-    if (reports > 0) {
+    if (recovered && reports > 0) {
       onRecover?.({ phase, elapsedMs: Date.now() - startedAt, count: reports })
     }
 
@@ -76,7 +84,7 @@ export function stallWatchdog({
 
   return {
     begin(next: string) {
-      settle()
+      settle(true)
 
       phase = next
       startedAt = Date.now()
@@ -84,7 +92,12 @@ export function stallWatchdog({
     },
 
     end() {
-      settle()
+      settle(true)
+      phase = ''
+    },
+
+    abort() {
+      settle(false)
       phase = ''
     },
   }
