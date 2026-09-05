@@ -139,6 +139,7 @@ export function bigqueryTarget<T>(options: {
       // Key the WAL by the pipe's source id (unless an explicit settings.state.id was given), so
       // progress is isolated per pipe. Must run before getCursor so recovery and writes agree.
       state.bindCursorKey(id)
+      store.bindLogger(logger)
 
       // Lazy: registered on the first batch from `ctx.metrics`. The slot is local to
       // `write()`, but the metrics-server registry caches by name — every call to `write()`

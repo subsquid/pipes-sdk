@@ -10,6 +10,7 @@ import {
 } from '~/portal-client/index.js'
 
 import { last } from '../internal/array.js'
+import { stallWatchdog } from '../internal/stall-watchdog.js'
 import {
   ForkCursorMissingError,
   ForkOnFinalizedStreamError,
@@ -17,6 +18,7 @@ import {
   TargetForkNotSupportedError,
 } from './errors.js'
 import { FinalizedWatermark } from './finalized-watermark.js'
+import { formatBlock, formatDuration } from './formatters.js'
 import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
@@ -25,6 +27,28 @@ import { QueryBuilder, type Range, hashQuery } from './query-builder.js'
 import { ReadOptions, Target, TargetState } from './target.js'
 import { QueryAwareTransformer, Transformer, TransformerArgs, TransformerOptions } from './transformer.js'
 import { BlockCursor, HookContext } from './types.js'
+
+const WAITING_FOR_PORTAL = 'waiting for data from the portal'
+
+/**
+ * How long the pipe may sit in one place before it is reported as stalled.
+ *
+ * Two minutes, not seconds: a backfill batch that enriches over RPC can legitimately take a
+ * minute, and a warning users learn to ignore is worse than no warning.
+ */
+const STALL_WARNING_MS = 120_000
+
+/** Names the batch a stall report is about, so the log points at a block range, not "a batch". */
+function processingPhase(blocks: { header: { number: number } }[], requestedFromBlock: number) {
+  const from = blocks[0]?.header?.number ?? requestedFromBlock
+  const to = blocks[blocks.length - 1]?.header?.number ?? from
+
+  if (from === to) {
+    return `processing block ${formatBlock(from)}`
+  }
+
+  return `processing blocks ${formatBlock(from)} → ${formatBlock(to)}`
+}
 
 const NOT_REAL_TIME_WARNING = (name: string) => {
   return formatWarning({
@@ -281,6 +305,20 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       this.#logger.warn(NOT_REAL_TIME_WARNING(datasetMetadata.dataset))
     }
 
+    // A wedged target and a silent portal look identical from the outside: the progress line
+    // keeps printing the same numbers and nothing else is logged. The watchdog names which of
+    // the two is not returning, and repeats on a doubling interval so a stall lasting hours
+    // stays visible without flooding the log.
+    const watchdog = stallWatchdog({
+      thresholdMs: STALL_WARNING_MS,
+      onStall: ({ phase, elapsedMs }) => {
+        this.#logger.warn({ message: `stalled: ${phase} for ${formatDuration(elapsedMs)}`, phase, elapsedMs })
+      },
+      onRecover: ({ phase, elapsedMs }) => {
+        this.#logger.info({ message: `recovered: ${phase} took ${formatDuration(elapsedMs)}`, phase, elapsedMs })
+      },
+    })
+
     for (const { range, request } of bounded) {
       // Anchor the cursor's hash only to the range that continues from it; a later disjoint range
       // doesn't border the cursor and would fault a spurious 409, so it starts unanchored (ADR-20).
@@ -318,10 +356,16 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
       let readSpan = batchSpan.start('fetch data').addLabels('core')
       try {
+        watchdog.begin(WAITING_FOR_PORTAL)
+
         for await (const batch of source) {
           readSpan.end()
 
           const blocks = batch.blocks
+
+          // Held until the consumer comes back for the next batch, so it covers the transformers
+          // and everything the target does with this batch, not just the code in this loop.
+          watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
 
           if (blocks.length > 0) {
             // Clamp the portal's finalized head through the monotonic watermark before it
@@ -389,11 +433,13 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
 
           batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
           readSpan = batchSpan.start('fetch data').addLabels('core')
+          watchdog.begin(WAITING_FOR_PORTAL)
         }
       } finally {
         // The last pair is always armed for a batch that never arrives.
         readSpan.end()
         batchSpan.end()
+        watchdog.end()
       }
     }
 
