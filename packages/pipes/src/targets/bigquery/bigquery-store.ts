@@ -41,12 +41,13 @@ const RETRY_OPTIONS = {
 }
 
 /**
- * How long a single AppendRows may stay in flight before it is reported.
+ * How long a single AppendRows attempt may stay in flight before it is reported.
  *
  * `getResult()` carries no deadline of its own: a bidi stream that is dropped rather than
  * failed leaves the promise unsettled forever, and every layer above — retry, WAL, progress
- * reporter — is waiting on a promise, so none of them says anything. Well under the retry
- * budget's ~30 s so the report lands before the generic pipeline stall warning does.
+ * reporter — is waiting on a promise, so none of them says anything. Armed per attempt, so
+ * the retry budget's own backoff can never trip it; well under the pipeline stall warning so
+ * the more specific line lands first.
  */
 const APPEND_STALL_WARNING_MS = 15_000
 
@@ -350,12 +351,16 @@ export class BigQueryWriter {
 
     for (const chunk of chunkBuffersByByteSize(encodedRows)) {
       const chunkOffset = stream.nextOffset // capture for the retry closure
-      const response = await this.#whileAppending(tableFqnPath, chunkOffset, () =>
-        doWithRetry(() => stream.writer.appendRows({ serializedRows: chunk }, chunkOffset).getResult(), {
+      const response = await doWithRetry(
+        () =>
+          this.#whileAppending(tableFqnPath, chunkOffset, () =>
+            stream.writer.appendRows({ serializedRows: chunk }, chunkOffset).getResult(),
+          ),
+        {
           ...RETRY_OPTIONS,
           title: `appendRows(${tableFqnPath}, offset=${chunkOffset})`,
           logger: this.#logger,
-        }),
+        },
       )
       assertNoRowErrors(response, tableFqnPath, chunkOffset)
       stream.nextOffset += chunk.length
@@ -365,7 +370,7 @@ export class BigQueryWriter {
   }
 
   /**
-   * Runs an append and reports it if it neither succeeds nor fails in time.
+   * Runs a single append attempt and reports it if it neither succeeds nor fails in time.
    *
    * A stalled append is otherwise indistinguishable from an idle source: the pipe stops
    * advancing, the progress line keeps printing the same numbers, and nothing is logged.
@@ -393,9 +398,13 @@ export class BigQueryWriter {
 
     watchdog.begin('append')
     try {
-      return await run()
-    } finally {
+      const result = await run()
       watchdog.end()
+
+      return result
+    } finally {
+      // An attempt that threw did not return: stop the clock, but never say it came back.
+      watchdog.abort()
     }
   }
 
@@ -434,12 +443,17 @@ export class BigQueryWriter {
     // say the stream broke. Recovery is still the client's: it reconnects the bidi on the next
     // `appendRows` attempt, same streamId, offsets preserved.
     connection.on('error', (error: unknown) => {
-      this.#logger?.warn({
-        message: `write stream for ${tableFqnPath} reported a transport error`,
-        error,
-        table: tableFqnPath,
-        stream: streamId,
-      })
+      try {
+        this.#logger?.warn({
+          message: `write stream for ${tableFqnPath} reported a transport error`,
+          error,
+          table: tableFqnPath,
+          stream: streamId,
+        })
+      } catch {
+        // A throw here (a log transport already torn down at shutdown, say) would become the
+        // uncaught EventEmitter exception this listener exists to prevent.
+      }
     })
 
     const writer = this.#protoWriterFactory({

@@ -435,11 +435,15 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
           readSpan = batchSpan.start('fetch data').addLabels('core')
           watchdog.begin(WAITING_FOR_PORTAL)
         }
+
+        watchdog.end()
       } finally {
         // The last pair is always armed for a batch that never arrives.
         readSpan.end()
         batchSpan.end()
-        watchdog.end()
+        // A no-op once the loop has run to completion; on a throw or a cancelled consumer it
+        // stops the clock without claiming the phase recovered.
+        watchdog.abort()
       }
     }
 

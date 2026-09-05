@@ -1122,6 +1122,33 @@ describe('stall reporting', () => {
     })
   })
 
+  it('does not call a stall that ended in an error recovered', async () => {
+    // The recovery line is the only evidence that the pipe came back. Printing it on the way
+    // out of a failure points whoever reads the log afterwards at the wrong conclusion.
+    const logger = defaultLogger({ level: 'silent' })
+    const info = vi.spyOn(logger, 'info')
+
+    const portalClient = new StubPortalClient(async function* () {
+      await new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('portal is gone')), 180_000)
+      })
+    })
+
+    evmPortalStream({
+      id: 'test',
+      portal: portalClient,
+      logger,
+      progress: { interval: 0 },
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    })
+      .pipeTo(hangingTarget(async () => {}) as any)
+      .catch(() => {})
+
+    await vi.advanceTimersByTimeAsync(180_000)
+
+    expect(info).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('recovered') }))
+  })
+
   it('names the batch a wedged target is sitting on, and repeats less and less often', async () => {
     const logger = defaultLogger({ level: 'silent' })
     const warn = vi.spyOn(logger, 'warn')
