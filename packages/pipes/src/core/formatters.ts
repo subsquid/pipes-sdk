@@ -85,6 +85,32 @@ export function formatEta(seconds?: number) {
   return `ETA: ${days}d ${hours}h`
 }
 
+/**
+ * Formats a millisecond duration as a compact human-readable string.
+ *
+ * @param ms - Duration in milliseconds.
+ * @example
+ * formatDuration(45_000) // "45s"
+ * formatDuration(150_000) // "2m 30s"
+ * formatDuration(3_900_000) // "1h 5m"
+ */
+export function formatDuration(ms: number) {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+
+  if (seconds < 60) {
+    return `${seconds}s`
+  }
+
+  if (seconds < 3600) {
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  }
+
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+
+  return `${hours}h ${minutes}m`
+}
+
 export function parseBlockNumber(block: number | string) {
   if (typeof block === 'string') {
     /**

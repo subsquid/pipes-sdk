@@ -8,7 +8,9 @@ import { adapt, managedwriter } from '@google-cloud/bigquery-storage'
 // per-request size limit. The SDK has no public "encode without sending" entry point.
 import { JSONEncoder } from '@google-cloud/bigquery-storage/build/src/managedwriter/encoder.js'
 
+import { type Logger, formatDuration } from '~/core/index.js'
 import { doWithRetry } from '~/internal/function.js'
+import { stallWatchdog } from '~/internal/stall-watchdog.js'
 
 import { BIGQUERY_ERROR_CODES, BigQueryTargetError } from './errors.js'
 import { type TrackedTable, normalizePartitionColumn } from './tables.js'
@@ -37,6 +39,16 @@ const RETRY_OPTIONS = {
   backoff: 'exp' as const,
   shouldRetry: isTransientError,
 }
+
+/**
+ * How long a single AppendRows may stay in flight before it is reported.
+ *
+ * `getResult()` carries no deadline of its own: a bidi stream that is dropped rather than
+ * failed leaves the promise unsettled forever, and every layer above — retry, WAL, progress
+ * reporter — is waiting on a promise, so none of them says anything. Well under the retry
+ * budget's ~30 s so the report lands before the generic pipeline stall warning does.
+ */
+const APPEND_STALL_WARNING_MS = 15_000
 
 export type BigQueryStoreOptions = {
   projectId: string
@@ -149,6 +161,9 @@ export class BigQueryWriter {
   // `RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded` once the rate climbed)
   // collapses to a single create-per-table-per-process. Closed by `close()`.
   readonly #streams: Map<string, StreamState> = new Map()
+  // Bound by the target once `write()` starts: the store is constructed at target-creation
+  // time, before the pipe's logger exists.
+  #logger?: Logger
 
   constructor(bigquery: BigQuery, writer: managedwriter.WriterClient, options: BigQueryStoreOptions) {
     this.#bigquery = bigquery
@@ -166,6 +181,11 @@ export class BigQueryWriter {
       options.trackedTables.map((t) => [t.table, normalizePartitionColumn(t.schema, t.blockNumberColumn)]),
     )
     this.#protoWriterFactory = options.protoWriterFactory ?? defaultProtoWriterFactory
+  }
+
+  /** Attaches the pipe's logger, so retries and stalled appends are reported. */
+  bindLogger(logger: Logger): void {
+    this.#logger = logger.child({ module: 'bigquery' })
   }
 
   /**
@@ -330,15 +350,53 @@ export class BigQueryWriter {
 
     for (const chunk of chunkBuffersByByteSize(encodedRows)) {
       const chunkOffset = stream.nextOffset // capture for the retry closure
-      const response = await doWithRetry(
-        () => stream.writer.appendRows({ serializedRows: chunk }, chunkOffset).getResult(),
-        { ...RETRY_OPTIONS, title: `appendRows(${tableFqnPath}, offset=${chunkOffset})` },
+      const response = await this.#whileAppending(tableFqnPath, chunkOffset, () =>
+        doWithRetry(() => stream.writer.appendRows({ serializedRows: chunk }, chunkOffset).getResult(), {
+          ...RETRY_OPTIONS,
+          title: `appendRows(${tableFqnPath}, offset=${chunkOffset})`,
+          logger: this.#logger,
+        }),
       )
       assertNoRowErrors(response, tableFqnPath, chunkOffset)
       stream.nextOffset += chunk.length
     }
 
     return { rows: rows.length, bytes: totalBytes }
+  }
+
+  /**
+   * Runs an append and reports it if it neither succeeds nor fails in time.
+   *
+   * A stalled append is otherwise indistinguishable from an idle source: the pipe stops
+   * advancing, the progress line keeps printing the same numbers, and nothing is logged.
+   */
+  async #whileAppending<T>(tableFqnPath: string, offset: number, run: () => Promise<T>): Promise<T> {
+    const watchdog = stallWatchdog({
+      thresholdMs: APPEND_STALL_WARNING_MS,
+      onStall: ({ elapsedMs }) => {
+        this.#logger?.warn({
+          message: `appendRows(${tableFqnPath}, offset=${offset}) has not returned after ${formatDuration(elapsedMs)}`,
+          table: tableFqnPath,
+          offset,
+          elapsedMs,
+        })
+      },
+      onRecover: ({ elapsedMs }) => {
+        this.#logger?.info({
+          message: `appendRows(${tableFqnPath}, offset=${offset}) returned after ${formatDuration(elapsedMs)}`,
+          table: tableFqnPath,
+          offset,
+          elapsedMs,
+        })
+      },
+    })
+
+    watchdog.begin('append')
+    try {
+      return await run()
+    } finally {
+      watchdog.end()
+    }
   }
 
   /**
@@ -365,17 +423,24 @@ export class BigQueryWriter {
           streamType: managedwriter.CommittedStream,
           destinationTable: tableFqnPath,
         }),
-      { ...RETRY_OPTIONS, title: `createWriteStream(${tableFqnPath})` },
+      { ...RETRY_OPTIONS, title: `createWriteStream(${tableFqnPath})`, logger: this.#logger },
     )
     const connection = await this.#writer.createStreamConnection({ streamId })
-    // Defensive no-op listener. The `@google-cloud/bigquery-storage` client delivers a
-    // transport error twice: once as a rejected `getResult()` promise (which `doWithRetry`
-    // handles), and once as an 'error' event on this connection. Without a listener, the
-    // second delivery becomes an uncaught EventEmitter throw and kills the process. The
-    // BigQuery client reconnects the bidi on the next `appendRows` attempt (same streamId,
-    // offsets preserved), so we don't need to do anything here — just silence the second
-    // delivery.
-    connection.on('error', () => {})
+    // The `@google-cloud/bigquery-storage` client delivers a transport error twice: once as a
+    // rejected `getResult()` promise (which `doWithRetry` handles), and once as an 'error'
+    // event on this connection. The listener has to stay — without it the second delivery
+    // becomes an uncaught EventEmitter throw and kills the process — but it must not swallow
+    // the error silently: a failure mode that delivers ONLY the event leaves nothing else to
+    // say the stream broke. Recovery is still the client's: it reconnects the bidi on the next
+    // `appendRows` attempt, same streamId, offsets preserved.
+    connection.on('error', (error: unknown) => {
+      this.#logger?.warn({
+        message: `write stream for ${tableFqnPath} reported a transport error`,
+        error,
+        table: tableFqnPath,
+        stream: streamId,
+      })
+    })
 
     const writer = this.#protoWriterFactory({
       connection,
@@ -399,6 +464,7 @@ export class BigQueryWriter {
     const [job] = await doWithRetry(() => this.#bigquery.createQueryJob({ query: sql, params }), {
       ...RETRY_OPTIONS,
       title: 'createQueryJob',
+      logger: this.#logger,
     })
     await job.getQueryResults()
     const stats = job.metadata?.statistics?.query
@@ -415,6 +481,7 @@ export class BigQueryWriter {
     const [rows] = await doWithRetry(() => this.#bigquery.query({ query: sql, params }), {
       ...RETRY_OPTIONS,
       title: 'query',
+      logger: this.#logger,
     })
     return rows as T[]
   }

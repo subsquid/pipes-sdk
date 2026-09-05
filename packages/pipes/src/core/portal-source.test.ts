@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
 import { defaultLogger } from '~/core/logger.js'
 import { PortalCache } from '~/core/portal-source.js'
@@ -1044,5 +1044,132 @@ describe('finalized-only targets', () => {
     }).pipeTo(recordingTarget(false, seen) as any)
 
     expect(seen.finalized).toBe(false)
+  })
+})
+
+describe('stall reporting', () => {
+  const head = { number: 100, hash: '0x100' }
+
+  /** Portal stand-in with no I/O at all, so the test owns every timer in the pipe. */
+  class StubPortalClient extends PortalClient {
+    constructor(private readonly blocks: () => AsyncIterable<any>) {
+      super({ url: 'http://portal.invalid' })
+    }
+
+    override async getMetadata() {
+      return { dataset: 'test', aliases: [], real_time: true, start_block: 0 } as any
+    }
+
+    override async getHead() {
+      return head
+    }
+
+    override getStream(): any {
+      return this.blocks()
+    }
+  }
+
+  function batch(number: number) {
+    return {
+      blocks: [{ header: { number, hash: `0x${number}`, timestamp: number * 1000 } }],
+      head: { latest: head },
+      meta: { bytes: 1, requestedFromBlock: number, lastBlockReceivedAt: new Date(), requests: {} },
+    }
+  }
+
+  function hangingTarget(onBatch: () => Promise<void>) {
+    return createTarget({
+      write: async ({ read }) => {
+        for await (const _ of read()) {
+          await onBatch()
+        }
+      },
+    })
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('reports a portal that stops answering', async () => {
+    const logger = defaultLogger({ level: 'silent' })
+    const warn = vi.spyOn(logger, 'warn')
+
+    const portalClient = new StubPortalClient(async function* () {
+      await new Promise(() => {})
+    })
+
+    evmPortalStream({
+      id: 'test',
+      portal: portalClient,
+      logger,
+      progress: { interval: 0 },
+      outputs: blockDecoder({ from: 1, to: 1 }),
+    })
+      .pipeTo(hangingTarget(async () => {}) as any)
+      .catch(() => {})
+
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(warn).toHaveBeenCalledExactlyOnceWith({
+      message: 'stalled: waiting for data from the portal for 2m 0s',
+      phase: 'waiting for data from the portal',
+      elapsedMs: 120_000,
+    })
+  })
+
+  it('names the batch a wedged target is sitting on, and repeats less and less often', async () => {
+    const logger = defaultLogger({ level: 'silent' })
+    const warn = vi.spyOn(logger, 'warn')
+    const info = vi.spyOn(logger, 'info')
+
+    let release = () => {}
+    const wedged = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    const portalClient = new StubPortalClient(async function* () {
+      yield batch(1)
+      await new Promise(() => {})
+    })
+
+    evmPortalStream({
+      id: 'test',
+      portal: portalClient,
+      logger,
+      progress: { interval: 0 },
+      outputs: blockDecoder({ from: 1, to: 10 }),
+    })
+      .pipeTo(hangingTarget(() => wedged) as any)
+      .catch(() => {})
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(warn).toHaveBeenCalledExactlyOnceWith({
+      message: 'stalled: processing block 1 for 2m 0s',
+      phase: 'processing block 1',
+      elapsedMs: 120_000,
+    })
+
+    // The second report comes 4 minutes after the first, so an hours-long wedge is a handful
+    // of lines rather than one every couple of minutes.
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(warn).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(warn).toHaveBeenCalledTimes(2)
+
+    release()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('recovered: processing block 1 took'),
+        phase: 'processing block 1',
+      }),
+    )
   })
 })

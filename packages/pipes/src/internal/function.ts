@@ -1,3 +1,5 @@
+import type { Logger } from '~/core/logger.js'
+
 /** Sleeps for the given number of milliseconds. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -13,6 +15,9 @@ export function sleep(ms: number): Promise<void> {
  * - `shouldRetry`: predicate gating retry on the error. Default retries every error.
  *   Pass a classifier (e.g. `isTransientError`) to fail fast on definitive errors and
  *   stop wasting the budget on them.
+ * - `logger`: warns ONCE, after a call that needed retries finally succeeds — a line per
+ *   attempt would bury the log on every transient hiccup. A call that exhausts the budget
+ *   logs nothing here: it throws, and the caller reports it.
  */
 export async function doWithRetry<T>(
   fn: () => Promise<T>,
@@ -22,21 +27,37 @@ export async function doWithRetry<T>(
     backoff = 'linear',
     shouldRetry = () => true,
     title,
+    logger,
   }: {
     retries?: number
     delayMs?: number
     backoff?: 'linear' | 'exp'
     shouldRetry?: (error: unknown) => boolean
     title?: string
+    logger?: Logger
   } = {},
 ): Promise<T> {
+  let lastError: unknown
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await fn()
+      const result = await fn()
+
+      if (attempt > 0) {
+        logger?.warn({
+          message: `${title ?? 'call'} succeeded after ${attempt} ${attempt === 1 ? 'retry' : 'retries'}`,
+          error: lastError,
+          attempts: attempt + 1,
+        })
+      }
+
+      return result
     } catch (error) {
       if (attempt === retries || !shouldRetry(error)) {
         throw error
       }
+
+      lastError = error
 
       if (delayMs > 0) {
         const wait =

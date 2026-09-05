@@ -1,9 +1,9 @@
 import type { BigQuery } from '@google-cloud/bigquery'
 import { managedwriter } from '@google-cloud/bigquery-storage'
 import * as protobuf from 'protobufjs'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type Mock, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { BatchContext, BlockCursor } from '~/core/index.js'
+import type { BatchContext, BlockCursor, Logger } from '~/core/index.js'
 import { mockMetricsServer, testLogger } from '~/testing/index.js'
 
 import { BigQuerySyncState } from './bigquery-state.js'
@@ -1313,5 +1313,141 @@ describe('bigqueryTarget — fork lifecycle', () => {
     // And not inverted: low <= high, so recovery's bounded DELETE actually runs (the bug produced
     // range_low=11 > range_high=7, which recovery skips → the gap).
     expect(Number(inFlight.range_low)).toBeLessThanOrEqual(Number(inFlight.range_high))
+  })
+})
+
+// -----------------------------------------------------------------------------
+// BigQueryWriter — visibility of a slow or failing append
+// -----------------------------------------------------------------------------
+
+describe('BigQueryWriter — append reporting', () => {
+  /** A logger whose children are itself, so one spy sees every call the store makes. */
+  function captureLogger() {
+    const logger = {
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+      error: vi.fn(),
+      child: () => logger,
+    }
+
+    return logger as unknown as Logger & { warn: Mock; info: Mock }
+  }
+
+  const EVENTS_TABLE = 'projects/p/datasets/d/tables/events'
+
+  function makeStore(protoWriterFactory: ProtoWriterFactory) {
+    const { writer } = makeWriter()
+    const { bq } = makeBigQuery()
+
+    const store = new BigQueryWriter(bq, writer, {
+      projectId: 'p',
+      dataset: 'd',
+      trackedTables: TABLES,
+      syncTable: { dataset: 'd', table: 'sync' },
+      protoWriterFactory,
+    })
+
+    return Object.assign(store, { writerClient: writer })
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('reports an append that neither succeeds nor fails', async () => {
+    // The failure mode that hangs a pipeline forever: `getResult()` has no deadline, so a
+    // dropped bidi stream leaves it pending and every layer above just waits on the promise.
+    vi.useFakeTimers()
+
+    const logger = captureLogger()
+    const store = makeStore(() => ({
+      appendRows: () => ({ getResult: () => new Promise(() => {}) }),
+      close: () => {},
+    }))
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    store.commitBatch().catch(() => {})
+
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith({
+      message: `appendRows(${EVENTS_TABLE}, offset=0) has not returned after 15s`,
+      table: EVENTS_TABLE,
+      offset: 0,
+      elapsedMs: 15_000,
+    })
+  })
+
+  it('says nothing about an append that returns in time', async () => {
+    vi.useFakeTimers()
+
+    const logger = captureLogger()
+    const store = makeStore(fakeProtoWriterFactory)
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    await store.commitBatch()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(logger.info).not.toHaveBeenCalled()
+  })
+
+  it('reports a transport error the client delivers only as a connection event', async () => {
+    // The connection listener exists to keep an EventEmitter throw from killing the process.
+    // Swallowing the event as well loses the only signal of a stream that broke without ever
+    // rejecting the append.
+    const logger = captureLogger()
+    const store = makeStore(fakeProtoWriterFactory)
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    await store.commitBatch()
+
+    const createStreamConnection = store.writerClient.createStreamConnection as unknown as Mock
+    const connection = await createStreamConnection.mock.results[0].value
+    const onError = connection.on.mock.calls.find(([event]: [string]) => event === 'error')?.[1]
+    onError(Object.assign(new Error('UNAVAILABLE'), { code: 14 }))
+
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: `write stream for ${EVENTS_TABLE} reported a transport error`,
+        table: EVENTS_TABLE,
+      }),
+    )
+  })
+
+  it('reports a transient append failure once, after the retries have carried it', async () => {
+    // One line per call, not per attempt: a commit that spent part of its budget and then
+    // succeeded is worth knowing about, eight warnings per hiccup are not.
+    let attempts = 0
+    const logger = captureLogger()
+    const store = makeStore(() => ({
+      appendRows: () => ({
+        getResult: async () => {
+          attempts++
+          if (attempts < 3) {
+            throw Object.assign(new Error('UNAVAILABLE'), { code: 14 })
+          }
+
+          return {}
+        },
+      }),
+      close: () => {},
+    }))
+    store.bindLogger(logger)
+
+    store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+    await store.commitBatch()
+
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: `appendRows(${EVENTS_TABLE}, offset=0) succeeded after 2 retries`,
+        attempts: 3,
+      }),
+    )
   })
 })
