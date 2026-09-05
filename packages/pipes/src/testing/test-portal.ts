@@ -47,7 +47,7 @@ export type MockResponse =
       validateRequest?: ValidateRequest
     }
   | {
-      statusCode: 500 | 503
+      statusCode: 500 | 503 | 529
       validateRequest?: ValidateRequest
     }
 

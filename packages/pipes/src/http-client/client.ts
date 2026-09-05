@@ -143,6 +143,7 @@ const statusTexts: Record<number, string> = {
   522: 'connection timed out',
   523: 'origin is unreachable',
   524: 'timeout occurred',
+  529: 'server is overloaded',
 }
 
 const MAX_LOG_BODY_SIZE_BYTES = 1024 * 1024 // 1MB
@@ -602,6 +603,7 @@ function isRetryableError(error: HttpResponse | Error, req?: FetchRequest): bool
       case 522:
       case 523:
       case 524:
+      case 529:
         return true
       default:
         return error.headers.has('retry-after')
