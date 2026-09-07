@@ -89,12 +89,6 @@ export interface EvmFallbackOptions {
 }
 
 /**
- * Build a {@link FallbackClient} over an ordered list of EVM source specs. The result is a
- * {@link BlockStreamClient} — it slots into a `PortalStream` (and thus `evmStream`) exactly where
- * a single portal client goes, all sources serving the same query so their output is
- * interchangeable.
- */
-/**
  * Blocks of retrying a source's transport before the fallback is allowed to do its job. A lone
  * portal retries a retryable status indefinitely because there is nothing else to read; inside a
  * list there is, so the budget is short — long enough to ride out a blip, short enough that a
@@ -117,6 +111,12 @@ function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http
   }
 }
 
+/**
+ * Build a {@link FallbackClient} over an ordered list of EVM source specs. The result is a
+ * {@link BlockStreamClient} — it slots into a `PortalStream` (and thus `evmStream`) exactly where
+ * a single portal client goes, all sources serving the same query so their output is
+ * interchangeable.
+ */
 export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {
   const sources: FallbackClientSource[] = specs.map((spec, i) => {
     if (typeof spec === 'string') {
