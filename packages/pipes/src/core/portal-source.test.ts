@@ -1103,9 +1103,9 @@ describe('stall reporting', () => {
       await new Promise(() => {})
     })
 
-    evmPortalStream({
+    evmStream({
       id: 'test',
-      portal: portalClient,
+      source: portalClient,
       logger,
       progress: { interval: 0 },
       outputs: blockDecoder({ from: 1, to: 1 }),
@@ -1134,9 +1134,9 @@ describe('stall reporting', () => {
       })
     })
 
-    evmPortalStream({
+    evmStream({
       id: 'test',
-      portal: portalClient,
+      source: portalClient,
       logger,
       progress: { interval: 0 },
       outputs: blockDecoder({ from: 1, to: 1 }),
@@ -1164,9 +1164,9 @@ describe('stall reporting', () => {
       await new Promise(() => {})
     })
 
-    evmPortalStream({
+    evmStream({
       id: 'test',
-      portal: portalClient,
+      source: portalClient,
       logger,
       progress: { interval: 0 },
       outputs: blockDecoder({ from: 1, to: 10 }),

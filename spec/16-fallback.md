@@ -54,7 +54,7 @@ reading it would only stall).
 
 **DEF-68 — Strategy.** The deciding half: a total function from an event and a snapshot
 of detection's output to one of `use(i)`, `failover`, `hold`, `abort`. It chooses; it
-never senses (ADR-23).
+never senses (ADR-28).
 
 **DEF-69 — Unproductive wait.** Time the active source has spent answering without
 delivering a block, accumulated across consecutive empty batches and reset by the first
@@ -315,7 +315,7 @@ surface remain individually observable.
 
 ## Related decisions
 
-- [ADR-23 — detection senses, strategy decides](decisions/ADR-23-detection-and-strategy.md)
+- [ADR-28 — detection senses, strategy decides](decisions/ADR-28-detection-and-strategy.md)
 - [ADR-24 — a mixed source list reports itself hot](decisions/ADR-24-conservative-finality.md)
 - [ADR-25 — staleness measures unproductive wait](decisions/ADR-25-staleness-is-unproductive-wait.md)
 - [ADR-26 — reclaim is gated on why the source was left](decisions/ADR-26-reclaim-gating.md)

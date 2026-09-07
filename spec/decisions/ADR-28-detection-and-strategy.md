@@ -1,4 +1,4 @@
-# ADR-23 — Detection senses, strategy decides
+# ADR-28 — Detection senses, strategy decides
 
 Status: Accepted
 
