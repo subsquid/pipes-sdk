@@ -7,15 +7,15 @@ import { Code } from '~/components/ui/code'
 
 const DOCS_URL = 'https://beta.docs.sqd.dev'
 
-const example = `import { commonAbis, evmDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+const example = `import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { metricsServer } from '@subsquid/pipes/metrics/node'
 
 async function cli() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'erc20-transfers',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: {
-      erc20: evmDecoder({
+      erc20: evmEventDecoder({
         range: { from: '12,000,000' },
         events: {
           transfers: commonAbis.erc20.events.Transfer,

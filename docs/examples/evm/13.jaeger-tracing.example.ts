@@ -22,7 +22,7 @@
 
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
 import { NodeSDK } from '@opentelemetry/sdk-node'
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { opentelemetryProfiler } from '@subsquid/pipes/opentelemetry'
 
 // ─── 1. Bootstrap OTEL SDK ────────────────────────────────────────────────────
@@ -40,9 +40,9 @@ sdk.start()
 // ─── 2. Run the pipe ──────────────────────────────────────────────────────────
 
 async function cli() {
-  const stream = evmPortalStream({
+  const stream = evmStream({
     id: 'jaeger-tracing',
-    portal: 'https://portal.sqd.dev/datasets/arbitrum-one',
+    source: 'https://portal.sqd.dev/datasets/arbitrum-one',
     // Optionally pass an OTEL context to attach pipe spans to an existing trace:
     //   profiler: opentelemetryProfiler(requestContext)
     profiler: opentelemetryProfiler(),

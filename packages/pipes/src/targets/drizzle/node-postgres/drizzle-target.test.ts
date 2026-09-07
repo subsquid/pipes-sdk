@@ -4,7 +4,7 @@ import { integer, jsonb, numeric, pgTable, timestamp, varchar } from 'drizzle-or
 import { Pool, QueryResultRow } from 'pg'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { evmPortalStream } from '~/evm/index.js'
+import { evmStream } from '~/evm/index.js'
 import { MockPortal, MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
 
 import { drizzleTarget } from './index.js'
@@ -98,9 +98,9 @@ describe('Drizzle target', () => {
       ])
 
       await expect(async () => {
-        await evmPortalStream({
+        await evmStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           outputs: blockDecoder({ from: 0, to: 5 }),
         }).pipeTo(
           drizzleTarget({
@@ -138,9 +138,9 @@ describe('Drizzle target', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -240,9 +240,9 @@ describe('Drizzle target', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         drizzleTarget({
@@ -255,9 +255,9 @@ describe('Drizzle target', () => {
         }),
       )
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 1, to: 2 }),
       }).pipeTo(
         drizzleTarget({
@@ -287,9 +287,9 @@ describe('Drizzle target', () => {
 
       // An older SDK keyed every sync row by the static "stream" id — reproduce that state by
       // pinning the legacy key explicitly for the first run.
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         drizzleTarget({
@@ -302,9 +302,9 @@ describe('Drizzle target', () => {
 
       // Restart without an explicit id: the cursor key becomes the pipe id, the legacy rows are
       // re-keyed to it in a single atomic UPDATE, and indexing continues from the migrated cursor.
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       }).pipeTo(
         drizzleTarget({
@@ -428,9 +428,9 @@ describe('Drizzle target', () => {
         },
       ])
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         drizzleTarget({
@@ -541,9 +541,9 @@ describe('Drizzle target', () => {
 
       let callCount = 0
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -633,9 +633,9 @@ describe('Drizzle target', () => {
       ])
 
       let callCount = 0
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -747,9 +747,9 @@ describe('Drizzle target', () => {
       let rollbackCount = 0
       let rolledBackBalance: number | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 6 }),
       }).pipeTo(
         drizzleTarget({
@@ -842,9 +842,9 @@ describe('Drizzle target', () => {
 
       let forkCursor: number | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -918,9 +918,9 @@ describe('Drizzle target', () => {
 
       let rolledBack: number[] | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1015,9 +1015,9 @@ describe('Drizzle target', () => {
 
       let callCount = 0
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -1139,9 +1139,9 @@ describe('Drizzle target', () => {
       let rollbackCount = 0
       let rolledBackValue: number | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1197,9 +1197,9 @@ describe('Drizzle target', () => {
 
       let rolledBackValue: number | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1255,9 +1255,9 @@ describe('Drizzle target', () => {
       const seenAt = new Date('2024-01-01T00:00:00.000Z')
       let restored: typeof records.$inferSelect | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1323,9 +1323,9 @@ describe('Drizzle target', () => {
 
       let restored: typeof generated.$inferSelect | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1356,9 +1356,9 @@ describe('Drizzle target', () => {
 
       let restored: typeof identity.$inferSelect | undefined
 
-      await evmPortalStream({
+      await evmStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({

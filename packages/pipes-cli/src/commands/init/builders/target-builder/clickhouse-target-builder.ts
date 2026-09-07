@@ -4,7 +4,8 @@ import type { Config, NetworkType } from '~/types/init.js'
 
 import { clickhouseDefaults } from '../../templates/config-files/dynamic/docker-compose.js'
 import { type RenderedTemplate, renderTemplates } from '../render-templates.js'
-import type { TargetArtifacts, TargetFile } from './target-artifacts.js'
+import { rpcEnvFileLine, rpcEnvSchemaField } from './rpc-env.js'
+import type { TargetArtifacts, TargetBuildOptions, TargetFile } from './target-artifacts.js'
 import { insertEntries, uniqueTables } from './target-tables.js'
 
 const targetTemplate = `
@@ -57,7 +58,8 @@ clickhouseTarget({
     },
   })`
 
-const envSchema = `
+function renderEnvSchema(config: Config<NetworkType>): string {
+  return `
 import { z } from 'zod'
 
 const env = z.object({
@@ -65,14 +67,17 @@ const env = z.object({
   CLICKHOUSE_PASSWORD: z.string(),
   CLICKHOUSE_URL: z.string(),
   CLICKHOUSE_DATABASE: z.string(),
-}).parse(process.env)
+${rpcEnvSchemaField(config)}}).parse(process.env)
 `
+}
 
-const envFileContent = `CLICKHOUSE_URL=http://localhost:${clickhouseDefaults.port}
+function renderEnvFile(config: Config<NetworkType>, options?: TargetBuildOptions): string {
+  return `CLICKHOUSE_URL=http://localhost:${clickhouseDefaults.port}
 CLICKHOUSE_DATABASE=${clickhouseDefaults.db}
 CLICKHOUSE_USER=${clickhouseDefaults.user}
 CLICKHOUSE_PASSWORD=${clickhouseDefaults.password}
-`
+${rpcEnvFileLine(config, options?.rpcUrl)}`
+}
 
 function renderTargetCode(rendered: RenderedTemplate[]): string {
   return Mustache.render(targetTemplate, {
@@ -88,13 +93,16 @@ function renderMigrationFiles(rendered: RenderedTemplate[]): TargetFile[] {
   }))
 }
 
-export function buildClickhouseTarget(config: Config<NetworkType>): TargetArtifacts {
+export function buildClickhouseTarget(config: Config<NetworkType>, options?: TargetBuildOptions): TargetArtifacts {
   const rendered = renderTemplates(config)
 
   return {
     targetCode: renderTargetCode(rendered),
-    envSchema,
-    files: [{ path: '.env', content: envFileContent, preserveExisting: true }, ...renderMigrationFiles(rendered)],
+    envSchema: renderEnvSchema(config),
+    files: [
+      { path: '.env', content: renderEnvFile(config, options), preserveExisting: true },
+      ...renderMigrationFiles(rendered),
+    ],
     postSteps: [],
   }
 }

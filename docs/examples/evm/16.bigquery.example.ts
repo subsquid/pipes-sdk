@@ -48,7 +48,7 @@
  */
 
 import { BigQuery } from '@google-cloud/bigquery'
-import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/evm'
+import { commonAbis, evmEventDecoder, evmStream } from '@subsquid/pipes/evm'
 import { bigqueryTarget } from '@subsquid/pipes/targets/bigquery'
 
 // Default BIGNUMERIC is precision 76, scale 38 — i.e. up to 38 integer digits before the
@@ -78,9 +78,9 @@ async function main() {
     await bigquery.createDataset(DATASET)
   }
 
-  await evmPortalStream({
+  await evmStream({
     id: 'erc20-transfers',
-    portal: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet' },
+    source: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet' },
     outputs: evmEventDecoder({
       // 'latest' starts near the head — useful for exercising reorg handling. Use a fixed
       // block number for deterministic backfills.

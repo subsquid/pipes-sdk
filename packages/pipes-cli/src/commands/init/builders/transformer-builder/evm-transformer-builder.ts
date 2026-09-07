@@ -11,9 +11,17 @@ export const template = `{{#deduplicatedImports}}
 
 {{/transformerTemplates}}
 export async function main() {
-  await evmPortalStream({
+  await evmStream({
     id: '{{pipeId}}',
-    portal: 'https://portal.sqd.dev/datasets/{{network}}',
+{{^rpcFallback}}
+    source: 'https://portal.sqd.dev/datasets/{{network}}',
+{{/rpcFallback}}
+{{#rpcFallback}}
+    source: [
+      'https://portal.sqd.dev/datasets/{{network}}',
+      { type: 'rpc', url: env.RPC_URL, name: 'rpc-fallback' },
+    ],
+{{/rpcFallback}}
     outputs: {
 {{#transformerTemplates}}
 {{#templateId}}
@@ -37,6 +45,6 @@ export class EvmTransformerBuilder extends BaseTransformerBuilder<'evm'> {
   }
 
   getNetworkImports() {
-    return ['import { evmPortalStream } from "@subsquid/pipes/evm"']
+    return ['import { evmStream } from "@subsquid/pipes/evm"']
   }
 }

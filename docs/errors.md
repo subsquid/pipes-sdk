@@ -52,7 +52,7 @@ overwrite each other's progress.
 **Fix** — set a stable, globally unique, non-empty `id`:
 
 ```ts
-evmPortalStream({ id: 'eth-transfers', portal: '...', outputs })
+evmStream({ id: 'eth-transfers', source: '...', outputs })
 ```
 
 ### E0002 · Invalid block range
