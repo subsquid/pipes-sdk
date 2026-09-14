@@ -42,9 +42,12 @@ import {
   OutboxRow,
   PendingOperation,
   PubsubState,
+  PubsubStateConfig,
   RouteMode,
   RowIdSource,
-  SqlitePubsubState,
+  describePubsubStateConfig,
+  isPubsubState,
+  resolvePubsubState,
   stableAttributes,
 } from './pubsub-state.js'
 
@@ -124,8 +127,16 @@ export type TopicRoute<Data> = {
 export type PubsubTargetOptions<T> = {
   /** A constructed client, or `ClientConfig` passed to `new PubSub(...)`. Auth = ADC / emulator. */
   pubsub: PubSub | ClientConfig
-  /** Combined local state: cursor + manifest + outbox + sequence counters. */
-  state: { path: string } | PubsubState
+  /**
+   * Combined local state: cursor + manifest + outbox + sequence counters.
+   *
+   * `{ path: '...' }` (the default, `kind: 'sqlite'` implied) opens a SQLite file. `{ kind:
+   * 'postgres', connection: '...' }` opens Postgres instead — a connection string, `pg.PoolConfig`,
+   * or an already-constructed `pg.Pool` to reuse. Either way the state is one producer's
+   * sequencer: exactly one process may hold it open at a time. A `PubsubState` is used verbatim
+   * for a fully custom backend.
+   */
+  state: PubsubStateConfig
   /**
    * One route per pipe output stream (keys of the decoder/transformer output).
    *
@@ -270,10 +281,10 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
     protocolAttributes: PROTOCOL_ATTRIBUTES.length,
   })
 
-  const state: PubsubState =
-    'path' in options.state
-      ? new SqlitePubsubState({ path: options.state.path, id: options.settings?.id })
-      : options.state
+  // A pre-built PubsubState is never spread — it is a class instance, not an options object.
+  const state: PubsubState = resolvePubsubState(
+    isPubsubState(options.state) ? options.state : { ...options.state, id: options.state.id ?? options.settings?.id },
+  )
 
   let publisher: Publisher | undefined = options.publisher
   // The fork hook runs while `write()` is suspended inside its for-await, so the live write
@@ -285,7 +296,7 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
       const namespace = options.namespace ?? id ?? options.settings?.id ?? 'pipe'
       const uidAttribute = options.publish?.uidAttribute ?? false
 
-      const statePath = 'path' in options.state ? options.state.path : 'custom'
+      const statePath = describePubsubStateConfig(options.state)
       const allowColdStart = options.allowColdStart ?? false
       const { coldStart } = await state.open({
         cursorKey: options.settings?.id ?? id ?? '',
