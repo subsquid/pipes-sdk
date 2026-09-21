@@ -3,6 +3,7 @@ import {
   BYTES,
   NAT,
   QTY,
+  SMALL_QTY,
   STRING,
   Validator,
   array,
@@ -67,6 +68,20 @@ export type BlockHeaderFields = {
     address: Hex
     amount: bigint
   }[]
+
+  // Avalanche
+  extDataHash?: Hex
+  blockExtraData?: Hex
+  blockGasCost?: bigint
+  extDataGasUsed?: bigint
+  timestampMilliseconds?: number
+  minDelayExcess?: bigint
+  targetExponent?: bigint
+  minPriceExponent?: bigint
+  settledHeight?: number
+  settledGasUnix?: number
+  settledGasNumerator?: bigint
+  settledExcess?: bigint
 }
 
 export type TransactionFields = {
@@ -454,6 +469,18 @@ const BlockHeaderShape: ObjectValidatorShape<BlockHeaderFields> = {
   uncles: option(array(BYTES)),
   withdrawalsRoot: option(BYTES),
   withdrawals: option(array(object({ index: QTY, validatorIndex: QTY, address: BYTES, amount: QTY }))),
+  extDataHash: option(BYTES),
+  blockExtraData: option(BYTES),
+  blockGasCost: option(QTY),
+  extDataGasUsed: option(QTY),
+  timestampMilliseconds: option(SMALL_QTY),
+  minDelayExcess: option(QTY),
+  targetExponent: option(QTY),
+  minPriceExponent: option(QTY),
+  settledHeight: option(SMALL_QTY),
+  settledGasUnix: option(SMALL_QTY),
+  settledGasNumerator: option(QTY),
+  settledExcess: option(QTY),
 }
 
 const LogShape: ObjectValidatorShape<LogFields> = {
