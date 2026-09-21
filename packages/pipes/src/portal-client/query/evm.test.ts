@@ -295,12 +295,12 @@ describe('BlockHeaderFields withdrawals validation', () => {
   })
 })
 
-describe('BlockHeaderFields optional pre-fork fields', () => {
-  function castHeader(fields: BlockHeaderFieldSelection, header: Record<string, unknown>) {
-    const schema = getBlockSchema({ block: fields })
-    return cast(schema, { header, transactions: [] }).header as Record<string, unknown>
-  }
+function castHeader(fields: BlockHeaderFieldSelection, header: Record<string, unknown>) {
+  const schema = getBlockSchema({ block: fields })
+  return cast(schema, { header, transactions: [] }).header as Record<string, unknown>
+}
 
+describe('BlockHeaderFields optional pre-fork fields', () => {
   it('accepts a header without baseFeePerGas (pre-London) when the field is selected', () => {
     expect(castHeader({ baseFeePerGas: true }, {})['baseFeePerGas']).toBeUndefined()
   })
@@ -319,5 +319,71 @@ describe('BlockHeaderFields optional pre-fork fields', () => {
     const h = castHeader({ blobGasUsed: true, excessBlobGas: true }, { blobGasUsed: '0x10', excessBlobGas: '0x20' })
     expect(h['blobGasUsed']).toBe(16n)
     expect(h['excessBlobGas']).toBe(32n)
+  })
+})
+
+describe('BlockHeaderFields avalanche fields', () => {
+  const AVALANCHE_FIELDS = {
+    extDataHash: true,
+    blockExtraData: true,
+    blockGasCost: true,
+    extDataGasUsed: true,
+    timestampMilliseconds: true,
+    minDelayExcess: true,
+    targetExponent: true,
+    minPriceExponent: true,
+    settledHeight: true,
+    settledGasUnix: true,
+    settledGasNumerator: true,
+    settledExcess: true,
+  } satisfies BlockHeaderFieldSelection
+
+  // Fuji C-Chain block 58542683, post-Helicon: every avalanche field is set.
+  const FUJI_HEADER = {
+    extDataHash: '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421',
+    blockExtraData: '0x',
+    blockGasCost: '0x0',
+    extDataGasUsed: '0x0',
+    timestampMilliseconds: '0x1a0c45107ef',
+    minDelayExcess: '0x6cd69c',
+    targetExponent: '0xf0a451',
+    minPriceExponent: '0xd49a784bcd1b8b0',
+    settledHeight: '0x37d4a57',
+    settledGasUnix: '0x6ab13ba2',
+    settledGasNumerator: '0x23669b',
+    settledExcess: '0x131b0ff4',
+  }
+
+  it('casts heights and unix times to number and quantities to bigint', () => {
+    expect(castHeader(AVALANCHE_FIELDS, FUJI_HEADER)).toEqual({
+      extDataHash: '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421',
+      blockExtraData: '0x',
+      blockGasCost: 0n,
+      extDataGasUsed: 0n,
+      timestampMilliseconds: 1790000039919,
+      minDelayExcess: 7132828n,
+      targetExponent: 15770705n,
+      minPriceExponent: 957480584338323632n,
+      settledHeight: 58542679,
+      settledGasUnix: 1790000034,
+      settledGasNumerator: 2320027n,
+      settledExcess: 320540660n,
+    })
+  })
+
+  it('maps null and absent fields to undefined', () => {
+    const nulls = Object.fromEntries(Object.keys(AVALANCHE_FIELDS).map((field) => [field, null]))
+
+    expect(castHeader(AVALANCHE_FIELDS, nulls)).toEqual({})
+    expect(castHeader(AVALANCHE_FIELDS, {})).toEqual({})
+  })
+
+  it('rejects a non-hex value', () => {
+    expect(() => castHeader({ settledExcess: true }, { settledExcess: 'nothex' })).toThrow()
+    expect(() => castHeader({ settledHeight: true }, { settledHeight: 'nothex' })).toThrow()
+  })
+
+  it('rejects a height beyond the safe integer range instead of rounding it', () => {
+    expect(() => castHeader({ settledHeight: true }, { settledHeight: '0x20000000000000' })).toThrow()
   })
 })
