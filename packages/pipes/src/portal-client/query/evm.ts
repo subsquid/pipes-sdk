@@ -493,8 +493,9 @@ const LogShape: ObjectValidatorShape<LogFields> = {
 }
 
 /**
- * Some chains serve a few quantities as decimal strings rather than hex, so accept both
- * encodings and decode to the same bigint. `nonce` already needs this treatment.
+ * On some Ethereum blocks the Portal returns `blobGasPrice` as a decimal string,
+ * eg. "1" instead of "0x1" at block 19,827,149 transaction 36.
+ * This validator is a temporary workaround that accepts both hex and decimal values.
  */
 const HEX_OR_DEC_QTY = oneOf({ hex: QTY, dec: ANY_NAT })
 
@@ -519,11 +520,16 @@ const TransactionShape: ObjectValidatorShape<TransactionFields> = {
   contractAddress: option(BYTES),
   gasUsed: QTY,
   cumulativeGasUsed: QTY,
+  // FIXME: Temporary workaround for Portal's Mantle dataset issues.
+  // Portal currently serves `effectiveGasPrice: null` and `type: null`
+  // for transactions in blocks <= 29,459, while the current RPCs provide valid values.
   effectiveGasPrice: option(QTY),
   type: option(NAT),
   status: NAT,
   logsBloom: option(BYTES),
   blobVersionedHashes: option(array(BYTES)),
+  // FIXME: Temporary workaround for unnormalized Portal values.
+  // Needs eventual fix in the Ethereum datasets (see the comment above `HEX_OR_DEC_QTY`).
   blobGasUsed: option(HEX_OR_DEC_QTY),
   blobGasPrice: option(HEX_OR_DEC_QTY),
   accessList: option(array(object({ address: BYTES, storageKeys: array(BYTES) }))),

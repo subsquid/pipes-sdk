@@ -420,7 +420,7 @@ describe('TransactionFields blob gas encoding', () => {
 })
 
 describe('TransactionFields null receipt fields', () => {
-  it('accepts null effectiveGasPrice and type, which pre-regenesis mantle transactions carry', () => {
+  it('accepts null effectiveGasPrice and type, which Portal carries for Mantle network transactions in blocks <= 29,459', () => {
     expect(castTransaction({ effectiveGasPrice: true, type: true }, { effectiveGasPrice: null, type: null })).toEqual(
       {},
     )
