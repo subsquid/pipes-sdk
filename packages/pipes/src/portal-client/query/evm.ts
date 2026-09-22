@@ -105,8 +105,8 @@ export type TransactionFields = {
   contractAddress?: Hex
   gasUsed: bigint
   cumulativeGasUsed: bigint
-  effectiveGasPrice: bigint
-  type: number
+  effectiveGasPrice?: bigint
+  type?: number
   status: number
   logsBloom?: Hex
   blobVersionedHashes?: Hex[]
@@ -492,6 +492,12 @@ const LogShape: ObjectValidatorShape<LogFields> = {
   topics: array(BYTES),
 }
 
+/**
+ * Some chains serve a few quantities as decimal strings rather than hex, so accept both
+ * encodings and decode to the same bigint. `nonce` already needs this treatment.
+ */
+const HEX_OR_DEC_QTY = oneOf({ hex: QTY, dec: ANY_NAT })
+
 const TransactionShape: ObjectValidatorShape<TransactionFields> = {
   transactionIndex: NAT,
   hash: BYTES,
@@ -513,13 +519,13 @@ const TransactionShape: ObjectValidatorShape<TransactionFields> = {
   contractAddress: option(BYTES),
   gasUsed: QTY,
   cumulativeGasUsed: QTY,
-  effectiveGasPrice: QTY,
-  type: NAT,
+  effectiveGasPrice: option(QTY),
+  type: option(NAT),
   status: NAT,
   logsBloom: option(BYTES),
   blobVersionedHashes: option(array(BYTES)),
-  blobGasUsed: option(QTY),
-  blobGasPrice: option(QTY),
+  blobGasUsed: option(HEX_OR_DEC_QTY),
+  blobGasPrice: option(HEX_OR_DEC_QTY),
   accessList: option(array(object({ address: BYTES, storageKeys: array(BYTES) }))),
   l1Fee: option(QTY),
   l1FeeScalar: option(NAT),
