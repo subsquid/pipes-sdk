@@ -540,6 +540,11 @@ the footer) to the temp path it was given before resolving `finish()`. The built
 PubSub is append-only: a published message cannot be read back, updated, or deleted. Most of the
 codes below fire *before* anything is published, because after that there is nothing to take back.
 
+The target's local state (cursor, rollback manifest, outbox, sequence counter) is SQLite by
+default (`state: { path: '...' }`) or Postgres (`state: { kind: 'postgres', connection: '...' }`).
+The codes below talk about "the state" generically — everything they say applies to either
+backend.
+
 ### E2401 · Topic does not exist
 
 A configured route names a topic that is missing from the project. The default `topicSetup:
@@ -617,21 +622,22 @@ canonical one.
 **Fix** — supply a string `_id` in `MessageDraft.data`, set `MessageDraft.id`, or include block
 hashes in the source data.
 
-### E2410 · State file is locked
+### E2410 · State is locked
 
-Another process holds the state file. Exactly one producer may own one: it is the authoritative
-sequencer for every id it publishes, and a second writer would hand consumers change sequence
-numbers they already hold.
+Another process holds the state's single-writer lock (SQLite's exclusive file lock, or a Postgres
+session-level advisory lock scoped to `schema` + `tablePrefix`). Exactly one producer may own a
+state: it is the authoritative sequencer for every id it publishes, and a second writer would hand
+consumers change sequence numbers they already hold.
 
-**Fix** — run one instance per state path.
+**Fix** — run one instance per state (per SQLite path, or per Postgres `schema`/`tablePrefix`).
 
 ### E2411 · State schema version mismatch
 
-The state file was written by a different schema version of the target. State schemas are not
+The state was written by a different schema version of the target. State schemas are not
 migrated in place.
 
 **Fix** — run the SDK version that owns the state, or start a fresh state and re-bootstrap the
-destination. A new state file is a new sequencer; see the cold-start warning in the target's logs.
+destination. A new state is a new sequencer; see the cold-start warning in the target's logs.
 
 ### E2412 · Ordering key while message ordering is disabled
 
@@ -673,12 +679,14 @@ The dataset reports neither a chain head nor a finalized head, so there is no he
 
 **Fix** — pass an explicit `publishFrom` block.
 
-### E2417 · State file unavailable
+### E2417 · State unavailable
 
-The state file could not be opened. It is the producer's sequencer, so it must live on a persistent
-volume — not ephemeral container storage.
+The state could not be opened — the SQLite path could not be reached, or the Postgres connection
+failed. It is the producer's sequencer, so it must live on durable storage: a persistent volume
+for SQLite, a reachable database for Postgres — not ephemeral container storage.
 
-**Fix** — check the path and its permissions, and mount it on durable storage.
+**Fix** — for SQLite, check the path and its permissions and mount it on durable storage; for
+Postgres, check the connection details and that `pg` is installed.
 
 ### E2418 · Two drafts with the same id in one batch
 
@@ -688,27 +696,27 @@ write-once, so the second would silently overwrite the first for every consumer.
 **Fix** — make the id unique per row, or declare `mode: 'materialized'` if the row is meant to be
 revised.
 
-### E2419 · State file belongs to another producer
+### E2419 · State belongs to another producer
 
-The state file records a different cursor key than the one this pipe binds. Only the cursor row
+The state records a different cursor key than the one this pipe binds. Only the cursor row
 is keyed — the outbox, the manifest and the sequence counters are producer-wide — so adopting
-another producer's file would report a clean warm start while publishing its pending operations
+another producer's state would report a clean warm start while publishing its pending operations
 under this pipe's identity.
 
-**Fix** — one state file per producer. Give this pipe its own `state.path`, or pin
-`settings.id` to the key the file was written under if this pipe really is that producer
-renamed.
+**Fix** — one state per producer. Give this pipe its own `state.path` (SQLite) or
+`state.tablePrefix` (Postgres), or pin `settings.id` to the key the state was written under if
+this pipe really is that producer renamed.
 
 ### E2420 · Cold start refused
 
-The run started with no state at the configured path, so it would restart the producer's change
+The run started with no state at the configured location, so it would restart the producer's change
 sequence at zero. If that namespace has already published, BigQuery discards the republished lower
 numbers as stale and every affected row freezes at its old value — with no error on either side.
 That is why recovery from lost state is not a restart.
 
 **Fix** — to bootstrap a namespace that has never published, set `allowColdStart: true`. To recover
 a namespace whose state was lost, publish under a fresh namespace and re-bootstrap every
-destination; restoring the state file from a backup reintroduces the same failure.
+destination; restoring the state from a backup reintroduces the same failure.
 
 ### E2421 · State wire configuration changed
 
@@ -748,20 +756,21 @@ would make later changes look stale to BigQuery.
 
 ### E2425 · No routes configured
 
-The target was constructed with no `topics` entry, so it would open a state file, take its
-exclusive lock, and publish nothing.
+The target was constructed with no `topics` entry, so it would open a state, take its
+single-writer lock, and publish nothing.
 
 **Fix** — configure at least one topic route.
 
 ### E2426 · State write failed
 
-A write to the producer's state file failed because the volume that holds it is full, gone,
-unreadable, or has been remounted read-only. The transaction was rolled back; the message says
-whether the batch had already been published, which decides whether anything needs redelivering.
+A write to the producer's state failed because the store is full, gone, unreadable, or has been
+remounted/reopened read-only (SQLite's disk, or a Postgres replica/read-only session). The
+transaction was rolled back; the message says whether the batch had already been published, which
+decides whether anything needs redelivering.
 
-**Fix** — free space on the volume that holds the state file, or check its health, and restart.
-The state is the producer's sequencer: it must live on a persistent volume sized for the outbox
-backlog, not on ephemeral container storage.
+**Fix** — free space on the volume or database that holds the state, or check its health, and
+restart. The state is the producer's sequencer: it must have room for the outbox backlog, not run
+on ephemeral container storage.
 
 ### E2428 · Producer feeds more than one topic
 
