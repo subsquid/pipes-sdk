@@ -387,3 +387,49 @@ describe('BlockHeaderFields avalanche fields', () => {
     expect(() => castHeader({ settledHeight: true }, { settledHeight: '0x20000000000000' })).toThrow()
   })
 })
+
+function castTransaction(fields: Record<string, boolean>, tx: Record<string, unknown>) {
+  const schema = getBlockSchema({ transaction: fields })
+  return cast(schema, { header: {}, transactions: [tx] }).transactions[0]
+}
+
+describe('TransactionFields blob gas encoding', () => {
+  const FIELDS = { blobGasPrice: true, blobGasUsed: true }
+
+  it('accepts the hex encoding', () => {
+    expect(castTransaction(FIELDS, { blobGasPrice: '0x1', blobGasUsed: '0x20000' })).toEqual({
+      blobGasPrice: 1n,
+      blobGasUsed: 131072n,
+    })
+  })
+
+  it('accepts the decimal encoding some blocks carry', () => {
+    expect(castTransaction(FIELDS, { blobGasPrice: '1', blobGasUsed: '131072' })).toEqual({
+      blobGasPrice: 1n,
+      blobGasUsed: 131072n,
+    })
+  })
+
+  it('keeps both fields optional', () => {
+    expect(castTransaction(FIELDS, {})).toEqual({})
+  })
+
+  it('rejects a value that is neither', () => {
+    expect(() => castTransaction(FIELDS, { blobGasPrice: 'nothex' })).toThrow()
+  })
+})
+
+describe('TransactionFields null receipt fields', () => {
+  it('accepts null effectiveGasPrice and type, which pre-regenesis mantle transactions carry', () => {
+    expect(castTransaction({ effectiveGasPrice: true, type: true }, { effectiveGasPrice: null, type: null })).toEqual(
+      {},
+    )
+  })
+
+  it('still decodes them when present', () => {
+    expect(castTransaction({ effectiveGasPrice: true, type: true }, { effectiveGasPrice: '0x7', type: 2 })).toEqual({
+      effectiveGasPrice: 7n,
+      type: 2,
+    })
+  })
+})
