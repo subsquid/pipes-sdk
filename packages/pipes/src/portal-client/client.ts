@@ -81,7 +81,7 @@ export interface PortalClientOptions {
 
 export type PortalRequestOptions = Pick<
   RequestOptions,
-  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout'
+  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout' | 'abort'
 >
 
 export interface PortalBlockStreamOptions {

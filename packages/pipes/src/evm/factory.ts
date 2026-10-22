@@ -43,6 +43,28 @@ export interface FactoryPersistentAdapter<T extends InternalFactoryEvent<any>> {
 
 export type DecodedAbiEvent<T extends EventArgs> = ReturnType<AbiEvent<T>['decode']>
 
+export type FactoryLookaheadOptions = {
+  /**
+   * The most child addresses one portal query may carry. Every child-event request repeats the
+   * address list, so the limit counts the addresses of all of them together. When the children
+   * up to a block no longer fit, child events from that block on are fetched by topic alone.
+   *
+   * @default 5_000
+   */
+  maxAddresses?: number
+  /**
+   * The fewest blocks an address-filtered query must cover. A new filter starts a new portal
+   * stream, which is not worth it for a short stretch. Closer than this to the finalized head,
+   * child events are fetched by topic alone for the rest of the run.
+   *
+   * @default 10_000
+   */
+  minSegmentBlocks?: number
+}
+
+const DEFAULT_LOOKAHEAD_MAX_ADDRESSES = 5_000
+const DEFAULT_LOOKAHEAD_MIN_SEGMENT_BLOCKS = 10_000
+
 export type ContractFactoryOptions<T extends EventArgs> = {
   address: string | string[]
   event: AbiEvent<T> | EventWithArgsInput<AbiEvent<T>>
@@ -54,6 +76,17 @@ export type ContractFactoryOptions<T extends EventArgs> = {
   database:
     | FactoryPersistentAdapter<InternalFactoryEvent<any>>
     | Promise<FactoryPersistentAdapter<InternalFactoryEvent<any>>>
+  /**
+   * Fetches child events with a server-side address filter instead of by topic alone.
+   *
+   * A second, light stream scans the factory events of finalized blocks ahead of the main stream.
+   * The main stream then fetches each stretch of blocks filtered by every child created up to its
+   * end. Near the finalized head, or when the children no longer fit into one query, it fetches
+   * child events by topic alone, as it does for the whole range without this option.
+   *
+   * @default false
+   */
+  lookahead?: boolean | FactoryLookaheadOptions
 }
 
 export class Factory<T extends EventArgs> {
@@ -125,40 +158,99 @@ export class Factory<T extends EventArgs> {
     return this.assertDb().migrate()
   }
 
-  async decode(log: Log, blockNumber: number) {
+  /** @internal */
+  lookaheadOptions(): Required<FactoryLookaheadOptions> | null {
+    const lookahead = this.options.lookahead ?? false
+    if (lookahead === false) return null
+
+    const options = lookahead === true ? {} : lookahead
+    const maxAddresses = options.maxAddresses ?? DEFAULT_LOOKAHEAD_MAX_ADDRESSES
+    const minSegmentBlocks = options.minSegmentBlocks ?? DEFAULT_LOOKAHEAD_MIN_SEGMENT_BLOCKS
+
+    for (const [name, value] of Object.entries({ maxAddresses, minSegmentBlocks })) {
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`lookahead.${name} must be a positive integer, got ${value}`)
+      }
+    }
+
+    return { maxAddresses, minSegmentBlocks }
+  }
+
+  /**
+   * The child a factory-creation log announces, or `null` when it names none. Inline decoding and
+   * the lookahead scan both read children through here, so they never disagree on one.
+   *
+   * @internal
+   */
+  childFromLog(log: Log, blockNumber: number): InternalFactoryEvent<T> | null {
     const decoded = this.#event.decode(log)
     const contract =
       typeof this.options.childAddressField === 'function'
         ? this.options.childAddressField(decoded)
         : String(decoded[this.options.childAddressField])
 
-    if (!contract) return
+    if (!contract) return null
 
-    this.#batch.push({
+    return {
       childAddress: contract,
       factoryAddress: log.address,
       blockNumber,
       transactionIndex: log.transactionIndex,
       logIndex: log.logIndex,
       event: decoded,
-    })
+    }
+  }
+
+  /**
+   * Whether {@link getContract} accepts the child of this creation event: a stored creation event may
+   * come from another factory or from a run with other params.
+   *
+   * @internal
+   */
+  ownsChild(child: InternalFactoryEvent<T>): boolean {
+    return this.#addresses.has(child.factoryAddress) && this.matchesParams(child.event)
+  }
+
+  async decode(log: Log, blockNumber: number) {
+    const child = this.childFromLog(log, blockNumber)
+    if (!child) return
+
+    this.#batch.push(child)
   }
 
   async getContract(address: string): Promise<FactoryEvent<DecodedAbiEvent<T>> | null> {
     const memory = this.#batch.find((b) => b.childAddress === address)
     if (memory) {
-      if (!this.#addresses.has(memory.factoryAddress)) return null
-      if (!this.matchesParams(memory.event)) return null
+      if (!this.ownsChild(memory)) return null
 
       return this.transform(memory)
     }
 
     const fromDb = await this.assertDb().lookup(address)
     if (!fromDb) return null
-    else if (!this.#addresses.has(fromDb.factoryAddress)) return null
-    else if (!this.matchesParams(fromDb.event)) return null
+    else if (!this.ownsChild(fromDb)) return null
 
     return this.transform(fromDb)
+  }
+
+  /**
+   * Lowercased addresses of every stored child {@link getContract} accepts.
+   *
+   * Reads every row and filters it here: an adapter filtering by params on its own may drop a child
+   * that {@link getContract} accepts.
+   *
+   * @internal
+   */
+  async storedChildAddresses(): Promise<string[]> {
+    const addresses = new Set<string>()
+
+    for (const child of await this.assertDb().all()) {
+      if (!this.ownsChild(child)) continue
+
+      addresses.add(child.childAddress.toLowerCase())
+    }
+
+    return [...addresses]
   }
 
   private transform(event: InternalFactoryEvent<T>): FactoryEvent<DecodedAbiEvent<T>> {

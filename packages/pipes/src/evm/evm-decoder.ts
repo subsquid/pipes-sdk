@@ -16,6 +16,7 @@ import { Log, LogRequest } from '~/portal-client/query/evm.js'
 
 import { evmQuery } from './evm-query-builder.js'
 import { Factory } from './factory.js'
+import { FactoryLookahead } from './factory-lookahead.js'
 
 export type FactoryEvent<T> = {
   contract: string
@@ -256,22 +257,6 @@ function splitEvents<T extends AbiEvent<any>>(normalizedEvents: EventWithArgs<T>
   }
 }
 
-function buildEventRequests<T extends AbiEvent<any>, C extends Contracts>(
-  eventWithArgs: EventWithArgs<T>[],
-  contracts?: C,
-) {
-  return eventWithArgs
-    .map<LogRequest | undefined>((event) => {
-      const topics = buildEventTopics(event.event, event.params)
-      return {
-        ...topics,
-        address: Factory.isFactory(contracts) ? undefined : contracts,
-        transaction: true,
-      }
-    })
-    .filter((logRequest): logRequest is LogRequest => !!logRequest)
-}
-
 function getDuplicateEvents<T extends Events>(events: T, duplicates: string[]) {
   return duplicates.map((duplicate) => {
     const props = Object.keys(events).filter((name) => {
@@ -333,28 +318,42 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
   const normalizedEvents = getNormalizedEvents(events)
   const { eventsWithParams, eventsWithoutParams } = splitEvents(normalizedEvents)
   const eventTopic0 = eventsWithoutParams.map((event) => event.event.topic)
+  const factory = Factory.isFactory(contracts) ? contracts : undefined
   const normalizedContracts =
     contracts && !Factory.isFactory(contracts) ? contracts.map((contract) => contract.toLowerCase()) : undefined
 
+  const childRequests = (address?: string[]): LogRequest[] => {
+    const requests: LogRequest[] = []
+
+    if (eventsWithoutParams.length > 0) {
+      requests.push({ address, topic0: eventTopic0, transaction: true })
+    }
+
+    for (const event of eventsWithParams) {
+      requests.push({ ...buildEventTopics(event.event, event.params), address, transaction: true })
+    }
+
+    return requests
+  }
+
+  const lookaheadOptions = factory?.lookaheadOptions()
+  const lookahead =
+    factory && lookaheadOptions && childRequests().length > 0
+      ? new FactoryLookahead({ factory, childRequests, ...lookaheadOptions })
+      : undefined
+
   const query = evmQuery().addFields(decodedEventFields)
 
-  if (Factory.isFactory(contracts)) {
-    query.addLogRequest({ range: decodedRange, request: contracts.buildFactoryEventRequest() })
+  if (factory) {
+    query.addLogRequest({ range: decodedRange, request: factory.buildFactoryEventRequest() })
   }
 
-  if (eventsWithoutParams.length > 0) {
-    query.addLogRequest({
-      range: decodedRange,
-      request: {
-        address: !Factory.isFactory(contracts) ? contracts : undefined,
-        topic0: eventTopic0,
-        transaction: true,
-      },
-    })
-  }
-
-  for (const request of buildEventRequests(eventsWithParams, contracts)) {
-    query.addLogRequest({ range: decodedRange, request })
+  if (lookahead) {
+    query.addPlannedRequest({ range: decodedRange, planner: lookahead.plan })
+  } else {
+    for (const request of childRequests(factory ? undefined : (contracts as string[] | undefined))) {
+      query.addLogRequest({ range: decodedRange, request })
+    }
   }
 
   return query
@@ -474,7 +473,12 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
       rollback(cursor) {
         if (!Factory.isFactory(contracts)) return
 
+        lookahead?.rollback()
+
         return contracts.rollback(cursor)
+      },
+      stop() {
+        lookahead?.stop()
       },
     })
 }
