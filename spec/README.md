@@ -71,7 +71,10 @@ Binding-independent: the contract every sink implements is
 - Math notation: ℕ naturals, ⊥ absent/undefined, ⟨…⟩ tuples, sequences are ordered.
 - **Mutability rule**: only 13 and 15 record status, dates, or current values.
   `decisions/` is append-only — accepted ADRs are never edited, only superseded. All
-  other docs change only when *intended behavior* changes.
+  other docs change only when *intended behavior* changes. One exception: a normative
+  entry the reference implementation violates MAY carry an italic parenthetical
+  pointer to its gap-register entry (`*(… — GAP-n)*`); it names the GAP id, so the
+  machine check flags it once that entry closes.
 - **Machine check**: `node spec/check-spec.mjs` validates the ID system (definitions,
   references, ranges) and every relative link (target file exists, anchor matches a
   heading); CI runs it on every spec change.

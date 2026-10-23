@@ -32,7 +32,8 @@ Bands: 1–9 progress, 10–19 pressure & errors, 20–29 lifecycle, 30–39 ala
 - **OB-13 — Stall/retry signal.** While any retry loop is active, an observable,
   reason-coded signal is continuously present (LIV-7 witness); it clears on success.
   A global write halt (sink refusing) is directly observable, not inferred.
-  *(Currently neither bound in IB nor implemented — GAP-28.)*
+  *(Currently only a log warning after a fixed stall delay, neither bound in IB nor
+  reason-coded — GAP-28.)*
 - **OB-14 — Fork counter.** Increments exactly once per resolved fork (T-FORK);
   reason-coded fatal fork errors are distinguishable from resolved forks.
 

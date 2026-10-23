@@ -128,8 +128,8 @@ semantics are part of the shared conformance surface.
 
 **WP-24 — Attribution uniqueness.** [MUST] Within one module, each input record maps to
 at most one output key. Declaring two outputs with an indistinguishable signature is
-reported at startup. *(Currently a logged error in the evm module and undetected in
-solana — GAP-15; whether the report must be fatal is OQ-6.)*
+reported at startup. *(Currently a logged error in the evm module, while solana refuses
+at construction — GAP-15; whether the report must be fatal is OQ-6.)*
 
 **WP-25 — Query union.** [MUST] Composed outputs merge into one portal query: for each
 overlapping range sub-interval, the union of all outputs' filters; field selections
@@ -158,8 +158,8 @@ finalized-only route does not emit forks (DEF-15).
 
 **WP-41 — Empty canonical chain.** [MUST] A fork signal with an empty canonical chain
 is a portal-contract violation: fail with the coded error (E1xxx band), never guess.
-*(Currently an uncoded crash inside exception construction can preempt the coded path —
-GAP-8.)*
+*(Currently an empty or absent chain surfaces as a raw HTTP 409 error, so the coded path
+is unreachable — GAP-8.)*
 
 **WP-42 — Ancestor search.** [MUST] The search walks the persisted rollback records
 newest → oldest, each record's chain descending, keeping a canonical **window** that

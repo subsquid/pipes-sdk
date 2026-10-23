@@ -1,12 +1,12 @@
 # 06 — Consistency & durability (CN-n)
 
 Bands: 10–19 commit protocols (durability classes), 20–29 visibility & isolation,
-30–34 fork mechanics per class, 40–49 recovery.
+30–39 fork mechanics per class, 40–49 recovery.
 
 ## Durability classes (ADR-5)
 
 Every sink declares exactly one class. The class fixes the commit protocol, the crash
-window, and the recovery obligation. Concrete engine bindings: IB-20…IB-26.
+window, and the recovery obligation. Concrete engine bindings: IB-20…IB-28.
 
 **CN-10 — Class T (transactional).** Data rows, cursor, floor, and rollback chain
 commit in **one storage transaction** per batch, at an isolation level preventing lost
@@ -171,7 +171,7 @@ implementation probes table-wide and so refuses a legitimate first run into a po
 shared table — GAP-20; exclusivity model ADR-16/OQ-8.)*
 
 **CN-45 — Cross-implementation recovery.** [MUST] Recovery reads state via the formats
-of IB-20…IB-26 only; any conforming implementation recovers state written by any other
+of IB-20…IB-28 only; any conforming implementation recovers state written by any other
 (G1). Clock independence: no recovery or ordering decision may depend on wall-clock
 comparability across writers *(two bindings order cursor rows by wall-clock timestamp —
 GAP-10)*.

@@ -126,7 +126,7 @@ An implementation in any language is conforming iff it passes the CT suite and c
 resume from persistent state (cursor rows, state files, cache) written by the reference
 implementation, and vice versa.
 *Acceptance:* CT-5 round-trip: state written by A, resumed by B, for every persistent
-format in IB-20…IB-26.
+format in IB-20…IB-28.
 *Trace:* G1; ADR-13.
 
 ## Explicitly unspecified
@@ -148,7 +148,7 @@ Deliberately left open — conformance tests MUST NOT pin these:
 
 | # | Question | Owner |
 |---|---|---|
-| OQ-2 | Defined behavior for a fork reaching below the finalized floor (currently a coded fatal; is halt the intent?) — GAP-6. | SDK team |
+| OQ-2 | Defined behavior for a fork reaching below the finalized floor (the reference resolver halts only when no ancestor exists, and can resolve below the floor; is halt the intent?) — GAP-6. | SDK team |
 | OQ-4 | SLO targets for SLI-1…SLI-7 are unratified (⚠ in 15-parameters). | SDK team |
 | OQ-5 | Cache growth policy: unbounded append-only accepted, or add eviction/versioning? (HZ-6). | SDK team |
 | OQ-6 | Must a duplicate output signature be a fatal startup error, or stay a logged report? (WP-24, GAP-15). | SDK team |

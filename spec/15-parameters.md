@@ -1,6 +1,6 @@
 # 15 — Parameter registry — MUTABLE
 
-Last updated: 2026-07-19. Observed = current reference-implementation value.
+Last updated: 2026-10-23. Observed = current reference-implementation value.
 Target = ratified contract value; ⚠ = proposed, pending ADR-14.
 
 ## Stream assembly & transport
@@ -14,7 +14,7 @@ Target = ratified contract value; ⚠ = proposed, pending ADR-14.
 | P-HTTP-TIMEOUT-MS | whole-request timeout (WP-14, LIV §0) | 20000 ms | same |
 | P-BODY-TIMEOUT-MS | inter-chunk stall timeout (IB-51) | unset (∞) | ⚠ propose finite |
 | P-RETRY-SCHEDULE-MS | backoff schedule (WP-14, IB-7) | 10, 100, 500, 2000, 10000, 20000 | same |
-| P-RETRY-STATUS-SET | retryable statuses (WP-14, IB-7) | 429, 502, 503, 504, 521–524 | ⚠ + 529 (in-flight fix) |
+| P-RETRY-STATUS-SET | retryable statuses (WP-14, IB-7) | 429, 502, 503, 504, 521–524, 529 | ⚠ same (ratify under ADR-14) |
 | P-STREAM-RETRY-LIMIT | streaming retry cap (WP-14, LIV-7; ADR-10) | unbounded (non-streaming default: 0) | same |
 
 ## Sink bindings

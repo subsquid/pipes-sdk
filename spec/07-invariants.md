@@ -74,7 +74,7 @@ maintenance transition. Published immutable units are never rewritten.
 **INV-14 — Fork reach.** [transition]
 T-FORK deletes exactly the data attributed to `(ancestor, C]` — nothing below the
 ancestor, nothing outside the pipe's tracked tables, and the ancestor is hash-verified
-canonical (or the WP-42 deep-fork current-cursor case).
+canonical (or the WP-42 deep-fork restart cursor).
 *Why:* over-deletion loses committed history; under-deletion leaves orphan rows that
 corrupt the canonical view.
 *Check:* CT-3 oracle diff of pre/post-fork data at every depth.
@@ -100,7 +100,7 @@ Per run: start hooks fire exactly once before the first batch; stop hooks exactl
 on every exit path; a partially-failed start still triggers stop for the started
 subset.
 *Why:* double-stop breaks author resources (connections); missed stop leaks them.
-*Check:* CT-1 hook ledger across normal/error/cancel exits (regression: past defect A2).
+*Check:* CT-1 hook ledger across normal/error/cancel exits.
 
 ## Read/response
 

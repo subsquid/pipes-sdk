@@ -27,7 +27,7 @@ chain reorganizations without human intervention.
 ## Design goals
 
 - **G1 — Interchangeable implementations.** Any conforming implementation can resume
-  from persistent state written by any other. → REQ-23, IB-20…IB-26, CN-45.
+  from persistent state written by any other. → REQ-23, IB-20…IB-28, CN-45.
 - **G2 — Effective exactly-once delivery.** After any crash/restart sequence, sink
   output contains each block's data exactly once. → REQ-3, REQ-6, CN-10…CN-24, INV-40…INV-44.
 - **G3 — Automatic fork correctness.** On fork-capable streams, chain reorganizations

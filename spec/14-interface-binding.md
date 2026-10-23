@@ -43,7 +43,7 @@ runtimes supporting it, Node ≥ 24.4).
 `X-Sqd-Finalized-Head-Number` + `X-Sqd-Finalized-Head-Hash` (→ `head.finalized`) and
 `X-Sqd-Head-Number` (→ `head.latest`, number only).
 
-**IB-7 — Retry surface.** Retryable statuses: 429, 502, 503, 504, 521–524, plus any
+**IB-7 — Retry surface.** Retryable statuses: 429, 502, 503, 504, 521–524, 529, plus any
 response bearing `Retry-After` (seconds or HTTP-date; server pacing wins over the
 local schedule P-RETRY-SCHEDULE-MS).
 
@@ -81,7 +81,8 @@ mode. Decision: ADR-22.
 
 Cross-implementation contract: any conforming implementation MUST read and write these
 formats (CN-45). JSON cursor encoding everywhere: `{"number": ℕ, "hash": string?,
-"timestamp": ℕ (epoch seconds)?}`.
+"timestamp": ℕ?}`, the timestamp being the portal header value verbatim, in a
+network-dependent unit (DEF-1; GAP-24).
 
 **IB-20 — ClickHouse binding (class A).** Sync table (default `<db>.sync`):
 `id String, current String (cursor JSON), finalized String (cursor JSON | '' when
@@ -192,6 +193,8 @@ than it publishes. Topic administration is validate-only by default. Codes E24xx
 **IB-24 — Lock declarations.** Postgres: per-batch advisory transaction lock on the
 cursor key — dual instance fails coded. ClickHouse, BigQuery, Parquet: **no lock**
 (convention/guards only; NG2 applies) *(BigQuery single-writer assumption: GAP-12)*.
+Pub/Sub: an exclusive lock on the local state file for the process lifetime — a second
+producer fails coded (E2410).
 
 **IB-25 — Cache store.** SQLite table `data(query_hash TEXT, block_from INTEGER,
 block_to INTEGER, value BLOB, PRIMARY KEY(block_from, block_to, query_hash))`; `value`
@@ -224,11 +227,13 @@ pipes in fact share is an operator error the spec does not detect.
 Binding-specific, with the entry carrying each one's detail:
 
 - **ClickHouse** — IB-20, IB-24 · ADR-7 (sign-netting rollback), ADR-15 (class-A repair
-  hook, proposed)
+  hook)
 - **Postgres** — IB-21, IB-24 · none binding-specific
-- **Parquet** — IB-22 · ADR-6 (coverage-window naming)
+- **Parquet** — IB-22 · ADR-6 (coverage-window naming), ADR-18 (pluggable engine seam),
+  ADR-19 (duckdb engine), ADR-22 (finalized-only source selection)
 - **BigQuery** — IB-23 · none binding-specific
-- **Pub/Sub** — IB-28 · ADR-21 (compensating append-only class)
+- **Pub/Sub** — IB-28 · ADR-21 (compensating append-only class), ADR-23 (one payload
+  shape, finality on metadata)
 
 Source- and decoder-side decisions (ADR-1, ADR-3, ADR-9…ADR-12) are out of scope here —
 they bind the ingestion path, not a sink.
@@ -252,8 +257,8 @@ surface; the −1 sentinel exists only on /metrics, IB-46).
 `sqd_portal_requests_total` (+ labels `classification` ∈ success|rate_limited|error,
 `status`), `sqd_batch_size_blocks` (histogram), `sqd_batch_size_bytes` (histogram).
 Per-sink metric sets (`sqd_parquet_*` with a `table` label, `sqd_bigquery_*` with a
-`kind` label) and the runtime's default process metrics MAY additionally be present;
-consumers MUST tolerate them.
+`kind` label, `sqd_pubsub_*`) and the runtime's default process metrics MAY
+additionally be present; consumers MUST tolerate them.
 
 **IB-43 — `GET /profiler?id=&from=`.** `{payload: {enabled, profiles: [{name,
 totalTime, startOffset, children[]}…]}}` — per-batch span trees; retention
@@ -283,10 +288,10 @@ consumers MUST NOT read it as a block number.
 | E0xxx | pipe configuration | E0001 blank/default pipe id *(currently dead — GAP-4)*, E0002 invalid range/date, E0003 unusable instruction discriminator set (mixed widths across the decoder, shared discriminator, or an instruction with none or several) |
 | E1xxx | fork handling | E1001 sink lacks fork support, E1002 empty canonical chain, E1003 ancestor unresolvable, E1004 portal contract violation (canonical below cursor), E1005 fork reported on the finalized-only route |
 | E20xx | ClickHouse binding | E2001–E2007 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler) |
-| E21xx | Postgres binding | E2101–E2106 (client, config, advisory lock, untracked table, missing PK, FK cycle) |
+| E21xx | Postgres binding | E2101–E2107 (client, config, advisory lock, untracked table, missing PK, FK cycle, unresolved column name) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
 | E23xx | Parquet binding | E2301–E2317 and E2320 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused). E2318–E2319 retired, unassigned |
-| E24xx | Pub/Sub binding | E2401–E2424, with E2420 retired (topic/attribute/request guards E2401–E2404, checked pre-commit and again after recovery encoding; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, state identity/wire binding E2419/E2421, and sequence exhaustion E2424; row-identity guards E2412–E2413, E2418, E2422; route configuration E2414–E2416, E2423) |
+| E24xx | Pub/Sub binding | E2401–E2429, with E2427 unassigned (topic/attribute/request guards E2401–E2404, checked pre-commit and again after recovery encoding; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, state write failure E2426, state identity/wire binding E2419/E2421, cold-start refusal E2420, and sequence exhaustion E2424; row-identity guards E2412–E2413, E2418, E2422; route configuration E2414–E2416, E2423, E2425; sequence barrier E2428 one topic per producer, E2429 forward block order) |
 
 **IB-51 — Transport errors.** Non-coded, typed: HTTP error (with response), request
 timeout, body-stall timeout. Retryability: request timeouts and connection-class errors
@@ -295,7 +300,8 @@ are retryable in addition to IB-7's statuses; the body-stall timeout is currentl
 authors.
 
 **IB-52 — Registry sync.** The set of codes an implementation can emit MUST equal this
-registry; CI SHOULD enforce it *(no such check exists — GAP-13)*.
+registry; CI SHOULD enforce it *(the reference check syncs source with `docs/errors.md`,
+not with this table — GAP-13)*.
 
 ## Input-side binding (simulator obligations)
 
@@ -306,7 +312,7 @@ pacing; scripted fork signals with canonical chains; scripted head regressions.
 Responses MUST be derived from the request anchor (IB-3) against a held chain, never
 selected by request ordinal — a restarted SUT re-requests from its recovered cursor,
 which an ordinal script cannot answer, making CT-2 unimplementable against it.
-Sink-store probes MUST read state via IB-20…IB-25 formats directly.
+Sink-store probes MUST read state via IB-20…IB-28 formats directly.
 
 ## Versioning
 
