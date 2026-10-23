@@ -83,6 +83,8 @@ async function main() {
     pubsubTarget({
       pubsub: new PubSub({ projectId: PROJECT }),
       // Cursor + rollback manifest + outbox + sequence counters, one transaction per batch.
+      // SQLite by default; swap for `{ kind: 'postgres', connection: DATABASE_URL }` for a
+      // stateless deploy — same contract, same error codes.
       state: { path: STATE },
       // The id space consumers see. Pinned explicitly so renaming the pipe does not silently
       // start a new one (the default is the pipe id).

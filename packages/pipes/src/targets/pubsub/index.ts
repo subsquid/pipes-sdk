@@ -19,10 +19,15 @@ export {
   type CommitInput,
   type OutboxRow,
   type PendingOperation,
+  type PostgresConnection,
+  PostgresPubsubState,
+  type PostgresPubsubStateOptions,
   type PubsubState,
+  type PubsubStateConfig,
   type RouteMode,
   type RowIdSource,
   SqlitePubsubState,
+  type SqlitePubsubStateOptions,
 } from './pubsub-state.js'
 export {
   type MessageDraft,
