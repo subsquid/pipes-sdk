@@ -77,8 +77,11 @@ export type MockPortal = {
 /** A block of the mock chain: a header plus the item lists of its network (`logs`, `instructions`, …). */
 export type MockPortalBlock = ChainBlock
 
-/** A stream request the mock portal received, with the status it answered. */
+/** A stream request the mock portal received, with what it answered and the head it reported. */
 export type MockPortalRequest = ChainRequest
+
+/** What the mock portal answered a stream request: blocks, at-head, a fork, a refusal or a fault. */
+export type MockPortalAnswer = ChainAnswer
 
 /** A transport failure the mock portal serves instead of the next answers. */
 export type MockPortalFault = ChainFault
@@ -193,7 +196,8 @@ async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal>
 
       const request = chain.receive(endpoint, query)
       await options.delay?.({ endpoint, query })
-      writeAnswer(res, chain.answer(request), chain.head())
+      const answer = chain.answer(request)
+      writeAnswer(res, answer, request.head as WireHead)
 
       return
     }

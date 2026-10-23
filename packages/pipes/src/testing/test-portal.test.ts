@@ -8,7 +8,13 @@ import { PortalClient } from '~/portal-client/client.js'
 
 import { mockBlock } from './evm/mock-block.js'
 import { blockDecoder } from './test-block-stream.js'
-import { type MockChainPortal, type MockPortal, finalizedMockPortal, mockPortal } from './test-portal.js'
+import {
+  type MockChainPortal,
+  type MockPortal,
+  type MockPortalOptions,
+  finalizedMockPortal,
+  mockPortal,
+} from './test-portal.js'
 
 const A = '0x00000000000000000000000000000000000000aa'
 const B = '0x00000000000000000000000000000000000000bb'
@@ -373,6 +379,39 @@ describe('mockPortal over a chain', () => {
     ])
     expect(before?.number).toBe(10)
     expect(state?.latest.number).toBe(12)
+  })
+})
+
+const withPortal = it.extend<{ portal: (options: MockPortalOptions) => Promise<MockChainPortal> }>({
+  portal: async ({}, use) => {
+    const opened: MockChainPortal[] = []
+    await use(async (options) => {
+      const portal = await mockPortal(options)
+      opened.push(portal)
+
+      return portal
+    })
+    await Promise.all(opened.map((portal) => portal.close()))
+  },
+})
+
+describe('mockPortal request log', () => {
+  withPortal('records on each request what it answered and the head it reported', async ({ portal: open }) => {
+    const portal = await open({ latest: 10, finalized: 5 })
+    const before = await streamAll(portal, { fromBlock: 9, toBlock: 10, includeAllBlocks: true })
+    const parentBlockHash = before.at(-1).header.hash
+
+    portal.fork(7)
+    portal.setHead({ finalized: 6 })
+    await post(portal, 'stream', { fromBlock: 11, parentBlockHash })
+
+    const [served, forked] = portal.requests
+    const blocks = served.answer?.kind === 'blocks' ? served.answer.blocks.map((block) => block.header.number) : []
+
+    expect(blocks).toEqual([9, 10])
+    expect(served.head?.finalized?.number).toBe(5)
+    expect(forked.answer?.kind).toBe('fork')
+    expect(forked.head?.finalized?.number).toBe(6)
   })
 })
 

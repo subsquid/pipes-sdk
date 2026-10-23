@@ -24,6 +24,9 @@ export type ChainRequest = {
   query: StreamQuery
   /** `undefined` while `delay` holds the request. */
   status?: number
+  /** What the portal answered, and the head it reported with it; `undefined` while `delay` holds the request. */
+  answer?: ChainAnswer
+  head?: WireHead
 }
 
 export type ChainFault = {
@@ -196,10 +199,12 @@ export class PortalChain {
     return request
   }
 
-  /** Answers from the chain as it is at this moment, and records the status on the request. */
+  /** Answers from the chain as it is at this moment, and records the answer and the head on the request. */
   answer(request: ChainRequest): ChainAnswer {
     const answer = this.#answer(request.endpoint, request.query)
     request.status = statusOf(answer)
+    request.answer = answer
+    request.head = this.head()
 
     return answer
   }
