@@ -140,7 +140,8 @@ rebuild *(GAP-6)*.
 persisted state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process
 crashes immediately after (fork completion is itself a commit point). *(The
 append-lagged binding persists nothing at fork completion — a crash before the next
-commit resumes pre-fork; GAP-21.)*
+commit resumes pre-fork; GAP-21. The transactional binding persists the ancestor's own
+commit, whose floor and chain predate the fork — GAP-43.)*
 
 ## Recovery contract
 
