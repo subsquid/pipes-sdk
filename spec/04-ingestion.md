@@ -198,6 +198,8 @@ class-specific retention (P-CH-CURSOR-RETENTION, P-PG-UNFINALIZED-RETENTION,
 P-BQ-CURSOR-RETENTION, and the class-C rollback manifest down to `F`). A fork deeper
 than retention (but above `F`) resolves via the deep-fork restart of WP-42. Classes K/∅
 use finalized-only delivery and therefore do not retain fork history for rollback.
+*(Currently a full stream on a dataset without finality retains nothing either, so its
+first fork halts as unresolvable; GAP-42.)*
 
 ## Commit & acknowledgement
 
