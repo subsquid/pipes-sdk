@@ -1,7 +1,5 @@
 import { IncomingMessage, Server, ServerResponse, createServer } from 'http'
 
-import { Portal } from '~/core/query-builder.js'
-
 import {
   type ChainAnswer,
   type ChainBlock,
@@ -119,6 +117,10 @@ export type MockChainPortal = MockPortal & {
   fail(fault: MockPortalFault): void
 }
 
+/**
+ * @deprecated Use `mockPortal({ blocks, ... })`: it answers both `/stream` and `/finalized-stream`.
+ * For an exact response list, use `mockPortal(responses, { finalized: true })`.
+ */
 export async function finalizedMockPortal(mockResponses: MockResponse[]) {
   return mockPortal(mockResponses, {
     finalized: true,
@@ -349,15 +351,4 @@ export async function readAll<T>(stream: AsyncIterable<{ data: T[] }>): Promise<
   }
 
   return res
-}
-
-/**
- * @internal
- */
-export function mockPortalRestApi(overrides: Partial<Portal> = {}): Portal {
-  return {
-    getHead: async () => ({ number: 1, hash: '0x' }),
-    resolveTimestamp: async () => 0,
-    ...overrides,
-  }
 }

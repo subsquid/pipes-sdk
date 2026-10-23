@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { mockPortalRestApi } from '~/testing/index.js'
+import { stubPortal } from '~/testing/stub-portal.js'
 
 import { HyperliquidFillsQueryBuilder } from './hyperliquid-fills-query-builder.js'
 
@@ -11,7 +11,7 @@ describe('HyperliquidFillsQueryBuilder', () => {
       builder.addRange({ from: 'latest' })
 
       const { bounded } = await builder.calculateRanges({
-        portal: mockPortalRestApi({
+        portal: stubPortal({
           getHead: async () => ({ number: 15, hash: '0x' }),
         }),
       })
@@ -33,7 +33,7 @@ describe('HyperliquidFillsQueryBuilder', () => {
       builder.addRange({ from: 'latest' })
 
       const { bounded } = await builder.calculateRanges({
-        portal: mockPortalRestApi({
+        portal: stubPortal({
           getHead: async () => ({ number: 15, hash: '0x' }),
         }),
         bound: { from: 10 },

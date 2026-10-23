@@ -486,8 +486,8 @@ A new public entry point with helpers for writing unit and integration tests aga
 ```ts
 import { mockPortal, testLogger, mockMetricsServer, readAll } from '@subsquid/pipes/testing'
 
-// Spin up a mock portal HTTP server with canned responses
-const portal = await mockPortal(mockResponses)
+// Spin up a local portal that answers every query from the blocks it holds
+const portal = await mockPortal({ blocks, finalized: 5, latest: 10 })
 
 // Use portal.url with any portal stream in your test
 const stream = evmPortalStream({
@@ -508,18 +508,19 @@ await portal.close()
 
 | Utility | Description |
 |---|---|
-| `mockPortal(responses, options?)` | Starts a local HTTP server that serves canned portal responses. Returns a `MockPortal` with `.url` and `.close()` |
-| `finalizedMockPortal(responses)` | Same as above but marks all blocks as finalized |
+| `mockPortal(options)` | Starts a local portal over a chain it holds. It filters items by the query, reports heads, answers 204 at the head and 409 after a fork. Returns a `MockChainPortal` with `.url`, `.close()`, `.requests` and the controls `.append()`, `.fork()`, `.setHead()`, `.fail()` |
+| `mockPortal(responses, options?)` | Starts a local portal that answers stream requests with an exact list of responses, in order. Pass `{ finalized: true }` to serve them on the finalized stream |
 | `testLogger()` | Creates a pino logger configured for test output |
 | `mockMetricsServer()` | Creates mock counter, gauge, and histogram metrics |
 | `readAll(stream)` | Drains a stream and returns its concatenated `data` |
 
 ### 4. EVM testing utilities — `@subsquid/pipes/testing/evm`
 
-A new public entry point with helpers for writing tests against EVM portal streams. Encode events with full type inference from viem ABIs, build mock blocks with auto-generated metadata, and spin up a mock portal server — all in a few lines.
+A new public entry point with helpers for writing tests against EVM portal streams. Encode events with full type inference from viem ABIs and build mock blocks with auto-generated metadata, then serve them with `mockPortal` — all in a few lines.
 
 ```ts
-import { encodeEvent, mockBlock, mockEvmPortalStream } from '@subsquid/pipes/testing/evm'
+import { mockPortal } from '@subsquid/pipes/testing'
+import { encodeEvent, mockBlock } from '@subsquid/pipes/testing/evm'
 
 const transfer = encodeEvent({
   abi: erc20Abi,
@@ -528,7 +529,7 @@ const transfer = encodeEvent({
   args: { from: '0x...', to: '0x...', value: 100n }, // fully typed from ABI
 })
 
-const portal = await mockEvmPortalStream({
+const portal = await mockPortal({
   blocks: [
     mockBlock({ transactions: [{ logs: [transfer] }] }),
     mockBlock({ transactions: [{ logs: [transfer] }] }),

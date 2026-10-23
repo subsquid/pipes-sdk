@@ -6,7 +6,7 @@ import { ParquetReader, ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { evmPortalStream } from '~/evm/index.js'
-import { type MockPortal, type MockResponse, blockDecoder, finalizedMockPortal } from '~/testing/index.js'
+import { type MockPortal, type MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
 
 import type { ParquetEngine } from './engine.js'
 import { parquetTarget } from './parquet-target.js'
@@ -128,7 +128,7 @@ describe('parquetTarget with a custom engine', () => {
   })
 
   it('drives a from-scratch engine through append, publish and cursor persistence', async () => {
-    portal = await finalizedMockPortal([blocksResponse([1, 2, 3], 3)])
+    portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
     const calls: string[] = []
 
     await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
@@ -174,7 +174,7 @@ describe('parquetTarget with a custom engine', () => {
   })
 
   it('refuses an engine output that merely wraps non-Parquet bytes in the magic', async () => {
-    portal = await finalizedMockPortal([blocksResponse([1, 2, 3], 3)])
+    portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
     await expect(
       evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(

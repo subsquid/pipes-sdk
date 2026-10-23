@@ -3,7 +3,7 @@ import * as p from '@subsquid/evm-codec'
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
 import { PortalRange, QueryAwareTransformer } from '~/core/index.js'
-import { encodeEvent, mockBlock, mockEvmPortalStream, resetMockBlockCounter } from '~/testing/evm/index.js'
+import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
 import { MockPortal, MockResponse, mockMetricsServer, mockPortal, readAll, testLogger } from '~/testing/index.js'
 
 import { commonAbis } from './abi/common.js'
@@ -1456,7 +1456,7 @@ describe('evmEventDecoder factory decode errors', () => {
     // A decodable PoolCreated (registers the child pool) followed by one that keeps the
     // PoolCreated topics — so `isFactoryEvent` routes it — but carries empty data, so the
     // factory `decode` throws. A sibling Swap from the registered pool must still survive.
-    portal = await mockEvmPortalStream({
+    portal = await mockPortal({
       blocks: [
         mockBlock({
           number: 1,

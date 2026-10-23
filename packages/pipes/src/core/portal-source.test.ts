@@ -6,8 +6,8 @@ import { SpanHooks } from '~/core/profiling.js'
 import { Target, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
-import { PortalBlockStreamOptions, PortalClient, PortalRequestOptions, Query } from '~/portal-client/index.js'
-import { MockPortal, blockDecoder, finalizedMockPortal, mockPortal, readAll } from '~/testing/index.js'
+import { PortalBlockStreamOptions, PortalClient, Query } from '~/portal-client/index.js'
+import { MockPortal, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
 
 /**
  * Tallies span starts and ends per name. A single global total hides the interesting cases — a
@@ -454,15 +454,18 @@ describe('Portal abstract stream', () => {
 
   describe('finalized', () => {
     it('should receive all finalized data and stop', async () => {
-      portal = await finalizedMockPortal([
-        {
-          statusCode: 200,
-          data: [
-            { header: { number: 1, hash: '0x123', timestamp: 1000 } },
-            { header: { number: 2, hash: '0x456', timestamp: 2000 } },
-          ],
-        },
-      ])
+      portal = await mockPortal(
+        [
+          {
+            statusCode: 200,
+            data: [
+              { header: { number: 1, hash: '0x123', timestamp: 1000 } },
+              { header: { number: 2, hash: '0x456', timestamp: 2000 } },
+            ],
+          },
+        ],
+        { finalized: true },
+      )
 
       const stream = evmPortalStream({
         id: 'test',
@@ -826,7 +829,7 @@ describe('finalized-only targets', () => {
   it('switches a hot pipe to the finalized stream, and warns that it did', async () => {
     // The mock serves /finalized-stream ONLY, so a hot request would 404 — reaching the end of the
     // stream is itself the proof that the endpoint was switched.
-    portal = await finalizedMockPortal([response])
+    portal = await mockPortal([response], { finalized: true })
     const logger = defaultLogger({ level: 'silent' })
     const warn = vi.spyOn(logger, 'warn')
     const seen: { finalized?: boolean } = {}
@@ -844,12 +847,15 @@ describe('finalized-only targets', () => {
   })
 
   it('refuses a fork on the finalized stream before invoking target rollback', async () => {
-    portal = await finalizedMockPortal([
-      {
-        statusCode: 409,
-        data: { previousBlocks: [{ number: 0, hash: '0x0' }] },
-      },
-    ])
+    portal = await mockPortal(
+      [
+        {
+          statusCode: 409,
+          data: { previousBlocks: [{ number: 0, hash: '0x0' }] },
+        },
+      ],
+      { finalized: true },
+    )
     const resolveFork = vi.fn(async () => ({ number: 0, hash: '0x0' }))
 
     const run = evmPortalStream({
@@ -874,74 +880,47 @@ describe('finalized-only targets', () => {
   })
 
   it("resolves 'latest' against the finalized head after switching the stream", async () => {
-    portal = await finalizedMockPortal([
-      {
-        ...response,
-        validateRequest: (query) => expect(query.fromBlock).toBe(1),
-      },
-    ])
-    let requestedFinalizedHead: boolean | undefined
-
-    class RecordingPortalClient extends PortalClient {
-      override async getHead(options?: PortalRequestOptions & { finalized: boolean }) {
-        requestedFinalizedHead = options?.finalized
-
-        // A hot-head lookup would make the configured range invalid (`from: 10, to: 1`).
-        return options?.finalized ? { number: 1, hash: '0x1' } : { number: 10, hash: '0x10' }
-      }
-    }
-
-    const client = new RecordingPortalClient({ url: portal.url, finalized: false })
+    // A hot-head lookup would make the configured range invalid (`from: 10, to: 1`).
+    const chain = await mockPortal({ finalized: 1, latest: 10 })
+    portal = chain
 
     await evmPortalStream({
       id: 'test',
-      portal: client,
+      portal: { url: chain.url, finalized: false },
       logger: 'silent',
       outputs: blockDecoder({ from: 'latest', to: 1 }),
     }).pipeTo(recordingTarget(true, {}) as any)
 
-    expect(requestedFinalizedHead).toBe(true)
+    const requested = chain.requests.map((r) => ({ endpoint: r.endpoint, fromBlock: r.query.fromBlock }))
+    expect(requested).toEqual([{ endpoint: 'finalized-stream', fromBlock: 1 }])
   })
 
   it("falls back to the hot head for 'latest' on a dataset that finalizes nothing", async () => {
     // Such a dataset still streams (its output just isn't reorg-safe). Taking the absent finalized
     // head at face value would resolve 'latest' to 0 and silently backfill the whole chain.
-    portal = await finalizedMockPortal([
-      {
-        ...response,
-        validateRequest: (query) => expect(query.fromBlock).toBe(1),
-      },
-    ])
-
-    class NoFinalityPortalClient extends PortalClient {
-      override async getHead(options?: PortalRequestOptions & { finalized: boolean }) {
-        return options?.finalized ? undefined : { number: 1, hash: '0x1' }
-      }
-    }
+    const chain = await mockPortal({ finalized: null, latest: 1 })
+    portal = chain
 
     await evmPortalStream({
       id: 'test',
-      portal: new NoFinalityPortalClient({ url: portal.url, finalized: false }),
+      portal: { url: chain.url, finalized: false },
       logger: 'silent',
       outputs: blockDecoder({ from: 'latest', to: 1 }),
     }).pipeTo(recordingTarget(true, {}) as any)
+
+    const requested = chain.requests.map((r) => ({ endpoint: r.endpoint, fromBlock: r.query.fromBlock }))
+    expect(requested).toEqual([{ endpoint: 'finalized-stream', fromBlock: 1 }])
   })
 
   it('gives a transformer the hot head when it explicitly asks for one', async () => {
     // `start` hooks get the finalized view, which pins the STREAM. A transformer measuring head lag
     // still has to see the block the chain is actually on.
-    portal = await finalizedMockPortal([response])
+    portal = await mockPortal({ finalized: 1, latest: 99 })
     let seenHead: { number: number } | undefined
-
-    class TwoHeadPortalClient extends PortalClient {
-      override async getHead(options?: PortalRequestOptions & { finalized: boolean }) {
-        return options?.finalized ? { number: 1, hash: '0x1' } : { number: 99, hash: '0x99' }
-      }
-    }
 
     await evmPortalStream({
       id: 'test',
-      portal: new TwoHeadPortalClient({ url: portal.url, finalized: false }),
+      portal: { url: portal.url, finalized: false },
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     })
@@ -962,7 +941,7 @@ describe('finalized-only targets', () => {
   it('does not pin later consumers of the same source to the finalized stream', async () => {
     // One source, two sinks. The endpoint switch belongs to the pipe that asked for it — leaking it
     // onto the next `pipeTo` would silently cost that sink every unfinalized block.
-    portal = await finalizedMockPortal([])
+    portal = await mockPortal([], { finalized: true })
     const requestedFinalized: (boolean | undefined)[] = []
 
     class RecordingPortalClient extends PortalClient {
@@ -995,7 +974,7 @@ describe('finalized-only targets', () => {
     // The cache intentionally behaves like an implementation compiled against the old contract:
     // it ignores `finalized` and relies entirely on the client defaults. The mock serves only
     // /finalized-stream, so this completes only if the client handed to the cache is finalized.
-    portal = await finalizedMockPortal([response])
+    portal = await mockPortal([response], { finalized: true })
     let cacheSawFinalizedClient: boolean | undefined
     const cache: PortalCache = {
       getStream({ portal: cachedPortal, query }) {
@@ -1016,7 +995,7 @@ describe('finalized-only targets', () => {
   })
 
   it('stays quiet when the pipe already asked for the finalized stream', async () => {
-    portal = await finalizedMockPortal([response])
+    portal = await mockPortal([response], { finalized: true })
     const logger = defaultLogger({ level: 'silent' })
     const warn = vi.spyOn(logger, 'warn')
     const seen: { finalized?: boolean } = {}

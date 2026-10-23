@@ -11,9 +11,25 @@
 
 - Tests live next to source files: `feature.ts` → `feature.test.ts`
 - Always use the internal testing framework from `~/testing/` — do NOT create ad-hoc HTTP mocks
-- EVM test helpers: `mockBlock`, `encodeEvent`, `mockEvmPortalStream`, `resetMockBlockCounter` from `~/testing/evm/`
+- EVM test helpers: `mockBlock`, `encodeEvent`, `resetMockBlockCounter` from `~/testing/evm/`
 - General helpers: `mockPortal`, `readAll`, `testLogger` from `~/testing/`
-- Clean up mock portals in `afterEach`, not `try/finally`
+- Mock a portal with `mockPortal({ blocks, latest, finalized, ... })`: it answers queries from the chain it holds. Use the list form `mockPortal(responses, { finalized? })` only for an exact response sequence. Do not use the deprecated `mockEvmPortalStream` or `finalizedMockPortal`
+- Stub the `Portal` interface (head + timestamp lookup) with `stubPortal` from `~/testing/stub-portal.js`
+- Create mock portals through a vitest `test.extend` fixture that closes them after the test, not in a `let` with `afterEach` or `try/finally`. Write new tests this way, and move an existing test over when you change it:
+  ```ts
+  const it = base.extend<{ portal: (options: MockPortalOptions) => Promise<MockChainPortal> }>({
+    portal: async ({}, use) => {
+      const opened: MockChainPortal[] = []
+      await use(async (options) => {
+        const portal = await mockPortal(options)
+        opened.push(portal)
+
+        return portal
+      })
+      await Promise.all(opened.map((portal) => portal.close()))
+    },
+  })
+  ```
 - Run tests: `pnpm vitest run src/path/to/file.test.ts` (from `packages/pipes/`)
 - Some tests require external services (ClickHouse, PostgreSQL) — exclude with `--exclude` flags when running locally
 

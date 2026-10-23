@@ -6,6 +6,9 @@ export { type MockPortal } from '../test-portal.js'
 /**
  * Creates a mock portal HTTP server that serves the given blocks as a stream response.
  *
+ * @deprecated Use `mockPortal({ blocks })` from `@subsquid/pipes/testing`. This helper sends every
+ * block in one response whatever the query asks for, so a test can pass on blocks outside its range.
+ *
  * @example
  * ```ts
  * const event1 = encodeEvent({ abi, eventName: 'Transfer', address, args: { ... } })

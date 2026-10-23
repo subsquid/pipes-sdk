@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { mockPortalRestApi } from '~/testing/index.js'
+import { stubPortal } from '~/testing/stub-portal.js'
 
 import { TronQueryBuilder } from './tron-query-builder.js'
 
@@ -11,7 +11,7 @@ describe('TronQueryBuilder', () => {
       builder.addRange({ from: 'latest' })
 
       const { bounded } = await builder.calculateRanges({
-        portal: mockPortalRestApi({
+        portal: stubPortal({
           getHead: async () => ({ number: 84_000_000, hash: '0x' }),
         }),
       })

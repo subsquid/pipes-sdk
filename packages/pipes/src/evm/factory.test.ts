@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vites
 
 import { createTarget } from '~/core/target.js'
 import { createMemoryTarget } from '~/targets/memory/memory-target.js'
-import { encodeEvent, mockBlock, mockEvmPortalStream, resetMockBlockCounter } from '~/testing/evm/index.js'
+import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
 import { MockPortal, mockPortal, readAll } from '~/testing/index.js'
 
 import { FactoryEvent, evmEventDecoder } from './evm-decoder.js'
@@ -106,7 +106,7 @@ function encodeSwap(address: `0x${string}`) {
 
 /** Block 1: PoolCreated for WETH/USDC pool. Block 2: swap from unknown pool (skipped) + swap from known pool (decoded). */
 async function createSimpleChildPortal() {
-  return mockEvmPortalStream({
+  return mockPortal({
     blocks: [
       mockBlock({
         number: 1,
@@ -122,7 +122,7 @@ async function createSimpleChildPortal() {
 
 /** Block 1: two PoolCreated (WETH + USDT). Block 2: swap from WETH pool. Block 3: swap from USDT pool. */
 async function createFilteredFactoryPortal() {
-  return mockEvmPortalStream({
+  return mockPortal({
     blocks: [
       mockBlock({
         number: 1,
@@ -474,7 +474,7 @@ describe('Factory', () => {
         id: 'test',
         portal: portal.url,
         outputs: evmEventDecoder({
-          range: { from: 1, to: 2 },
+          range: { from: 1, to: 3 },
           contracts: contractFactory({
             address: UNISWAP_FACTORY,
             event: {

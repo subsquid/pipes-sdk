@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { mockPortalRestApi } from '~/testing/index.js'
+import { stubPortal } from '~/testing/stub-portal.js'
 
 import { BitcoinQueryBuilder } from './bitcoin-query-builder.js'
 
@@ -11,7 +11,7 @@ describe('BitcoinQueryBuilder', () => {
       builder.addRange({ from: 'latest' })
 
       const { bounded } = await builder.calculateRanges({
-        portal: mockPortalRestApi({
+        portal: stubPortal({
           getHead: async () => ({ number: 800_000, hash: '0x' }),
         }),
       })

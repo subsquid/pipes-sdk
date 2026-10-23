@@ -4,7 +4,7 @@ import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
 import { evmPortalStream } from '~/evm/evm-portal-source.js'
 import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
-import { MockPortal, finalizedMockPortal } from '~/testing/index.js'
+import { MockPortal, mockPortal } from '~/testing/index.js'
 
 import { createMemoryTarget } from './memory-target.js'
 
@@ -66,18 +66,7 @@ describe('createMemoryTarget', () => {
   it('emits every row in arrival order across batches', async () => {
     const [b1, b2, b3, b4, b5] = [1, 2, 3, 4, 5].map(blockWithTransfer)
 
-    portal = await finalizedMockPortal([
-      {
-        statusCode: 200,
-        data: [b1, b2, b3],
-        head: { finalized: { number: b3.header.number, hash: b3.header.hash } },
-      },
-      {
-        statusCode: 200,
-        data: [b4, b5],
-        head: { finalized: { number: b5.header.number, hash: b5.header.hash } },
-      },
-    ])
+    portal = await mockPortal({ blocks: [b1, b2, b3, b4, b5], blocksPerResponse: 3 })
 
     const emitted: Row[][] = []
     await streamTo(portal, 5, emitted)
@@ -94,13 +83,7 @@ describe('createMemoryTarget', () => {
   it('emits rows for a dataset that reports no finalized head at all', async () => {
     const [b1, b2] = [1, 2].map(blockWithTransfer)
 
-    portal = await finalizedMockPortal([
-      {
-        statusCode: 200,
-        data: [b1, b2],
-        // no head → no finality → nothing is buffered
-      },
-    ])
+    portal = await mockPortal({ blocks: [b1, b2], finalized: null })
 
     const emitted: Row[][] = []
     await streamTo(portal, 2, emitted)
