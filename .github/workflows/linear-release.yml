@@ -1,0 +1,99 @@
+name: Report Published Release
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published version tag
+        required: true
+        type: string
+      dry_run:
+        description: Verify the connection without changing release records
+        type: boolean
+        default: true
+      base_ref:
+        description: Optional exclusive scan base for a preview
+        type: string
+        required: false
+
+permissions: {}
+
+# Serialize notifications for the same version without dropping other versions.
+concurrency:
+  group: linear-release-${{ inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: >-
+      github.repository == 'subsquid/pipes-sdk' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'pipes-v')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out reporting tools
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          path: reporting
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Verify versioned publication
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node reporting/.github/scripts/resolve-published-release.mjs
+
+      - name: Check out published commit
+        if: steps.publication.outputs.ready == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.publication.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: release
+
+      - name: Install verified reporting CLI
+        if: steps.publication.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/linear-cli"
+          gh release download v0.18.0 --repo linear/linear-release \
+            --pattern linear-release-linux-x64 --dir "$RUNNER_TEMP/linear-cli"
+          cd "$RUNNER_TEMP/linear-cli"
+          echo '0476bc8b8c23c1ed3150a55fdeb17c91d6cafcdf5f52dab74b4f89539b3c374a  linear-release-linux-x64' | sha256sum --check
+          mv linear-release-linux-x64 linear-release
+          chmod +x linear-release
+          echo "$RUNNER_TEMP/linear-cli" >> "$GITHUB_PATH"
+
+      - name: Report the published version
+        if: steps.publication.outputs.ready == 'true'
+        working-directory: release
+        env:
+          LINEAR_ACCESS_KEY: ${{ secrets.LINEAR_ACCESS_KEY }}
+          RELEASE_TAG: ${{ steps.publication.outputs.tag }}
+          RELEASE_SHA: ${{ steps.publication.outputs.sha }}
+          PUBLICATION_RUN_ID: ${{ steps.publication.outputs.runId }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
+          BASE_REF: ${{ inputs.dry_run && inputs.base_ref || '' }}
+        run: node ../reporting/.github/scripts/report-linear-release.mjs
+
+      - name: Remove reporting CLI
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/linear-cli"

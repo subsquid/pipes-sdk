@@ -417,20 +417,23 @@ jobs:
           pnpm "$@"
 
       - name: Verify it landed
+        timeout-minutes: 12
         if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           NPM_NAME: ${{ needs.resolve.outputs.npm_name }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          for i in 1 2 3 4 5; do
-            if npm view "$NPM_NAME@$VERSION" version >/dev/null 2>&1; then
+          for i in $(seq 1 40); do
+            if curl --fail --silent --show-error --max-time 20 \
+              "https://registry.npmjs.org/${NPM_NAME}/${VERSION}" \
+              | jq -e --arg name "$NPM_NAME" --arg version "$VERSION" \
+                '.name == $name and .version == $version' >/dev/null; then
               echo "Published $NPM_NAME@$VERSION"
-              npm view "$NPM_NAME" dist-tags
               exit 0
             fi
-            echo "Not visible on the registry yet, retrying ($i/5)..."
-            sleep 5
+            echo "Not visible on the registry yet, retrying ($i/40)..."
+            sleep 15
           done
           echo "::error::$NPM_NAME@$VERSION never appeared on the registry."
           exit 1
