@@ -356,43 +356,68 @@ describe('structural validators', () => {
       ]
       const snapshot = {
         state: { current: cursor(3), rollbackChain: [] },
-        units: [unit(0, 4, 0, 4, 2), unit(6, 9, 5)],
-        next: 10,
+        tables: { transfers: { units: [unit(0, 4, 0, 4, 2), unit(6, 9, 5)], next: 10 } },
         residue: ['transfers/.tmp-open.parquet'],
       }
 
       const violations = validateParquetSnapshot(snapshot, ranges)
 
       expect(messagesOf(violations)).toEqual([
-        'attribution descends at index 2: 4 → 2',
-        'a row at 5 falls outside every configured range',
-        "unit '6-9' claims [6, 9] but holds a row at 5",
-        "'6-9' covers up to 9, past the cursor 3",
+        'transfers: attribution descends at index 2: 4 → 2',
+        'transfers: a row at 5 falls outside every configured range',
+        "transfers: unit '6-9' claims [6, 9] but holds a row at 5",
+        "transfers: '6-9' covers up to 9, past the cursor 3",
         "'transfers/.tmp-open.parquet' is neither a published unit nor the state record",
         'the committed data reaches 5, above the cursor 3',
+      ])
+    })
+
+    it('checks every table against its own next window start, and the cursor against all their rows', () => {
+      const snapshot = {
+        state: { current: cursor(9), rollbackChain: [] },
+        tables: {
+          transfers: { units: [unit(0, 9, 4)], next: 10 },
+          approvals: { units: [unit(0, 4), unit(5, 12, 11)], next: 10 },
+        },
+        residue: [],
+      }
+
+      const violations = validateParquetSnapshot(snapshot, [])
+
+      expect(messagesOf(violations)).toEqual([
+        "approvals: the next window starts at 10, but '5-12' ends at 12",
+        "approvals: '5-12' covers up to 12, past the cursor 9",
+        'the committed data reaches 11, above the cursor 9',
       ])
     })
 
     it('refuses units with no state, and units or a cursor with no next window start', () => {
       const atNine = { current: cursor(9), rollbackChain: [] }
       const check = (state: OracleState | undefined, units: PublishedUnit[], next: number | undefined) =>
-        validateParquetSnapshot({ state, units, next, residue: [] }, [])
+        validateParquetSnapshot({ state, tables: { transfers: { units, next } }, residue: [] }, [])
 
       const orphaned = check(undefined, [unit(0, 9)], 10)
       const unitsOnly = check(atNine, [unit(0, 9)], undefined)
       const cursorOnly = check(atNine, [], undefined)
       const untouched = check(undefined, [], undefined)
-      const noNext = 'the store holds units or a cursor, but its state records no next window start'
+      const noNext = 'transfers: the store holds units or a cursor, but its state records no next window start'
 
-      expect(messagesOf(orphaned)).toEqual(['units are published, but the store holds no state'])
+      expect(messagesOf(orphaned)).toEqual(['transfers: units are published, but the store holds no state'])
       expect(messagesOf(unitsOnly)).toEqual([noNext])
       expect(messagesOf(cursorOnly)).toEqual([noNext])
       expect(untouched).toEqual([])
     })
 
+    it('refuses a snapshot that reads no table, which every table check would pass', () => {
+      const violations = validateParquetSnapshot({ state: undefined, tables: {}, residue: [] }, [])
+
+      expect(messagesOf(violations)).toEqual(['the snapshot reads no table'])
+    })
+
     it('checks a null state instead of reading it as no state', () => {
       const state = null as unknown as OracleState
-      const violations = validateParquetSnapshot({ state, units: [], next: undefined, residue: [] }, [])
+      const tables = { transfers: { units: [], next: undefined } }
+      const violations = validateParquetSnapshot({ state, tables, residue: [] }, [])
 
       expect(messagesOf(violations)).toEqual(['the state null is not a record'])
     })

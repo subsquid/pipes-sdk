@@ -322,28 +322,130 @@ describe('ReferenceModel', () => {
   })
 
   describe('T-INIT', () => {
-    it('drops the rows the recovered cursor does not cover (CN-40…CN-44, INV-42)', () => {
+    it('rolls back to the commit point the store recovered to, its rows included (CN-40, INV-42)', () => {
       const model = new ReferenceModel({ durability: 'K' })
-      model.batch(chain(0, 5), { finalized: block(5) })
+      model.batch(chain(0, 3), { finalized: block(5) })
+      model.batch(chain(4, 5), { finalized: block(5) })
 
-      model.recover({ current: block(3), finalized: block(3), rollbackChain: [] })
+      model.recover({ current: block(3), finalized: block(5), rollbackChain: [] })
 
       expect(blocksOf(model)).toEqual([0, 1, 2, 3])
-      expect(model.readState()).toEqual({ current: block(3), finalized: block(3), rollbackChain: [] })
+      expect(model.readState()).toEqual({ current: block(3), finalized: block(5), rollbackChain: [] })
     })
 
-    it('undoes a recovery that leaves unfinalized rows on the finalized-only route (CN-22)', () => {
+    it('recovers a checkpointed class to any batch end since the last recovery (CN-12)', () => {
       const model = new ReferenceModel({ durability: 'K' })
-      model.batch(chain(0, 5))
+      model.recover(undefined)
+      model.batch(chain(0, 1))
+      model.batch(chain(2, 3))
+      model.batch(chain(4, 5))
 
-      const refused = refusal(model, () => model.recover({ current: block(5), finalized: block(3), rollbackChain: [] }))
+      model.recover({ current: block(1), rollbackChain: [] })
 
-      expect(refused).toBe(ORACLE_ERRORS.INVARIANT)
+      expect(blocksOf(model)).toEqual([0, 1])
     })
 
-    it('refuses a cold start over data in exclusive tables (CN-44)', () => {
+    it('recovers a class that commits every batch only to its last commit or the one before (CN-10)', () => {
       const model = new ReferenceModel({ durability: 'T' })
+      model.batch(chain(0, 1))
+      model.batch(chain(2, 3))
+      model.batch(chain(4, 5))
+
+      const tooOld = refusal(model, () => model.recover({ current: block(1), rollbackChain: chain(0, 1) }))
+      model.recover({ current: block(3), rollbackChain: chain(0, 3) })
+
+      expect(tooOld).toBe(ORACLE_ERRORS.STATE_UNCOMMITTED)
+      expect(blocksOf(model)).toEqual([0, 1, 2, 3])
+    })
+
+    it('refuses a state no commit wrote, in any field, before it changes anything (CN-40)', () => {
+      const model = new ReferenceModel({ durability: 'K' })
+      model.batch(chain(0, 3), { finalized: block(5) })
+      model.batch(chain(4, 5), { finalized: block(5) })
+
+      const states: Record<string, PersistedState> = {
+        betweenBatchEnds: { current: block(4), finalized: block(5), rollbackChain: [] },
+        otherHash: { current: block(5, 'b'), finalized: block(5), rollbackChain: [] },
+        floorNeverHeld: { current: block(5), finalized: block(3), rollbackChain: [] },
+        noFloor: { current: block(5), rollbackChain: [] },
+        aheadOfTheRun: { current: block(7), finalized: block(5), rollbackChain: [] },
+      }
+      const refusals = Object.entries(states).map(([name, state]) => [name, refusal(model, () => model.recover(state))])
+      const expected = Object.keys(states).map((name) => [name, ORACLE_ERRORS.STATE_UNCOMMITTED])
+
+      expect(refusals).toEqual(expected)
+    })
+
+    it('recovers to the state on either side of a fork, which is a commit point (CN-34, FM-32)', () => {
+      const forked = () => {
+        const model = new ReferenceModel({ durability: 'T' })
+        model.batch(chain(0, 5), { finalized: block(1) })
+        model.fork([...chain(0, 2), ...chain(3, 6, 'b')])
+
+        return model
+      }
+      const before = { current: block(5), finalized: block(1), rollbackChain: chain(2, 5) }
+      const after = { current: block(2), finalized: block(1), rollbackChain: [block(2)] }
+      const preFork = forked()
+      const postFork = forked()
+
+      preFork.recover(before)
+      postFork.recover(after)
+
+      expect(blocksOf(preFork)).toEqual([0, 1, 2, 3, 4, 5])
+      expect(blocksOf(postFork)).toEqual([0, 1, 2])
+    })
+
+    it('refuses a commit point from before the last recovery, which a later crash cannot reach (CN-40)', () => {
+      const model = new ReferenceModel({ durability: 'K' })
+      model.batch(chain(0, 1))
+      model.batch(chain(2, 3))
+      model.recover({ current: block(3), rollbackChain: [] })
+      model.batch(chain(4, 5))
+
+      const refused = refusal(model, () => model.recover({ current: block(1), rollbackChain: [] }))
+
+      expect(refused).toBe(ORACLE_ERRORS.STATE_UNCOMMITTED)
+    })
+
+    it('refuses rollback records that differ from the ones the commit wrote (CN-40)', () => {
+      const model = new ReferenceModel({ durability: 'T' })
+      model.batch(chain(0, 3), { finalized: block(1) })
+      const committed = { current: block(3), finalized: block(1), rollbackChain: chain(2, 3) }
+
+      const refused = refusal(model, () => model.recover({ ...committed, records: [{ rollbackChain: [block(3)] }] }))
+      model.recover({ ...committed, records: [{ rollbackChain: chain(2, 3), finalized: block(1) }] })
+
+      expect(refused).toBe(ORACLE_ERRORS.STATE_UNCOMMITTED)
+      expect(model.records).toEqual([{ rollbackChain: chain(2, 3), finalized: block(1) }])
+    })
+
+    it('recovers again to the state it recovered, as a crash during recovery leaves it (INV-41)', () => {
+      const model = new ReferenceModel({ durability: 'K' })
       model.batch(chain(0, 3))
+      model.recover({ current: block(3), rollbackChain: [] })
+
+      model.recover({ current: block(3), rollbackChain: [] })
+
+      expect(blocksOf(model)).toEqual([0, 1, 2, 3])
+    })
+
+    it('starts cold after a crash before the first checkpoint, the delivered rows gone (CN-12)', () => {
+      const model = new ReferenceModel({ durability: 'K' })
+      model.recover(undefined)
+      model.batch(chain(0, 1))
+      model.batch(chain(2, 3))
+
+      model.recover(undefined)
+
+      expect(model.readState()).toEqual({ current: undefined, finalized: undefined, rollbackChain: [] })
+      expect(model.data).toEqual([])
+    })
+
+    it('refuses a cold start over committed data in exclusive tables (CN-44)', () => {
+      const model = new ReferenceModel({ durability: 'T' })
+      model.batch(chain(0, 1))
+      model.batch(chain(2, 3))
 
       expect(refusal(model, () => model.recover(undefined))).toBe(ORACLE_ERRORS.ORPHAN_DATA)
       expect(blocksOf(model)).toEqual([0, 1, 2, 3])
@@ -351,7 +453,8 @@ describe('ReferenceModel', () => {
 
     it('starts cold over shared tables, where the guard must not run (CN-44)', () => {
       const model = new ReferenceModel({ durability: 'T', tables: 'shared' })
-      model.batch(chain(0, 3))
+      model.batch(chain(0, 1))
+      model.batch(chain(2, 3))
 
       model.recover(undefined)
 
@@ -366,6 +469,16 @@ describe('ReferenceModel', () => {
 
       expect(model.readState()).toEqual({ current: undefined, finalized: undefined, rollbackChain: [] })
       expect(model.data).toEqual([])
+    })
+
+    it('adopts the state it is given when it has seen nothing of the run', () => {
+      const model = new ReferenceModel({ durability: 'K' })
+
+      model.recover({ current: block(7), finalized: block(7), rollbackChain: [] })
+      model.batch(chain(8, 9), { finalized: block(9) })
+
+      expect(model.readState().current).toEqual(block(9))
+      expect(blocksOf(model)).toEqual([8, 9])
     })
 
     it('refuses a malformed state, falsy values included, before it repairs anything (INV-5, INV-44)', () => {

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util'
+
 import { type BlockRange, isBlockCursor, nextInRanges, validateInRange, validateWatermarks } from './validators.js'
 
 /** Durability classes CN-10…CN-14 and CN-17. `ephemeral` is the spec's class ∅. */
@@ -39,6 +41,7 @@ export type HeadReport = {
 
 export const ORACLE_ERRORS = {
   STATE_MALFORMED: 'ORACLE_STATE_MALFORMED',
+  STATE_UNCOMMITTED: 'ORACLE_STATE_UNCOMMITTED',
   ORPHAN_DATA: 'ORACLE_ORPHAN_DATA',
   MALFORMED_INPUT: 'ORACLE_MALFORMED_INPUT',
   NOT_ASCENDING: 'ORACLE_NOT_ASCENDING',
@@ -67,6 +70,21 @@ export class OracleError extends Error {
 
 /** Classes whose sink requires finalized-only delivery (WP-7, DEF-15). */
 const FINALIZED_ONLY: ReadonlySet<DurabilityClass> = new Set<DurabilityClass>(['K', 'ephemeral'])
+
+/**
+ * Classes that do not persist state at every batch: K writes it at checkpoints, whose timing is
+ * free, and ∅ never does. A crash recovers them to any batch end since the last recovery.
+ */
+const CHECKPOINTED: ReadonlySet<DurabilityClass> = new Set<DurabilityClass>(['K', 'ephemeral'])
+
+/** What a commit leaves: everything T-INIT restores when the store recovers to it. */
+type CommitPoint = {
+  state: OracleState
+  records: RollbackRecord[]
+  data: OracleRow[]
+}
+
+const NO_STATE: OracleState = { current: undefined, finalized: undefined, rollbackChain: [] }
 
 export type ReferenceModelOptions = {
   durability: DurabilityClass
@@ -99,16 +117,22 @@ export class ReferenceModel {
   readonly #transform: (block: Cursor) => OracleRow[]
   readonly #ranges: BlockRange[]
   readonly #exclusive: boolean
+  readonly #checkpointed: boolean
 
   #current: Cursor | undefined
   #finalized: Cursor | undefined
   #rollbackChain: Cursor[] = []
   #records: RollbackRecord[] = []
   #data: OracleRow[] = []
+  /** The commit points since the last recovery, oldest first: the states a crash may recover to. */
+  #commits: CommitPoint[] = [{ state: NO_STATE, records: [], data: [] }]
+  /** No transition yet: the model knows nothing of the run, so it adopts the first state it recovers. */
+  #fresh = true
 
   constructor(options: ReferenceModelOptions) {
     this.#ranges = options.ranges ?? []
     this.#exclusive = (options.tables ?? 'exclusive') === 'exclusive'
+    this.#checkpointed = CHECKPOINTED.has(options.durability)
     this.#transform = options.transform ?? ((block) => [{ table: 'blocks', block: block.number, value: block.hash }])
 
     // bind(target), WP-7: a sink that requires finalized-only delivery overrides the configured mode.
@@ -142,37 +166,29 @@ export class ReferenceModel {
   }
 
   /**
-   * T-INIT: adopt the persisted state, repair the data to it, and check the result. Only
+   * T-INIT: roll back to the commit point the store recovered to, and check the result. Only
    * `undefined` means no state: a `null` read from a store is a malformed one.
+   *
+   * CN-40: the recovered state must equal, in every field, one the run committed: any batch end
+   * since the last recovery for a checkpointed class, the last commit or the one before it (a crash
+   * inside a commit) for the others. The rows go back with it, so whatever the class's crash window
+   * let through is gone. A model that has seen nothing of the run adopts the state it is given.
    */
   recover(persisted: PersistedState | undefined): void {
     if (persisted !== undefined) {
       this.#requireWellFormed(persisted)
     }
 
-    // CN-44: without state, data in exclusive tables is an orphan; restarting would duplicate it.
-    const orphaned = persisted === undefined && this.#exclusive && this.#data.length > 0
-    if (orphaned) {
-      throw new OracleError(
-        ORACLE_ERRORS.ORPHAN_DATA,
-        `CN-44: no cursor state, but the exclusive tables hold ${this.#data.length} rows`,
-      )
-    }
+    const point = this.#fresh ? adopted(persisted) : this.#committedPoint(persisted)
 
     this.#atomically(() => {
-      this.#current = persisted?.current
-      this.#finalized = persisted?.finalized
-      this.#rollbackChain = persisted === undefined ? [] : [...persisted.rollbackChain]
-
-      if (persisted?.records !== undefined) {
-        this.#records = [...persisted.records]
-      } else {
-        this.#records = this.#rollbackChain.length ? [this.#record()] : []
-      }
-
-      // CN-40…CN-44: whatever the class's crash window let through, nothing above the cursor survives.
-      const bound = this.#current?.number ?? -1
-      this.#data = this.#data.filter((row) => row.block <= bound)
+      this.#current = point.state.current
+      this.#finalized = point.state.finalized
+      this.#rollbackChain = [...point.state.rollbackChain]
+      this.#records = [...point.records]
+      this.#data = [...point.data]
+      this.#commits = [point]
+      this.#fresh = false
     })
   }
 
@@ -201,6 +217,7 @@ export class ReferenceModel {
       this.#data.push(...rows)
       this.#current = blocks.at(-1)
       this.#records.push(this.#record())
+      this.#commit()
     })
   }
 
@@ -253,6 +270,7 @@ export class ReferenceModel {
       this.#current = ancestor
       this.#rollbackChain = this.#rollbackChain.filter((block) => block.number <= ancestor.number)
       this.#records.push(this.#record())
+      this.#commit()
     })
 
     return ancestor
@@ -305,6 +323,45 @@ export class ReferenceModel {
     return { rollbackChain: [...this.#rollbackChain], finalized: this.#finalized }
   }
 
+  #commit(): void {
+    this.#commits.push({ state: this.readState(), records: [...this.#records], data: [...this.#data] })
+    this.#fresh = false
+  }
+
+  /** CN-40, CN-44: the commit point a recovered state names, or the refusal. */
+  #committedPoint(persisted: PersistedState | undefined): CommitPoint {
+    const candidates = this.#checkpointed ? this.#commits : this.#commits.slice(-2)
+    const recovered = stateOf(persisted)
+    const point = [...candidates]
+      .reverse()
+      .find(
+        (candidate) =>
+          isDeepStrictEqual(stateOf(candidate.state), recovered) &&
+          (persisted?.records === undefined || isDeepStrictEqual(candidate.records, persisted.records)),
+      )
+    if (point) {
+      return point
+    }
+
+    if (persisted !== undefined) {
+      throw new OracleError(
+        ORACLE_ERRORS.STATE_UNCOMMITTED,
+        `CN-40: the store recovered to ${JSON.stringify(persisted)}, a state no commit of the run wrote`,
+      )
+    }
+
+    // CN-44: without state, committed data in exclusive tables is an orphan; restarting would duplicate it.
+    if (this.#exclusive && this.#data.length > 0) {
+      throw new OracleError(
+        ORACLE_ERRORS.ORPHAN_DATA,
+        `CN-44: no cursor state, but the exclusive tables hold ${this.#data.length} committed rows`,
+      )
+    }
+
+    // Shared tables cannot tell an orphan from another pipe's rows, so the guard must not run.
+    return { state: NO_STATE, records: [], data: [] }
+  }
+
   /** Applies a transition and checks INV-1…INV-5 on the result. A refused result is undone. */
   #atomically(change: () => void): void {
     const before = {
@@ -313,6 +370,8 @@ export class ReferenceModel {
       rollbackChain: this.#rollbackChain,
       records: [...this.#records],
       data: [...this.#data],
+      commits: [...this.#commits],
+      fresh: this.#fresh,
     }
 
     try {
@@ -324,6 +383,8 @@ export class ReferenceModel {
       this.#rollbackChain = before.rollbackChain
       this.#records = before.records
       this.#data = before.data
+      this.#commits = before.commits
+      this.#fresh = before.fresh
 
       throw error
     }
@@ -450,6 +511,25 @@ export class ReferenceModel {
       )
     }
   }
+}
+
+/** ⟨C, F, RC⟩ with every field present, so a missing field and an `undefined` one compare equal. */
+function stateOf(state: OracleState | undefined): OracleState {
+  if (state === undefined) {
+    return NO_STATE
+  }
+
+  return { current: state.current, finalized: state.finalized, rollbackChain: state.rollbackChain }
+}
+
+/** The commit point of a state written before the model saw the run: its rows are not the model's. */
+function adopted(persisted: PersistedState | undefined): CommitPoint {
+  const state = stateOf(persisted)
+  const rollbackChain = [...state.rollbackChain]
+  const derived = rollbackChain.length ? [{ rollbackChain, finalized: state.finalized }] : []
+  const records = persisted?.records !== undefined ? [...persisted.records] : derived
+
+  return { state: { ...state, rollbackChain }, records, data: [] }
 }
 
 function requireBlocks(source: string, cursors: readonly Cursor[]): void {

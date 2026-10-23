@@ -4,7 +4,7 @@ import path from 'node:path'
 import { ParquetReader } from '@dsnp/parquetjs'
 
 import type { Cursor, OracleRow, OracleState } from './reference-model.js'
-import { type ParquetSnapshot, type PublishedUnit, isHeight } from './validators.js'
+import { type ParquetSnapshot, type ParquetTableSnapshot, type PublishedUnit, isHeight } from './validators.js'
 
 /** IB-22: published data files are `<table>/<from>-<to>.parquet`, both bounds zero-padded to 12 digits. */
 const DATA_FILE = /^(\d{12})-(\d{12})\.parquet$/
@@ -22,51 +22,58 @@ type ParquetStateFile = {
 /** A published unit with its rows as the store holds them. */
 export type ParquetUnit = PublishedUnit & { rows: OracleRow[] }
 
-export type ParquetProbeOptions = {
+export type ParquetProbeOptions<Table extends string> = {
   dir: string
   /** The pipe id the state sidecar is namespaced by. */
   id: string
-  /** The table to read. Anything else in the store is residue. */
-  table: string
+  /** The declared tables, in declaration order. Anything else in the store is residue. */
+  tables: readonly Table[]
   /** The column that carries block attribution (INV-3). */
   blockColumn?: string
 }
 
 /**
- * The class-K store probe: one read of the IB-22 state sidecar, the table's published units, and
- * whatever else the store holds.
+ * The class-K store probe: one read of the IB-22 state sidecar, every declared table's published
+ * units, and whatever else the store holds.
  *
  * It reports what is there and hides nothing: a store it cannot read or parse fails the read
  * instead of reading as empty, and a file that is neither a unit nor the state is residue.
  */
-export async function readParquetSnapshot({
+export async function readParquetSnapshot<Table extends string>({
   dir,
   id,
-  table,
+  tables,
   blockColumn = 'blockNumber',
-}: ParquetProbeOptions): Promise<ParquetSnapshot<ParquetUnit>> {
+}: ParquetProbeOptions<Table>): Promise<ParquetSnapshot<ParquetUnit, Table>> {
   const stateName = `_sqd_parquet_state.${id}.json`
   const statePath = path.join(dir, stateName)
-  const tableDir = path.join(dir, table)
 
   const raw = await orAbsent(readFile(statePath, 'utf8'))
   const stateFile = raw === undefined ? undefined : parseState(raw, statePath, id)
   const rootNames = (await orAbsent(readdir(dir))) ?? []
-  const tableNames = (await orAbsent(readdir(tableDir))) ?? []
 
-  const residue = rootNames.filter((name) => name !== stateName && name !== table)
-  const units: ParquetUnit[] = []
+  const declared: readonly string[] = tables
+  const residue = rootNames.filter((name) => name !== stateName && !declared.includes(name))
+  const snapshots = {} as Record<Table, ParquetTableSnapshot<ParquetUnit>>
 
-  for (const name of tableNames.sort()) {
-    const match = DATA_FILE.exec(name)
-    if (!match) {
-      residue.push(path.join(table, name))
+  for (const table of tables) {
+    const tableDir = path.join(dir, table)
+    const names = (await orAbsent(readdir(tableDir))) ?? []
+    const units: ParquetUnit[] = []
 
-      continue
+    for (const name of names.sort()) {
+      const match = DATA_FILE.exec(name)
+      if (!match) {
+        residue.push(path.join(table, name))
+
+        continue
+      }
+
+      const rows = await readUnitRows(path.join(tableDir, name), table, blockColumn)
+      units.push({ name, from: Number(match[1]), to: Number(match[2]), rows })
     }
 
-    const rows = await readUnitRows(path.join(tableDir, name), table, blockColumn)
-    units.push({ name, from: Number(match[1]), to: Number(match[2]), rows })
+    snapshots[table] = { units, next: stateFile?.coverage?.[table] }
   }
 
   // IB-22 has no chain field: the finalized-only route keeps no fork history (WP-47).
@@ -75,12 +82,14 @@ export async function readParquetSnapshot({
       ? undefined
       : { current: stateFile.cursor, finalized: stateFile.finalized, rollbackChain: [] }
 
-  return { state, units, next: stateFile?.coverage?.[table], residue: residue.sort() }
+  return { state, tables: snapshots, residue: residue.sort() }
 }
 
-/** Every row the snapshot holds, in window order. */
-export function rowsOf(snapshot: ParquetSnapshot<ParquetUnit>): OracleRow[] {
-  return snapshot.units.flatMap((unit) => unit.rows)
+/** Every row the snapshot holds: table by table in declaration order, each in window order. */
+export function rowsOf<Table extends string>(snapshot: ParquetSnapshot<ParquetUnit, Table>): OracleRow[] {
+  const tables = Object.values<ParquetTableSnapshot<ParquetUnit>>(snapshot.tables)
+
+  return tables.flatMap((table) => table.units.flatMap((unit) => unit.rows))
 }
 
 /** Only a missing path reads as absent; any other failure is the store's and fails the read. */

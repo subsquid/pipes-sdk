@@ -1,254 +1,17 @@
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { isDeepStrictEqual } from 'node:util'
 
-import { it as base, describe, expect, vi } from 'vitest'
+import { describe, expect, vi } from 'vitest'
 
-import { commonAbis } from '~/evm/abi/common.js'
-import { evmEventDecoder } from '~/evm/evm-decoder.js'
-import { evmPortalStream } from '~/evm/evm-portal-source.js'
-import { type ParquetTable, parquetTarget } from '~/targets/parquet/index.js'
-import { encodeEvent, mockBlock } from '~/testing/evm/index.js'
-import { type MockChainPortal, type MockPortalOptions, mockPortal, testLogger } from '~/testing/index.js'
+import { type ParquetUnit, rowsOf } from './parquet-probe.js'
+import { RANGES, S1, S1_ROWS, TABLE_NAMES, cursorAt, s1Oracle } from './s1.js'
+import { type S1Store, endStateOf, it, readStore, runS1 } from './s1-harness.js'
+import { validateParquetSnapshot } from './validators.js'
 
-import { type ParquetUnit, readParquetSnapshot, rowsOf } from './parquet-probe.js'
-import { type Cursor, type OracleRow, type OracleState, ReferenceModel } from './reference-model.js'
-import { type ParquetSnapshot, validateParquetSnapshot, validateRouteMode } from './validators.js'
-
-/** S1: steady backfill over deep history, healthy portal (spec/11). The range ends on blocks with no rows. */
-const S1 = { from: 0, to: 59, lastRow: 49, blocksPerResponse: 7 }
-const RANGES = [{ from: S1.from, to: S1.to }]
-const PIPE_ID = 'ct1-s1'
-const TABLE = 'transfers'
-
-const WETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' as const
-const ALICE = '0x7a250d5630b4cf539739df2c5dacb4c659f2488d' as const
-const BOB = '0xc82e11e709deb68f3631fc165ebd8b4e3fc3d18f' as const
-
-const TRANSFERS: ParquetTable = {
-  table: TABLE,
-  schema: {
-    blockNumber: { type: 'INT64' },
-    value: { type: 'UTF8' },
-  },
-}
-
-type TransferRow = { blockNumber: number; value: string }
-
-/** A sparse table: one transfer every fourth block up to `lastRow`, its value the block number. */
-const hasTransfer = (number: number) => number % 4 === 1 && number <= S1.lastRow
-
-/** The row S1 stores for a block with a transfer, as the store reads it back: INT64 as bigint. */
-function rowAt(number: number): OracleRow {
-  return { table: TABLE, block: number, value: { blockNumber: BigInt(number), value: String(number) } }
-}
-
-/** Every row S1 must leave in the store, from the scenario alone. */
-const S1_ROWS: OracleRow[] = numbers(S1.from, S1.to).filter(hasTransfer).map(rowAt)
-
-/** What the simulator holds. Every expectation below derives from it, never from the pipe. */
-type Simulator = {
-  chain: MockChainPortal
-  /**
-   * Every finalized head the portal has reported, in order; none on a dataset without finality.
-   * The test sets them, so they are ground truth.
-   */
-  reported: number[]
-  /** Moves the finalized head and records the report. */
-  finalize(number: number): void
-}
-
-/** `finalized: null` serves a dataset without finality. */
-type SimulateOptions = Omit<MockPortalOptions, 'blocks' | 'latest' | 'finalized'> & { finalized?: number | null }
-
-const it = base.extend<{
-  simulate: (options?: SimulateOptions) => Promise<Simulator>
-  dir: string
-}>({
-  simulate: async ({}, use) => {
-    const opened: MockChainPortal[] = []
-    await use(async (options = {}) => {
-      const finalized = options.finalized === undefined ? S1.to : options.finalized
-      const chain = await mockPortal({
-        blocksPerResponse: S1.blocksPerResponse,
-        ...options,
-        blocks: s1Blocks(),
-        latest: S1.to,
-        finalized,
-      })
-      opened.push(chain)
-
-      const reported = finalized === null ? [] : [finalized]
-      const finalize = (number: number) => {
-        reported.push(number)
-        chain.setHead({ finalized: number })
-      }
-
-      return { chain, reported, finalize }
-    })
-    await Promise.all(opened.map((chain) => chain.close()))
-  },
-  dir: async ({}, use) => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'sqd-ct1-'))
-    await use(dir)
-    await rm(dir, { recursive: true, force: true })
-  },
-})
-
-function numbers(from: number, to: number): number[] {
-  return Array.from({ length: to - from + 1 }, (_, i) => from + i)
-}
-
-function s1Blocks() {
-  return numbers(S1.from, S1.to)
-    .filter(hasTransfer)
-    .map((number) => {
-      const log = encodeEvent({
-        abi: commonAbis.erc20.abi,
-        eventName: 'Transfer',
-        address: WETH,
-        args: { from: ALICE, to: BOB, value: BigInt(number) },
-      })
-
-      return mockBlock({ number, transactions: [{ logs: [log] }] })
-    })
-}
-
-/** The chain's cursor for a block, as a batch carries it: given and made-up blocks share `mockBlock`'s header. */
-function cursorAt(number: number): Cursor {
-  const { hash, timestamp } = mockBlock({ number }).header
-
-  return { number, hash, timestamp }
-}
-
-/** A finalized head as the portal reports it: number and hash, no timestamp. */
-function reportedAt(number: number): Cursor {
-  return { number, hash: cursorAt(number).hash }
-}
-
-/**
- * The state S1 must leave in the store, from the simulator alone: the cursor at the range end and
- * the last floor the portal reported. Class K keeps no rollback chain (WP-47).
- */
-function s1EndState(simulator: Simulator): OracleState {
-  const lastReport = simulator.reported.at(-1)
-
-  return {
-    current: cursorAt(S1.to),
-    finalized: lastReport === undefined ? undefined : reportedAt(lastReport),
-    rollbackChain: [],
-  }
-}
-
-/** The oracle for S1, as class K: the Parquet sink requires finalized-only delivery. */
-function s1Oracle() {
-  return new ReferenceModel({
-    durability: 'K',
-    ranges: RANGES,
-    transform: (block) => (hasTransfer(block.number) ? [rowAt(block.number)] : []),
-  })
-}
-
-function readStore(dir: string): Promise<ParquetSnapshot<ParquetUnit>> {
-  return readParquetSnapshot({ dir, id: PIPE_ID, table: TABLE })
-}
-
-function requireSame(label: string, actual: unknown, expected: unknown): void {
-  if (!isDeepStrictEqual(actual, expected)) {
-    throw new Error(`${label} is ${JSON.stringify(actual)}, the simulator has ${JSON.stringify(expected)}`)
-  }
-}
-
-/**
- * Streams S1 into a Parquet store and returns the store as the run leaves it.
- *
- * The oracle recovers from the store first, as the pipe does, then follows every batch in
- * lockstep, so a transition the spec forbids fails the run at that batch. Each batch's cursor must
- * be the chain's block and the pipe's finalized head one the portal reported (INV-2); the oracle
- * gets the finality the simulator last reported, never the pipe's view.
- *
- * When the run ends, the store must pass every structural validator and hold exactly S1's rows and
- * end state, and so must the oracle. Those come from the simulator, because the lockstep oracle
- * follows the pipe: it agrees with a pipe that stopped early.
- */
-async function runS1({
-  simulator,
-  dir,
-  model = s1Oracle(),
-}: {
-  simulator: Simulator
-  dir: string
-  /** Pass one to watch it during the run, or to carry it across a restart. */
-  model?: ReferenceModel
-}): Promise<ParquetSnapshot<ParquetUnit>> {
-  const before = await readStore(dir)
-  model.recover(before.state)
-
-  let previous = model.readState().current?.number
-
-  const outputs = evmEventDecoder({
-    range: { from: S1.from, to: S1.to },
-    events: { transfers: commonAbis.erc20.events.Transfer },
-  }).pipe((decoded, ctx): TransferRow[] => {
-    const current = ctx.stream.state.current
-    const first = previous === undefined ? S1.from : previous + 1
-    const covered = numbers(first, current.number).map(cursorAt)
-
-    requireSame('the batch cursor', current, covered.at(-1))
-
-    const observed = ctx.stream.head.finalized
-    const reported = simulator.reported.some((number) => isDeepStrictEqual(observed, reportedAt(number)))
-    const invented = observed !== undefined && !reported
-    if (invented) {
-      throw new Error(
-        `INV-2: the pipe holds the finalized head ${JSON.stringify(observed)}, which the portal never reported`,
-      )
-    }
-
-    const lastReport = simulator.reported.at(-1)
-    const head = lastReport === undefined ? {} : { finalized: reportedAt(lastReport) }
-    model.batch(covered, head)
-    previous = current.number
-
-    return decoded.transfers.map((transfer) => ({
-      blockNumber: transfer.block.number,
-      value: transfer.event.value.toString(),
-    }))
-  })
-
-  await evmPortalStream({
-    id: PIPE_ID,
-    // Small reads keep batches small, so the run takes many checkpoints, not one.
-    portal: { url: simulator.chain.url, maxBytes: 1 },
-    outputs,
-    logger: testLogger(),
-  }).pipeTo(
-    parquetTarget({
-      dir,
-      tables: [TRANSFERS],
-      // Every batch that holds a row closes its window. A row count is exact; the engine reports bytes late.
-      settings: { rollover: { maxRows: 1 } },
-      onData: ({ store, data }) => {
-        store.insert(TABLE, data)
-      },
-    }),
-  )
-
-  const after = await readStore(dir)
-  const end = s1EndState(simulator)
-  const violations = validateParquetSnapshot(after, RANGES)
-  const offRoute = validateRouteMode('K', simulator.chain.requests)
-  const rows = rowsOf(after)
-
-  expect(violations, 'the structural validators').toEqual([])
-  expect(offRoute, 'route-mode coherence').toEqual([])
-  expect(after.state, 'the stored state').toStrictEqual(end)
-  expect(rows, 'the stored rows').toEqual(S1_ROWS)
-  expect(model.readState(), 'the oracle state').toStrictEqual(end)
-  expect(model.data, 'the oracle rows').toEqual(S1_ROWS)
-
-  return after
+/** Every unit the store holds, table by table. */
+function unitsOf(store: S1Store): ParquetUnit[] {
+  return TABLE_NAMES.flatMap((table) => store.tables[table].units)
 }
 
 /** The raw bytes of every file in the store, by path. */
@@ -281,7 +44,7 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     const store = await runS1({ simulator, dir })
     const rows = rowsOf(store)
 
-    expect(store.state).toStrictEqual(s1EndState(simulator))
+    expect(store.state).toStrictEqual(endStateOf(simulator))
     expect(rows).toEqual(S1_ROWS)
   })
 
@@ -298,14 +61,18 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
 
     const store = await runS1({ simulator, dir })
     const violations = validateParquetSnapshot(store, RANGES)
+    const fewestUnits = Math.min(...TABLE_NAMES.map((table) => store.tables[table].units.length))
 
     // Over one unit or one request the validators would prove little.
-    expect(store.units.length).toBeGreaterThan(1)
+    expect(fewestUnits).toBeGreaterThan(1)
     expect(simulator.chain.requests.length).toBeGreaterThan(1)
     expect(violations).toEqual([])
   })
 
-  it('tiles the whole range, the empty tail as a unit of its own (INV-4, RP-21)', async ({ simulate, dir }) => {
+  it('tiles the whole range in every table, the empty tail as a unit of its own (INV-4, RP-21)', async ({
+    simulate,
+    dir,
+  }) => {
     const model = s1Oracle()
 
     // The source can merge responses into one batch, which would put the tail in the last row's
@@ -318,13 +85,25 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
       },
     })
 
-    const { units, next } = await runS1({ simulator, dir, model })
-    const covered = { from: units[0]?.from, to: units.at(-1)?.to, next }
-    const tail = units.at(-1)
+    const store = await runS1({ simulator, dir, model })
+    const tiling = TABLE_NAMES.map((table) => {
+      const { units, next } = store.tables[table]
+      const tail = units.at(-1)
+      const tailAfterRows = tail !== undefined && tail.from > S1.lastRow
 
-    expect(covered).toEqual({ from: S1.from, to: S1.to, next: S1.to + 1 })
-    expect(tail?.from).toBeGreaterThan(S1.lastRow)
-    expect(tail?.rows).toEqual([])
+      return { table, from: units[0]?.from, to: tail?.to, next, tailAfterRows, tailRows: tail?.rows }
+    })
+    const whole = TABLE_NAMES.map((table) => ({
+      table,
+      from: S1.from,
+      to: S1.to,
+      next: S1.to + 1,
+      tailAfterRows: true,
+      tailRows: [],
+    }))
+
+    // Where the tail starts is where a batch ended, which is free.
+    expect(tiling).toEqual(whole)
   })
 
   it('anchors each request on the hash of the block before it (IB-3)', async ({ simulate, dir }) => {
@@ -364,7 +143,7 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     try {
       const a = await runS1({ simulator: coarse, dir })
       const b = await runS1({ simulator: fine, dir: second })
-      const unitNames = (store: ParquetSnapshot<ParquetUnit>) => store.units.map((unit) => unit.name)
+      const unitNames = (store: S1Store) => unitsOf(store).map((unit) => unit.name)
       const rowsA = rowsOf(a)
       const rowsB = rowsOf(b)
 
@@ -421,7 +200,7 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     // Stage 2: nothing above the floor reached the store. Whether it has checkpointed yet is free.
     const early = await readStore(dir)
     const earlyCursor = early.state?.current?.number ?? -1
-    const earlyBound = rowsOf(early).at(-1)?.block ?? -1
+    const earlyBound = Math.max(-1, ...rowsOf(early).map((row) => row.block))
 
     expect(earlyCursor).toBeLessThanOrEqual(lag)
     expect(earlyBound).toBeLessThanOrEqual(lag)

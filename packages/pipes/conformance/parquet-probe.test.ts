@@ -19,14 +19,19 @@ const it = base.extend<{ dir: string }>({
   },
 })
 
-async function writeUnit(dir: string, name: string, rows: { blockNumber: bigint; amount: bigint }[]) {
+async function writeUnit(
+  dir: string,
+  name: string,
+  rows: { blockNumber: bigint; amount: bigint }[],
+  table = 'transfers',
+) {
   const schema = new ParquetSchema({
     blockNumber: { type: 'INT64' },
     amount: { type: 'INT64' },
   })
 
-  await mkdir(path.join(dir, 'transfers'), { recursive: true })
-  const writer = await ParquetWriter.openFile(schema, path.join(dir, 'transfers', name))
+  await mkdir(path.join(dir, table), { recursive: true })
+  const writer = await ParquetWriter.openFile(schema, path.join(dir, table, name))
   for (const row of rows) {
     await writer.appendRow(row)
   }
@@ -34,7 +39,7 @@ async function writeUnit(dir: string, name: string, rows: { blockNumber: bigint;
 }
 
 describe('readParquetSnapshot', () => {
-  const read = (dir: string) => readParquetSnapshot({ dir, id: PIPE_ID, table: 'transfers' })
+  const read = (dir: string) => readParquetSnapshot({ dir, id: PIPE_ID, tables: ['transfers'] })
 
   it('reads INT64 values at full width', async ({ dir }) => {
     await writeUnit(dir, '000000000000-000000000009.parquet', [{ blockNumber: 5n, amount: BEYOND_DOUBLE }])
@@ -58,7 +63,8 @@ describe('readParquetSnapshot', () => {
     )
 
     const snapshot = await read(dir)
-    const windows = snapshot.units.map(({ name, from, to }) => ({ name, from, to }))
+    const { units, next } = snapshot.tables.transfers
+    const windows = units.map(({ name, from, to }) => ({ name, from, to }))
 
     expect(windows).toEqual([
       { name: '000000000000-000000000009.parquet', from: 0, to: 9 },
@@ -69,14 +75,41 @@ describe('readParquetSnapshot', () => {
       finalized: { number: 23, hash: '0x23' },
       rollbackChain: [],
     })
-    expect(snapshot.next).toBe(20)
+    expect(next).toBe(20)
+    expect(snapshot.residue).toEqual([])
+  })
+
+  it('reads every declared table, each with its own coverage, rows in declaration order', async ({ dir }) => {
+    await writeUnit(dir, '000000000000-000000000009.parquet', [{ blockNumber: 7n, amount: 1n }], 'transfers')
+    await writeUnit(dir, '000000000000-000000000004.parquet', [{ blockNumber: 2n, amount: 2n }], 'approvals')
+    await writeFile(
+      path.join(dir, `_sqd_parquet_state.${PIPE_ID}.json`),
+      JSON.stringify({ ...STATE, coverage: { transfers: 10, approvals: 5 } }),
+    )
+
+    const snapshot = await readParquetSnapshot({ dir, id: PIPE_ID, tables: ['transfers', 'approvals'] })
+    const nextStarts = Object.entries(snapshot.tables).map(([table, { next }]) => [table, next])
+    const rows = rowsOf(snapshot).map(({ table, block }) => [table, block])
+
+    expect(nextStarts).toEqual([
+      ['transfers', 10],
+      ['approvals', 5],
+    ])
+    expect(rows).toEqual([
+      ['transfers', 7],
+      ['approvals', 2],
+    ])
     expect(snapshot.residue).toEqual([])
   })
 
   it('reads nothing from a sink that never committed', async ({ dir }) => {
     const snapshot = await read(dir)
 
-    expect(snapshot).toStrictEqual({ state: undefined, units: [], next: undefined, residue: [] })
+    expect(snapshot).toStrictEqual({
+      state: undefined,
+      tables: { transfers: { units: [], next: undefined } },
+      residue: [],
+    })
   })
 
   it('refuses a block column that is no block, or that it cannot read exactly', async ({ dir }) => {
@@ -96,7 +129,7 @@ describe('readParquetSnapshot', () => {
     await writeFile(path.join(dir, `_sqd_parquet_state.${PIPE_ID}.json`), JSON.stringify(STATE))
 
     const snapshot = await read(dir)
-    const unitNames = snapshot.units.map((unit) => unit.name)
+    const unitNames = snapshot.tables.transfers.units.map((unit) => unit.name)
 
     expect(unitNames).toEqual(['000000000000-000000000009.parquet'])
     expect(snapshot.residue).toEqual([

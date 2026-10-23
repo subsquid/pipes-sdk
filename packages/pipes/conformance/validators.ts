@@ -495,61 +495,82 @@ export function validateResidue(residue: readonly string[]): Violation[] {
   }))
 }
 
-/**
- * One read of a class-K store, for one table. Every field is required, so no check can be
- * skipped by leaving its input out.
- */
-export type ParquetSnapshot<Unit extends PublishedUnit = PublishedUnit> = {
-  /** The IB-22 sidecar as ⟨C, F, RC⟩; `undefined` only when the store holds no state file. */
-  state: OracleState | undefined
+/** One table of a class-K store, as one snapshot read it. */
+export type ParquetTableSnapshot<Unit extends PublishedUnit = PublishedUnit> = {
   /** The table's published units, in window order. Rows come from these and nowhere else. */
   units: Unit[]
   /** The table's next window start, as the sidecar's coverage records it. */
   next: number | undefined
-  /** Files that are neither a published unit of the table nor the state file. */
+}
+
+/**
+ * One read of a class-K store: the state and every declared table. Every field is required, so no
+ * check can be skipped by leaving its input out.
+ */
+export type ParquetSnapshot<Unit extends PublishedUnit = PublishedUnit, Table extends string = string> = {
+  /** The IB-22 sidecar as ⟨C, F, RC⟩; `undefined` only when the store holds no state file. */
+  state: OracleState | undefined
+  /** Every declared table, by name, in declaration order. */
+  tables: Record<Table, ParquetTableSnapshot<Unit>>
+  /** Files that are neither a published unit of a declared table nor the state file. */
   residue: string[]
 }
 
 /** Every structural validator a class-K store answers to at quiescence, over one snapshot of it. */
 export function validateParquetSnapshot(snapshot: ParquetSnapshot, ranges: readonly BlockRange[]): Violation[] {
-  const { state, units, next, residue } = snapshot
-  const rows = units.flatMap((unit) => unit.rows)
+  const { state, tables, residue } = snapshot
+  const entries = Object.entries<ParquetTableSnapshot>(tables)
   const violations: Violation[] = []
 
-  // CN-44: a published unit that no state accounts for is an orphan.
-  if (state === undefined && units.length) {
-    violations.push({
-      validator: 'watermark-coherence',
-      property: 'CN-44',
-      message: 'units are published, but the store holds no state',
-    })
+  // With no table read, every per-table check below would pass vacuously.
+  if (!entries.length) {
+    violations.push({ validator: 'decodable', property: 'IB-22', message: 'the snapshot reads no table' })
   }
 
   // A cursor that is not a block bounds nothing; validateWatermarks reports it.
   const current = state?.current
   const cursor = isBlockCursor(current) ? current.number : undefined
+  const rows: Attributed[] = []
 
-  // IB-22: a store that published units, or processed blocks for them, records where the next window starts.
-  const nextOwed = units.length > 0 || current !== undefined
-  if (nextOwed && next === undefined) {
-    violations.push({
-      validator: 'coverage-partition',
-      property: 'INV-4',
-      message: 'the store holds units or a cursor, but its state records no next window start',
-    })
+  for (const [table, { units, next }] of entries) {
+    const tableRows = units.flatMap((unit) => unit.rows)
+    const found: Violation[] = []
+
+    // CN-44: a published unit that no state accounts for is an orphan.
+    if (state === undefined && units.length) {
+      found.push({
+        validator: 'watermark-coherence',
+        property: 'CN-44',
+        message: 'units are published, but the store holds no state',
+      })
+    }
+
+    // IB-22: a store that published units, or processed blocks for them, records where the next window starts.
+    const nextOwed = units.length > 0 || current !== undefined
+    if (nextOwed && next === undefined) {
+      found.push({
+        validator: 'coverage-partition',
+        property: 'INV-4',
+        message: 'the store holds units or a cursor, but its state records no next window start',
+      })
+    }
+
+    found.push(
+      ...validateOrdered(tableRows),
+      ...validateInRange(tableRows, ranges),
+      ...validateItemsBelongToParent(units),
+      ...validateCoverage(units, { ranges, next, cursor }),
+    )
+
+    violations.push(...found.map((violation) => ({ ...violation, message: `${table}: ${violation.message}` })))
+    rows.push(...tableRows)
   }
 
-  const dataBound = rows.length ? rows.reduce((max, row) => Math.max(max, row.block), 0) : undefined
-
-  violations.push(
-    ...validateOrdered(rows),
-    ...validateInRange(rows, ranges),
-    ...validateItemsBelongToParent(units),
-    ...validateCoverage(units, { ranges, next, cursor }),
-    ...validateResidue(residue),
-  )
+  violations.push(...validateResidue(residue))
 
   if (state !== undefined) {
+    const dataBound = rows.length ? rows.reduce((max, row) => Math.max(max, row.block), 0) : undefined
+
     violations.push(...validateWatermarks(state, { dataBound }))
   }
 
