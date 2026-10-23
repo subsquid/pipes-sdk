@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD (CT-n, GAP-n) — MUTABLE
 
 Last updated: 2026-10-23. Statuses reflect the actual TypeScript test inventory at
-mainline `ccb4b99` plus the conformance harness in `packages/pipes/conformance/`, not
+mainline `051ed66` plus the conformance harness in `packages/pipes/conformance/`, not
 aspiration.
 
 ## Harness architecture
@@ -28,16 +28,27 @@ aspiration.
 chain form. It answers every request from the chain it holds, keyed by the request
 anchor (IB-3), so a post-restart re-request, a fork (409 with the canonical window), a
 head move or a transport fault needs no script; a response-list form remains for exact
-sequences. The oracle, the structural validators and a class-K store probe live in
-`packages/pipes/conformance/`, and CT-1 runs S1 against class K. Not built yet:
-kill-point injection, store probes for the other classes, the observability scraper,
-and adversarial histories (duplicate or out-of-order blocks, over-return).
+sequences. The oracle, the structural validators, a class-K store probe and a class-K
+kill-point injector live in `packages/pipes/conformance/`; CT-1 and CT-2 run S1 against
+class K. A kill is a true kill: a child process runs the pipe and stops itself with
+SIGKILL at one file operation of the commit protocol or of recovery, so nothing unwinds
+and the store holds what a crash leaves. The child journals every batch before the store
+sees it, and the oracle follows the journal. Not built yet: kill points and store probes
+for the other classes, the corrupted-state corpus, the observability scraper, and
+adversarial histories (duplicate or out-of-order blocks, over-return).
 
 **Quiescence** (comparison point): simulator drained, SUT idle-at-head (OB-2 idle), no
 retry signal active, sink store stable for one poll interval. All oracle/SUT diffs are
 evaluated at quiescence. Each scenario also fixes its expected end state (rows, cursor,
 floor) from the simulator alone, and both the store and the oracle are diffed against it:
 a lockstep oracle follows the SUT, so it agrees with a SUT that stops early.
+
+**Crash point** (comparison point after a kill): the store must hold a commit point the
+oracle wrote (CN-40), its committed part (units at or below `C`) must pass every
+structural validator and hold exactly the scenario's rows up to `C`, and the crash window
+(units above `C`, residue) must be where the class protocol puts it for that kill point.
+The window is the evidence that the kill landed on the step the test names. The restart
+then runs to quiescence and is diffed as above.
 
 ## Reference model (normative pseudocode)
 
@@ -53,7 +64,11 @@ bind(target):                                      # WP-7 / RP-7
 
 recover(persisted):                                  # T-INIT
   require well-formed(persisted) else REFUSE          # INV-5, INV-44
-  C, F, RC, R, V ← persisted; repair(D, class, C)     # CN-40…CN-44
+  P ← commit point since the last recover whose ⟨C, F, RC, R⟩ = persisted   # CN-40
+      # any batch end for K and ∅ (checkpoint timing is free); the last two for the others
+  if P = ⊥ and persisted ≠ ⊥ → REFUSE                 # a state no commit wrote
+  if P = ⊥ and D ≠ ∅ and tables exclusive → REFUSE    # CN-44
+  C, F, RC, R, D ← P (or the empty state); V ← persisted   # class repair leaves D as P holds it
   assert no row in D above C                          # INV-42
 
 batch(blocks, head):                                 # T-BATCH
@@ -120,6 +135,16 @@ A — after data pre-cursor, after cursor ·
 C — after the local commit pre-publish, mid-publish, after publish pre-confirmation ·
 all — during recovery itself, during fork.
 
+*Status (class K, S1):* every K point runs after a first commit: mid-unit-write (cut
+after the header), post-publish before the state write and before the state rename,
+mid-rename (one table published, the other finished in temp), post-publish of a unit
+that straddles the cursor, and post-state. Before the first commit, mid-unit-write
+converges and post-publish before the state rename is GAP-41's pin. Recovery is killed
+before its temp sweep and before its over-cursor sweep, and a restart is killed again
+in its first checkpoint (double kill, CN-42). "During fork" does not apply: the
+finalized-only route takes no fork (WP-7). Not checked: INV-43's byte identity,
+because unit boundaries after a restart are free.
+
 ## Structural validators (kind-agnostic, always on)
 
 Applicable to any emission/state without domain knowledge: decodable (parses per
@@ -142,10 +167,13 @@ known-suspect in the current implementation (see gap register).
 
 | Property | CT class | Status | Note |
 |---|---|---|---|
-| WP-1, WP-2 (resume, floor seed) | CT-1/2 | C | portal-source + watermark tests |
+| WP-1, WP-2 (resume, floor seed) | CT-1/2 | C | portal-source + watermark tests; CT-2 S1: every restart asks first for the block after the recovered cursor, anchored on it (class K) |
 | WP-3 (id validation) | CT-1 | P ⚠ | rejects, but uncoded (GAP-4) |
 | WP-4 (range resolution) | CT-1 | C | range-algebra + builder tests |
-| WP-5/CN-40…CN-44 recovery-before-write | CT-2 | P ⚠ | class K pre-commit abort + recovery suites; no class has a kill-point matrix (GAP-14); class K skips its sweep before the first cursor write (GAP-41); orphan guard W-only and table-wide rather than key-scoped (GAP-20) |
+| WP-5/CN-40…CN-44 recovery-before-write | CT-2 | P ⚠ | class K: the CT-2 kill-point matrix on S1, where the oracle requires the recovered state to be a commit point (CN-40); class K skips its sweep before the first cursor write, pinned by CT-2 (GAP-41); the other classes have no kill-point matrix (GAP-14); orphan guard W-only and table-wide rather than key-scoped (GAP-20) |
+| INV-40…INV-42 (recovery soundness, idempotence, no orphans) | CT-2 | P ⚠ | class K: every CT-2 point on S1 ends in S1's end state with no residue, crashes during recovery and a second crash in the restart included; GAP-41 breaks it before the first commit; the other classes U (GAP-14) |
+| INV-43 (re-fetch byte identity) | CT-2 | U | unit boundaries after a restart are free, so CT-2 diffs rows, not bytes |
+| INV-44 (refuse-before-delete) | CT-2 | P | class K refuses a straddling unit the coverage does not explain (E2317, target suite); no corrupted-state corpus |
 | WP-7, RP-7, DEF-15, INV-25, IB-11 (finalized-only selection) | CT-1/5 | C | portal-source asserts hot override + warning, finalized `latest` and its no-finality fallback, transformer-start view honouring an explicit hot head, per-pipe (non-sticky) selection, effective cache client and node-cache forwarding, quiet pre-finalized mode, and unchanged non-requiring mode; Parquet/memory assert direct delivery and the coded impossible-fork refusal; CT-1 S1 diffs the class-K store against the oracle under a lagging floor and with no finality |
 | WP-10, WP-15, INV-20 (ordering) | CT-1 | P | buffer/split unit tests; the CT-1 S1 lockstep oracle refuses a batch whose cursor descends or is not the chain's block, and the diff against S1's fixed end state catches a skipped block that holds rows, and a run that ends early (class K); the linked validator checks block order within a batch, but no CT feeds it delivered batches yet; no adversarial simulator (GAP-29) |
 | WP-11, HZ-1 (assembly bounds) | CT-1 | C | stream-buffer tests |
@@ -169,14 +197,14 @@ known-suspect in the current implementation (see gap register).
 | RP-43 (contract guard) | CT-3 | P ⚠ | one binding only (GAP-9) |
 | CN-10 T atomicity | CT-2 | P ⚠ | live tx tests; kill-points U (GAP-14) |
 | CN-11 W protocol | CT-2 | P | unit/lifecycle C; integration gated off CI |
-| CN-12 K protocol | CT-1/2 | C ⚠ | finalized-route selection plus crash-safety + recovery suites; straddle refusal asserted (E2317); first-checkpoint crash window open (GAP-41) |
+| CN-12 K protocol | CT-1/2 | C ⚠ | finalized-route selection plus crash-safety + recovery suites; straddle refusal asserted (E2317); CT-2 kills S1 at every protocol step, a stretched unit's straddle included; first-checkpoint crash window open (GAP-41) |
 | CN-13 A protocol | CT-2 | U ⚠ | recovery/fork with a hook untested; no-hook window is an accepted deviation (ADR-15); kill-point owed (GAP-14) |
 | CN-17, CN-35, CN-46 C protocol | CT-2/3 | P ⚠ | fold-per-id, baseline restore, route-declared inverse, seq monotonicity across forks and the commit-then-publish crash window are asserted against a publisher seam; no live-bus conformance run, and the lost-sequencer exposure is operational only (GAP-38) |
 | RP-24, RP-44 (changelog contract) | CT-5 | P ⚠ | canonical codec tested as a contract (accept/reject table + golden bytes); attribute inheritance through forks asserted; consumer-side convergence untested against a real subscription |
 | RP-45 (shared-feed contract) | CT-5 | P ⚠ | one payload shape, the split-counter and backwards-block refusals, and the finality reference (stamped on every message, on compensations, and on a restart's recovery drain) asserted against a publisher seam; the quiet-table stall and the consumer's max-read are stated limits, untested against a real subscription |
 | CN-34 (fork commit point) | CT-2 | U ⚠ | crash-during-fork untested; class A persists nothing at fork (GAP-21) |
 | CN-45 (cross-impl, clock indep.) | CT-5 | U ⚠ | single implementation; clock ordering in two bindings (GAP-10); cache codec undiscriminated (GAP-27) |
-| INV-1, INV-3, INV-5 (state well-formedness) | CT-1 | P | structural validators and the diff against S1's fixed end state on the class-K store at quiescence, with and without finality; no store probe for the other classes |
+| INV-1, INV-3, INV-5 (state well-formedness) | CT-1 | P | structural validators and the diff against S1's fixed end state on the class-K store (two tables) at quiescence, with and without finality, and on its committed part after every CT-2 kill; no store probe for the other classes |
 | INV-2, INV-12 (floor) | CT-1/2 | C | adversarial regression/genesis tests |
 | INV-10 (frame condition) | CT-1 | P | CT-1 S1: a restart with nothing left to read leaves the class-K store byte-identical; no idle soak (CT-7) |
 | INV-13, INV-14 (fork safety) | CT-3 | C ⚠ | at batch boundaries; mid-flush U; a fork below F is not refused (GAP-6) |
@@ -212,7 +240,7 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-10 | ClickHouse and BigQuery order cursor records by wall-clock timestamp (resume + fork-record + retention ordering; BigQuery's per-process monotonic counter resets on restart); clock regression can misorder — violates clock independence. ClickHouse's millisecond key has no tie-breaker either, so two commits in one millisecond tie with no clock regression at all | CN-45, CN-15 | P2 | two commits under a regressed clock, and two in one millisecond, per binding; resume must pick commit-order latest |
 | GAP-12 | Class-W binding assumes single-writer (client-assigned monotonic timestamps) with no lock and no detection; dual instance corrupts undetected | INV-15 (declaration) | P3 | document in IB-24; optional fencing probe |
 | GAP-13 | The spec check syncs the codes declared in source with `docs/errors.md` but not with the IB-50 table, so the table can drift unnoticed; CI runs the check only when `spec/**` changes, so a code-only change skips it | REQ-13, IB-50, IB-52 | P3 | diff declared codes against IB-50 in the check; run it on code changes |
-| GAP-14 | No durability class has a kill-point matrix; the only crash imitation is a class-K pre-commit abort, one point of the CT-2 matrix | INV-40…INV-42 | P1 | the kill-point harness at the T transaction boundary, over the chain-form mock portal, which answers the post-restart re-request |
+| GAP-14 | Only class K has a kill-point matrix (CT-2 on S1). Classes T, W, A and C have none, and class A's no-hook recovery window (ADR-15) is unexercised | INV-40…INV-42 | P1 | the kill-point injector at the T transaction boundary: kill the child before, inside and after the transaction, restart, diff against the scenario's end state |
 | GAP-15 | Indistinguishable-output collision (duplicate event signature) only logs in the evm module, whose decoder stops at the first matching output, so later outputs silently miss records. The solana module refuses a shared discriminator at construction (E0003), so the two modules disagree | WP-24 | P2 | two evm outputs, same signature → startup diagnostic asserted fatal (pending OQ-6) |
 | GAP-16 | Observability payloads are consumed by the dashboard but have no golden fixtures; shapes drift silently (a version-drift accommodation already exists in the dashboard) | IB-40…IB-46 | P3 | golden scrape of /stats, /metrics, preview against a scripted run |
 | GAP-20 | The orphan-data guard is table-wide where it must be key-scoped: the write-ahead binding (E2212) probes the tracked table with no key filter while reading its sync row by key, so a co-resident pipe's legitimate first run into a populated shared table is refused — one pipe's startup made dependent on another's data, blocking a configuration INV-35/RP-41 support. The other bindings run no guard at all and restart from scratch over genuinely orphan data | CN-44, INV-35, REQ-3 | P2 | second pipe id, first run into a table another pipe populates → assert start, not refusal; then on declared-exclusive tables delete cursor state and assert coded refusal per binding |
@@ -234,18 +262,17 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-37 | Date-range resolution failures surface uncoded: `resolveTimestamps` matches `error.message` against the portal's `"No chunk found for timestamp"` prose, but the only `Portal` impl throws `HttpError` whose message is `` `Got ${status} from ${url}` `` and nothing wraps it — the body never reaches `.message`, so the match can never succeed and E0002 `BlockRangeConfigurationError` is dead at that site. A `from`/`to` date preceding the dataset's first block raises a raw 404 `HttpError` at the author instead. Matching on message text is itself what REQ-13 forbids; the builder test passes only because its mock throws that prose as a plain error | REQ-13, IB-50, IB-52 | P3 | date range with `from` before `start_block`; simulator answers `GET timestamps/{seconds}/block` (IB-1) with 404 → assert E0002, not `HttpError` |
 | GAP-38 | A class-C sink's producer sequence lives only in its local state, and the wire carries no producer-lineage field: a state that was lost or restored from a backup restarts the sequence, republishes low versions under ids consumers already hold at higher ones, and every affected row silently freezes while event topics keep looking healthy. The producer refuses to start on an empty state file (E2420), but a state restored from a backup opens as an ordinary resume and rewinds the sequence undetected; a bootstrap declared with `allowColdStart` under a namespace that has already published cannot be detected by either side in-band either. Both are handled operationally (`sqd_pubsub_cold_start` gauge + runbook), not structurally (ADR-21) | CN-17, CN-46, RP-24 | P2 | publish, wipe the state, resume under the same namespace → assert the refusal; restore an older state file → assert detection; declare the bootstrap and assert a consumer cannot distinguish the stale stream from a healthy one (documents the residual exposure) |
 | GAP-40 | The class-C block-order check walks a batch in sequencing order, which is route by route rather than block by block, so a second route on the same topic is refused (E2429) whenever it emits an operation below the previous route's last block in the batch. Nothing the mapper emits can avoid it — the concatenation order is the sink's — so several routes per topic and the sequence barrier are mutually exclusive in practice, currently by refusal and documentation rather than by ordering the operations before they are sequenced | RP-45, IB-28 | P2 | two routes on one topic, one batch spanning blocks *N*…*N+2* → assert the operations are sequenced in block order, not E2429 |
-| GAP-41 | Class-K recovery skips the over-cursor sweep when no cursor was ever persisted: the state read returns before the sweep when the state file is absent. A crash between the first publish and the first state write leaves a published file no cursor covers; the restart either collides with it (E2309) or publishes an overlapping file beside it — silently duplicated rows — depending on batch partitioning, a declared free variable. Deleting unconditionally is not the fix while data files carry no pipe namespace (GAP-35) | CN-12, INV-42, REQ-3 | P2 | crash after the first publish, before the first state write; restart → assert output equals an uninterrupted run |
+| GAP-41 | Class-K recovery skips the over-cursor sweep when no cursor was ever persisted: the state read returns before the sweep when the state file is absent. A crash between the first publish and the first state write leaves a published file no cursor covers; the restart either collides with it (E2309) or publishes an overlapping file beside it — silently duplicated rows — depending on batch partitioning, a declared free variable. Deleting unconditionally is not the fix while data files carry no pipe namespace (GAP-35). CT-2 pins it (`conformance/ct2-k-s1.test.ts`): killed before the first state rename, recovery keeps both published units and the restart does not converge | CN-12, INV-42, REQ-3 | P2 | crash after the first publish, before the first state write; restart → assert output equals an uninterrupted run (flip the CT-2 pin) |
 | GAP-42 | A full stream on a dataset without finality keeps no fork history: the source builds each batch's rollback chain only from blocks above a reported finalized head, so with no report every persisted record is empty, and the first fork, however shallow, halts as unresolvable (E1003) instead of rolling back. The model keeps every processed block above an absent floor, bounded by retention (WP-47) | WP-42, WP-47 | P2 | full stream over a dataset without finality, fork two blocks below the head → assert rollback to the common ancestor, not E1003 |
 
 ## Build order
 
 - **Phase 0 — harness skeleton**: ledger mode (the chain-form mock portal), the
-  reference model (oracle), the structural validators and the class-K store probe are
-  in place, and CT-1 is green on the reference implementation for S1 — the exit
-  criteria are met. Open: kill-point injection for one class (K — cheapest,
-  file-based; the only crash imitation today is a pre-commit abort, one point of the
-  CT-2 matrix). Adversarial histories (over-return for INV-24, duplicate/out-of-order
-  for GAP-29, head regressions) build on the same chain model.
+  reference model (oracle), the structural validators, the class-K store probe and
+  class-K kill-point injection are in place; CT-1 is green on the reference
+  implementation for S1, and CT-2 runs the class-K matrix on S1 — the exit criteria
+  are met. Open: adversarial histories (over-return for INV-24, duplicate/out-of-order
+  for GAP-29, head regressions), which build on the same chain model.
 - **Phase 1 — P1 gaps**: GAP-35 (decide tracked-table exclusivity with OQ-8/ADR-16,
   which also unblocks GAP-41), GAP-14 kill-point harness for class T (and the class-A
   no-hook recovery window, an accepted deviation under ADR-15). Exit: register updated,
