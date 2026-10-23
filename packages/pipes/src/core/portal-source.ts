@@ -10,7 +10,7 @@ import {
 } from '~/portal-client/index.js'
 
 import { last } from '../internal/array.js'
-import { stallWatchdog } from '../internal/stall-watchdog.js'
+import { StallWatchdog, stallWatchdog } from '../internal/stall-watchdog.js'
 import {
   ForkCursorMissingError,
   ForkOnFinalizedStreamError,
@@ -23,7 +23,7 @@ import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
-import { QueryBuilder, type Range, hashQuery } from './query-builder.js'
+import { PlannedRangeRequest, PlannedRequest, QueryBuilder, type Range, hashQuery } from './query-builder.js'
 import { ReadOptions, Target, TargetState } from './target.js'
 import { QueryAwareTransformer, Transformer, TransformerArgs, TransformerOptions } from './transformer.js'
 import { BlockCursor, HookContext } from './types.js'
@@ -319,131 +319,149 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       },
     })
 
-    for (const { range, request } of bounded) {
+    for (const { range, request, planners } of bounded) {
       // Anchor the cursor's hash only to the range that continues from it; a later disjoint range
       // doesn't border the cursor and would fault a spurious 409, so it starts unanchored (ADR-20).
-      const isResumeContinuation = cursor?.hash != null && range.from === cursor.number + 1
+      let parentBlockHash = cursor?.hash != null && range.from === cursor.number + 1 ? cursor.hash : undefined
+      let from = range.from
 
-      const query = {
-        ...request,
-        type: this.#queryBuilder.getType(),
-        fields: this.#queryBuilder.getFields(),
-        fromBlock: range.from,
-        toBlock: range.to,
-        parentBlockHash: isResumeContinuation ? cursor.hash : undefined,
-      }
+      // One pass without planners. With planners, one segment per planned request.
+      while (true) {
+        const segment = await this.planSegment({ from, range, request, planners, watchdog })
 
-      // `portal` already enforces finality when the target requires it. Forwarding the effective
-      // value as well keeps the cache contract explicit; a cache that ignores it is still safe.
-      // Passed as the boolean it is — `false` means "this pipe is hot", which a cache deciding what
-      // is safe to persist must be able to tell apart from "the source said nothing".
-      const finalizedStream = portal.finalized
-
-      const source = this.#options.cache
-        ? // use cache if available
-          this.#options.cache.getStream({
-            portal,
-            logger: this.#logger,
-            query,
-            perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
-            finalized: finalizedStream,
-          })
-        : portal.getStream(query, {
-            perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
-            finalized: finalizedStream,
-          })
-
-      let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
-      let readSpan = batchSpan.start('fetch data').addLabels('core')
-      try {
-        watchdog.begin(WAITING_FOR_PORTAL)
-
-        for await (const batch of source) {
-          readSpan.end()
-
-          const blocks = batch.blocks
-
-          // Held until the consumer comes back for the next batch, so it covers the transformers
-          // and everything the target does with this batch, not just the code in this loop.
-          watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
-
-          if (blocks.length > 0) {
-            // Clamp the portal's finalized head through the monotonic watermark before it
-            // reaches any consumer, so a regressed or transiently-missing finalized head can
-            // never un-finalize already-committed data. The rollback chain is derived from the
-            // CLAMPED head so the two stay consistent (clamp can only raise finalized).
-            const finalized = this.#watermark.clamp(batch.head.finalized)
-
-            // TODO WTF with any?
-            const lastBatchBlock = last(blocks as { header: { number: number } }[])
-
-            // The last block this run can reach. A configured end bounds it, but never past the
-            // chain head: a progress denominator above the head is one the run cannot hit, so the
-            // ETA never lands. With no configured end the run just tracks the head. `??` throughout
-            // — block 0 is a valid range end and a valid head.
-            const chainHead = batch.head.latest?.number
-            const runEnd = last(bounded)?.range?.to ?? chainHead ?? finalized?.number ?? Infinity
-            const lastBlockNumber = Math.max(
-              Math.min(runEnd, chainHead ?? Infinity),
-              lastBatchBlock.header?.number ?? -Infinity,
-            )
-
-            const ctx: BatchContext = {
-              id: this.#id,
-              profiler: batchSpan,
-              metrics: this.#metricServer.metrics,
-              logger: this.#logger,
-              stream: {
-                dataset: datasetMetadata,
-                head: {
-                  finalized,
-                  latest: batch.head.latest,
-                },
-                query: {
-                  url: portal.getUrl(),
-                  hash: await hashQuery(query),
-                  raw: query,
-                },
-                state: {
-                  initial,
-                  ranges,
-                  current: cursorFromHeader(lastBatchBlock as any),
-                  last: lastBlockNumber,
-                  rollbackChain: extractRollbackChain({
-                    blocks: batch.blocks,
-                    head: finalized,
-                  }),
-                },
-              },
-              batch: {
-                blocksCount: batch.blocks.length,
-                bytesSize: batch.meta.bytes,
-                requests: batch.meta.requests,
-                lastBlockReceivedAt: batch.meta.lastBlockReceivedAt,
-              },
-            }
-
-            const data = await this.applyTransformers(ctx, batch.blocks as T)
-
-            yield { data, ctx }
-          } else {
-            // Never yielded, so batchEnd won't run.
-            batchSpan.end()
-          }
-
-          batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
-          readSpan = batchSpan.start('fetch data').addLabels('core')
-          watchdog.begin(WAITING_FOR_PORTAL)
+        const query = {
+          ...segment.request,
+          type: this.#queryBuilder.getType(),
+          fields: this.#queryBuilder.getFields(),
+          fromBlock: from,
+          toBlock: segment.to,
+          parentBlockHash,
         }
 
-        watchdog.end()
-      } finally {
-        // The last pair is always armed for a batch that never arrives.
-        readSpan.end()
-        batchSpan.end()
-        // A no-op once the loop has run to completion; on a throw or a cancelled consumer it
-        // stops the clock without claiming the phase recovered.
-        watchdog.abort()
+        // `portal` already enforces finality when the target requires it. Forwarding the effective
+        // value as well keeps the cache contract explicit; a cache that ignores it is still safe.
+        // Passed as the boolean it is — `false` means "this pipe is hot", which a cache deciding what
+        // is safe to persist must be able to tell apart from "the source said nothing".
+        const finalizedStream = portal.finalized
+
+        const source = this.#options.cache
+          ? // use cache if available
+            this.#options.cache.getStream({
+              portal,
+              logger: this.#logger,
+              query,
+              perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
+              finalized: finalizedStream,
+            })
+          : portal.getStream(query, {
+              perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
+              finalized: finalizedStream,
+            })
+
+        let lastDelivered: BlockCursor | undefined
+        let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
+        let readSpan = batchSpan.start('fetch data').addLabels('core')
+        try {
+          watchdog.begin(WAITING_FOR_PORTAL)
+
+          for await (const batch of source) {
+            readSpan.end()
+
+            const blocks = batch.blocks
+
+            // Held until the consumer comes back for the next batch, so it covers the transformers
+            // and everything the target does with this batch, not just the code in this loop.
+            watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
+
+            if (blocks.length > 0) {
+              // Clamp the portal's finalized head through the monotonic watermark before it
+              // reaches any consumer, so a regressed or transiently-missing finalized head can
+              // never un-finalize already-committed data. The rollback chain is derived from the
+              // CLAMPED head so the two stay consistent (clamp can only raise finalized).
+              const finalized = this.#watermark.clamp(batch.head.finalized)
+
+              // TODO WTF with any?
+              const lastBatchBlock = last(blocks as { header: { number: number } }[])
+
+              // The last block this run can reach. A configured end bounds it, but never past the
+              // chain head: a progress denominator above the head is one the run cannot hit, so the
+              // ETA never lands. With no configured end the run just tracks the head. `??` throughout
+              // — block 0 is a valid range end and a valid head.
+              const chainHead = batch.head.latest?.number
+              const runEnd = last(bounded)?.range?.to ?? chainHead ?? finalized?.number ?? Infinity
+              const lastBlockNumber = Math.max(
+                Math.min(runEnd, chainHead ?? Infinity),
+                lastBatchBlock.header?.number ?? -Infinity,
+              )
+
+              const current = cursorFromHeader(lastBatchBlock as any)
+              lastDelivered = current
+
+              const ctx: BatchContext = {
+                id: this.#id,
+                profiler: batchSpan,
+                metrics: this.#metricServer.metrics,
+                logger: this.#logger,
+                stream: {
+                  dataset: datasetMetadata,
+                  head: {
+                    finalized,
+                    latest: batch.head.latest,
+                  },
+                  query: {
+                    url: portal.getUrl(),
+                    hash: await hashQuery(query),
+                    raw: query,
+                  },
+                  state: {
+                    initial,
+                    ranges,
+                    current,
+                    last: lastBlockNumber,
+                    rollbackChain: extractRollbackChain({
+                      blocks: batch.blocks,
+                      head: finalized,
+                    }),
+                  },
+                },
+                batch: {
+                  blocksCount: batch.blocks.length,
+                  bytesSize: batch.meta.bytes,
+                  requests: batch.meta.requests,
+                  lastBlockReceivedAt: batch.meta.lastBlockReceivedAt,
+                },
+              }
+
+              const data = await this.applyTransformers(ctx, batch.blocks as T)
+
+              yield { data, ctx }
+            } else {
+              // Never yielded, so batchEnd won't run.
+              batchSpan.end()
+            }
+
+            batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
+            readSpan = batchSpan.start('fetch data').addLabels('core')
+            watchdog.begin(WAITING_FOR_PORTAL)
+          }
+
+          watchdog.end()
+        } finally {
+          // The last pair is always armed for a batch that never arrives.
+          readSpan.end()
+          batchSpan.end()
+          // A no-op once the loop has run to completion; on a throw or a cancelled consumer it
+          // stops the clock without claiming the phase recovered.
+          watchdog.abort()
+        }
+
+        const segmentEnd = segment.to
+        if (segmentEnd === undefined || segmentEnd === range.to) break
+
+        // Adjacent segments border each other, so the next one is anchored to the last block of this
+        // one. The portal delivers the last block of every range it covers, so that hash is known.
+        parentBlockHash = lastDelivered?.number === segmentEnd ? lastDelivered.hash : undefined
+        from = segmentEnd + 1
       }
     }
 
@@ -477,6 +495,51 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       metrics: this.#metricServer,
       transformers: [...this.#transformers, transformer],
     })
+  }
+
+  /**
+   * Picks the request for the blocks from `from` on: the range's static request merged with what
+   * each of its planners picked, up to the nearest block where one of those answers stops holding.
+   */
+  private async planSegment({
+    from,
+    range,
+    request,
+    planners,
+    watchdog,
+  }: PlannedRangeRequest<any> & { from: number; watchdog: StallWatchdog }): Promise<PlannedRequest<any>> {
+    if (!planners?.length) return { request, to: range.to }
+
+    watchdog.begin(`planning the request from block ${formatBlock(from)}`)
+
+    let planned: PlannedRequest<any>[]
+    try {
+      planned = await Promise.all(
+        planners.map((planner) => planner({ from, to: range.to, portal: this.#portal, logger: this.#logger })),
+      )
+    } catch (error) {
+      watchdog.abort()
+
+      throw error
+    }
+
+    watchdog.end()
+
+    let merged = request
+    let to = range.to
+    for (const answer of planned) {
+      if (answer.to !== undefined) {
+        if (answer.to < from) {
+          throw new Error(`A request planner asked for block ${from} answered with a request that ends at ${answer.to}`)
+        }
+
+        to = to === undefined ? answer.to : Math.min(to, answer.to)
+      }
+
+      merged = this.#queryBuilder.mergeDataRequests(merged, answer.request)
+    }
+
+    return { request: merged, to }
   }
 
   private async applyTransformers(ctx: BatchContext, data: T) {
