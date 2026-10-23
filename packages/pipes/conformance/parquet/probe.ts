@@ -3,8 +3,8 @@ import path from 'node:path'
 
 import { ParquetReader } from '@dsnp/parquetjs'
 
-import type { Cursor, OracleRow, OracleState } from './reference-model.js'
-import { type ParquetSnapshot, type ParquetTableSnapshot, type PublishedUnit, isHeight } from './validators.js'
+import type { Cursor, OracleRow, OracleState } from '../oracle/reference-model.js'
+import { type ParquetSnapshot, type ParquetTableSnapshot, type PublishedUnit, isHeight } from '../oracle/validators.js'
 
 /** IB-22: published data files are `<table>/<from>-<to>.parquet`, both bounds zero-padded to 12 digits. */
 const DATA_FILE = /^(\d{12})-(\d{12})\.parquet$/

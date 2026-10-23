@@ -82,6 +82,11 @@ type CommitPoint = {
   state: OracleState
   records: RollbackRecord[]
   data: OracleRow[]
+  /**
+   * The cursor is a fork's ancestor, untimed from the canonical chain or timed from the retained
+   * history: the store may keep any timestamp on it or none, a free variable the model does not pin.
+   */
+  untimedCursor: boolean
 }
 
 const NO_STATE: OracleState = { current: undefined, finalized: undefined, rollbackChain: [] }
@@ -125,7 +130,7 @@ export class ReferenceModel {
   #records: RollbackRecord[] = []
   #data: OracleRow[] = []
   /** The commit points since the last recovery, oldest first: the states a crash may recover to. */
-  #commits: CommitPoint[] = [{ state: NO_STATE, records: [], data: [] }]
+  #commits: CommitPoint[] = [{ state: NO_STATE, records: [], data: [], untimedCursor: false }]
   /** No transition yet: the model knows nothing of the run, so it adopts the first state it recovers. */
   #fresh = true
 
@@ -217,7 +222,7 @@ export class ReferenceModel {
       this.#data.push(...rows)
       this.#current = blocks.at(-1)
       this.#records.push(this.#record())
-      this.#commit()
+      this.#commit(false)
     })
   }
 
@@ -270,7 +275,7 @@ export class ReferenceModel {
       this.#current = ancestor
       this.#rollbackChain = this.#rollbackChain.filter((block) => block.number <= ancestor.number)
       this.#records.push(this.#record())
-      this.#commit()
+      this.#commit(true)
     })
 
     return ancestor
@@ -323,8 +328,9 @@ export class ReferenceModel {
     return { rollbackChain: [...this.#rollbackChain], finalized: this.#finalized }
   }
 
-  #commit(): void {
-    this.#commits.push({ state: this.readState(), records: [...this.#records], data: [...this.#data] })
+  #commit(untimedCursor: boolean): void {
+    const point = { state: this.readState(), records: [...this.#records], data: [...this.#data], untimedCursor }
+    this.#commits.push(point)
     this.#fresh = false
   }
 
@@ -332,11 +338,18 @@ export class ReferenceModel {
   #committedPoint(persisted: PersistedState | undefined): CommitPoint {
     const candidates = this.#checkpointed ? this.#commits : this.#commits.slice(-2)
     const recovered = stateOf(persisted)
+    const sameState = (candidate: CommitPoint) => {
+      const committed = stateOf(candidate.state)
+
+      return candidate.untimedCursor
+        ? isDeepStrictEqual(untimed(committed), untimed(recovered))
+        : isDeepStrictEqual(committed, recovered)
+    }
     const point = [...candidates]
       .reverse()
       .find(
         (candidate) =>
-          isDeepStrictEqual(stateOf(candidate.state), recovered) &&
+          sameState(candidate) &&
           (persisted?.records === undefined || isDeepStrictEqual(candidate.records, persisted.records)),
       )
     if (point) {
@@ -359,7 +372,7 @@ export class ReferenceModel {
     }
 
     // Shared tables cannot tell an orphan from another pipe's rows, so the guard must not run.
-    return { state: NO_STATE, records: [], data: [] }
+    return { state: NO_STATE, records: [], data: [], untimedCursor: false }
   }
 
   /** Applies a transition and checks INV-1…INV-5 on the result. A refused result is undone. */
@@ -522,6 +535,15 @@ function stateOf(state: OracleState | undefined): OracleState {
   return { current: state.current, finalized: state.finalized, rollbackChain: state.rollbackChain }
 }
 
+/** `state` with its cursor reduced to number and hash. */
+function untimed(state: OracleState): OracleState {
+  if (state.current === undefined) {
+    return state
+  }
+
+  return { ...state, current: { number: state.current.number, hash: state.current.hash } }
+}
+
 /** The commit point of a state written before the model saw the run: its rows are not the model's. */
 function adopted(persisted: PersistedState | undefined): CommitPoint {
   const state = stateOf(persisted)
@@ -529,7 +551,7 @@ function adopted(persisted: PersistedState | undefined): CommitPoint {
   const derived = rollbackChain.length ? [{ rollbackChain, finalized: state.finalized }] : []
   const records = persisted?.records !== undefined ? [...persisted.records] : derived
 
-  return { state: { ...state, rollbackChain }, records, data: [] }
+  return { state: { ...state, rollbackChain }, records, data: [], untimedCursor: false }
 }
 
 function requireBlocks(source: string, cursors: readonly Cursor[]): void {

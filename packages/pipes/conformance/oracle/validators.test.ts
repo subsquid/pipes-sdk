@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import type { OracleState } from './reference-model.js'
+import type { OracleRow, OracleState } from './reference-model.js'
 import {
+  type PostgresSnapshot,
   type PublishedUnit,
+  type SyncRecord,
   type Violation,
   nextInRanges,
   nextOutsideRanges,
@@ -13,6 +15,7 @@ import {
   validateLinked,
   validateOrdered,
   validateParquetSnapshot,
+  validatePostgresSnapshot,
   validateResidue,
   validateRouteMode,
   validateSequence,
@@ -420,6 +423,96 @@ describe('structural validators', () => {
       const violations = validateParquetSnapshot({ state, tables, residue: [] }, [])
 
       expect(messagesOf(violations)).toEqual(['the state null is not a record'])
+    })
+  })
+  describe('validatePostgresSnapshot', () => {
+    const sync = (number: number, floor?: number, chain: number[] = []): SyncRecord => ({
+      current: cursor(number),
+      finalized: floor === undefined ? undefined : cursor(floor),
+      rollbackChain: chain.map(cursor),
+    })
+    const tableRows = (table: string, ...blocks: number[]): OracleRow[] =>
+      blocks.map((block) => ({ table, block, value: block }))
+    const snapshotOf = (
+      records: SyncRecord[],
+      tables: PostgresSnapshot['tables'],
+      state: OracleState | undefined = records.at(-1) && { ...records.at(-1), rollbackChain: [] },
+    ): PostgresSnapshot => ({ sync: records, state, records: [], tables })
+
+    it('passes a store whose rows, undo log and sync rows all sit at or below the cursor', () => {
+      const snapshot = snapshotOf([sync(4, 2, [3, 4]), sync(9, 4, [9])], {
+        transfers: { rows: tableRows('transfers', 1, 5, 9), undo: [3, 9] },
+      })
+
+      expect(validatePostgresSnapshot(snapshot, [{ from: 0, to: 9 }])).toEqual([])
+    })
+
+    it('runs every store validator over the snapshot, table by table', () => {
+      const snapshot = snapshotOf([sync(3, 1)], {
+        transfers: { rows: tableRows('transfers', 0, 4, 2), undo: [3, 4] },
+        approvals: { rows: tableRows('approvals', 7), undo: [] },
+      })
+
+      const violations = validatePostgresSnapshot(snapshot, [{ from: 0, to: 4 }])
+
+      expect(messagesOf(violations)).toEqual([
+        'transfers: the undo log holds records of blocks 4, above the cursor 3',
+        'transfers: attribution descends at index 2: 4 → 2',
+        'approvals: a row at 7 falls outside every configured range',
+        'the committed data reaches 7, above the cursor 3',
+      ])
+    })
+
+    it('checks every sync row as a commit point of its own (INV-5, INV-1)', () => {
+      const malformed = { current: null, finalized: cursor(2), rollbackChain: [] } as unknown as SyncRecord
+      const snapshot = snapshotOf([sync(4, 2, [2, 5]), malformed, sync(9, 4)], {
+        transfers: { rows: [], undo: [] },
+      })
+
+      const violations = validatePostgresSnapshot(snapshot, [])
+
+      expect(messagesOf(violations)).toEqual([
+        'sync row 0: rollback chain entry 2 is at or below the floor 2',
+        'sync row 0: rollback chain entry 5 is above the cursor 4',
+        'sync row 1: the cursor null is not a block',
+      ])
+    })
+
+    it('refuses a floor that goes down from one sync row to the next (INV-12)', () => {
+      const snapshot = snapshotOf([sync(4, 3), sync(6), sync(9, 2)], { transfers: { rows: [], undo: [] } })
+
+      const violations = validatePostgresSnapshot(snapshot, [])
+
+      expect(messagesOf(violations)).toEqual(['the floor goes down from 3 to -1 at sync row 1'])
+    })
+
+    it('refuses rows or undo records with no state: no commit accounts for them (CN-44, INV-42)', () => {
+      const snapshot = snapshotOf([], {
+        transfers: { rows: tableRows('transfers', 1), undo: [] },
+        approvals: { rows: [], undo: [0] },
+      })
+
+      const violations = validatePostgresSnapshot(snapshot, [])
+
+      expect(messagesOf(violations)).toEqual([
+        'transfers: the table holds rows, but the store holds no state',
+        'approvals: the undo log holds records of blocks 0, above the cursor -1',
+      ])
+    })
+
+    it('checks the assembled state, a chain that repeats a block included', () => {
+      const state = { current: cursor(9), finalized: cursor(2), rollbackChain: [3, 3, 9].map(cursor) }
+      const snapshot = snapshotOf([sync(9, 2)], { transfers: { rows: [], undo: [] } }, state)
+
+      const violations = validatePostgresSnapshot(snapshot, [])
+
+      expect(messagesOf(violations)).toEqual(['the rollback chain does not ascend at 3'])
+    })
+
+    it('refuses a snapshot that reads no table, which every table check would pass', () => {
+      const violations = validatePostgresSnapshot(snapshotOf([], {}), [])
+
+      expect(messagesOf(violations)).toEqual(['the snapshot reads no table'])
     })
   })
 })

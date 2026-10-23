@@ -1,4 +1,4 @@
-import type { DurabilityClass, OracleState } from './reference-model.js'
+import type { Cursor, DurabilityClass, OracleRow, OracleState, RollbackRecord } from './reference-model.js'
 
 /** A structural rule an emission or a persisted state breaks. */
 export type Violation = {
@@ -567,6 +567,107 @@ export function validateParquetSnapshot(snapshot: ParquetSnapshot, ranges: reado
   }
 
   violations.push(...validateResidue(residue))
+
+  if (state !== undefined) {
+    const dataBound = rows.length ? rows.reduce((max, row) => Math.max(max, row.block), 0) : undefined
+
+    violations.push(...validateWatermarks(state, { dataBound }))
+  }
+
+  return violations
+}
+
+/** One IB-21 sync row: the cursor it was written under, its floor, and its batch's chain fragment. */
+export type SyncRecord = {
+  current: Cursor
+  finalized: Cursor | undefined
+  /** The fragment of the batch the row committed; the full chain is assembled from every row (DEF-7). */
+  rollbackChain: Cursor[]
+}
+
+/** One table of a class-T store, as one snapshot read it. */
+export type PostgresTableSnapshot<Row extends Attributed = OracleRow> = {
+  rows: Row[]
+  /** The block tag of each record in the table's undo log (CN-30). */
+  undo: number[]
+}
+
+/**
+ * One read of a class-T store: the pipe's sync rows, the state assembled from them, and every
+ * declared table. Every field is required, so no check can be skipped by leaving its input out.
+ */
+export type PostgresSnapshot<Table extends string = string, Row extends Attributed = OracleRow> = {
+  /** The pipe's sync rows, oldest first. */
+  sync: SyncRecord[]
+  /** ⟨C, F, RC⟩ from the newest row, RC assembled from every row; `undefined` only with no row. */
+  state: OracleState | undefined
+  /** One ⟨RC, F⟩ per sync row, oldest first, each RC assembled up to its row. */
+  records: RollbackRecord[]
+  /** Every declared table, by name, in declaration order. */
+  tables: Record<Table, PostgresTableSnapshot<Row>>
+}
+
+/** Every structural validator a class-T store answers to, over one snapshot of it. */
+export function validatePostgresSnapshot(snapshot: PostgresSnapshot, ranges: readonly BlockRange[]): Violation[] {
+  const { sync, state, tables } = snapshot
+  const entries = Object.entries<PostgresTableSnapshot>(tables)
+  const violations: Violation[] = []
+
+  // With no table read, every per-table check below would pass vacuously.
+  if (!entries.length) {
+    violations.push({ validator: 'decodable', property: 'IB-21', message: 'the snapshot reads no table' })
+  }
+
+  // Every sync row is a commit point, so each must be a sound state of its own.
+  sync.forEach((record, index) => {
+    const found = validateWatermarks(record)
+
+    violations.push(...found.map((violation) => ({ ...violation, message: `sync row ${index}: ${violation.message}` })))
+  })
+
+  // INV-12: from the oldest row to the newest, the floor never goes down.
+  const floors = sync.map((record) => record.finalized?.number ?? -1)
+  const lowered = floors.findIndex((floor, i) => i > 0 && floor < floors[i - 1])
+  if (lowered > 0) {
+    violations.push({
+      validator: 'watermark-coherence',
+      property: 'INV-12',
+      message: `the floor goes down from ${floors[lowered - 1]} to ${floors[lowered]} at sync row ${lowered}`,
+    })
+  }
+
+  // A cursor that is not a block bounds nothing; validateWatermarks reports it.
+  const current = state?.current
+  const cursor = isBlockCursor(current) ? current.number : -1
+  const rows: Attributed[] = []
+
+  for (const [table, { rows: tableRows, undo }] of entries) {
+    const found: Violation[] = []
+
+    // CN-44: rows that no state accounts for are orphans.
+    if (state === undefined && tableRows.length) {
+      found.push({
+        validator: 'watermark-coherence',
+        property: 'CN-44',
+        message: 'the table holds rows, but the store holds no state',
+      })
+    }
+
+    // INV-42: the undo log is written in the batch's own transaction, so a record above the cursor belongs to no commit.
+    const strayUndo = undo.filter((block) => block > cursor)
+    if (strayUndo.length) {
+      found.push({
+        validator: 'no-residue',
+        property: 'INV-42',
+        message: `the undo log holds records of blocks ${strayUndo.join(', ')}, above the cursor ${cursor}`,
+      })
+    }
+
+    found.push(...validateOrdered(tableRows), ...validateInRange(tableRows, ranges))
+
+    violations.push(...found.map((violation) => ({ ...violation, message: `${table}: ${violation.message}` })))
+    rows.push(...tableRows)
+  }
 
   if (state !== undefined) {
     const dataBound = rows.length ? rows.reduce((max, row) => Math.max(max, row.block), 0) : undefined

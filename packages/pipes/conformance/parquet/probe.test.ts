@@ -5,7 +5,7 @@ import path from 'node:path'
 import { ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { it as base, describe, expect } from 'vitest'
 
-import { readParquetSnapshot, rowsOf } from './parquet-probe.js'
+import { readParquetSnapshot, rowsOf } from './probe.js'
 
 const PIPE_ID = 'probe'
 const BEYOND_DOUBLE = 9007199254740993n

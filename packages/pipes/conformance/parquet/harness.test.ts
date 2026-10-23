@@ -4,10 +4,10 @@ import path from 'node:path'
 import { ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { describe, expect } from 'vitest'
 
-import { runKilled } from './kill-points.js'
+import { cursorAt, s1Oracle } from '../scenarios/backfill.js'
+import { PIPE_ID } from '../scenarios/erc20.js'
+import { it, runKilled } from './harness.js'
 import type { KillPoint } from './kill-switch.js'
-import { PIPE_ID, cursorAt, s1Oracle } from './s1.js'
-import { it } from './s1-harness.js'
 
 const STATE_RENAME: KillPoint = {
   name: 'never',
@@ -18,16 +18,16 @@ const STATE_RENAME: KillPoint = {
 }
 
 describe('runKilled', () => {
-  it('refuses a run that ends before its kill point fires', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('refuses a run that ends before its kill point fires', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
 
     const run = runKilled({ simulator, dir, model: s1Oracle(), point: STATE_RENAME })
 
     await expect(run).rejects.toThrow("the run ended before the kill point 'never' fired")
   })
 
-  it('refuses a run that fails before its kill point fires', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('refuses a run that fails before its kill point fires', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
     // A directory where the pipe writes its state fails its first checkpoint.
     await mkdir(path.join(dir, `.tmp-state-_sqd_parquet_state.${PIPE_ID}.json`))
 
@@ -36,8 +36,8 @@ describe('runKilled', () => {
     await expect(run).rejects.toThrow(/the run failed \(exit 1, signal null\) before the kill point 'never' fired/)
   })
 
-  it('refuses a run that fails before its first batch, which leaves no journal', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('refuses a run that fails before its first batch, which leaves no journal', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
     // A unit that straddles the cursor and starts where no coverage says: recovery refuses it (E2317).
     const schema = new ParquetSchema({ blockNumber: { type: 'INT64' }, value: { type: 'UTF8' } })
     await mkdir(path.join(dir, 'transfers'))

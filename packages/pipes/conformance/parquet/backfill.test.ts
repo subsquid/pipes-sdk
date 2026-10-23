@@ -4,13 +4,14 @@ import path from 'node:path'
 
 import { describe, expect, vi } from 'vitest'
 
-import { type ParquetUnit, rowsOf } from './parquet-probe.js'
-import { RANGES, S1, S1_ROWS, TABLE_NAMES, cursorAt, s1Oracle } from './s1.js'
-import { type S1Store, endStateOf, it, readStore, runS1 } from './s1-harness.js'
-import { validateParquetSnapshot } from './validators.js'
+import { validateParquetSnapshot } from '../oracle/validators.js'
+import { RANGES, S1, S1_ROWS, cursorAt, s1Oracle } from '../scenarios/backfill.js'
+import { TABLE_NAMES } from '../scenarios/erc20.js'
+import { type ParquetStore, it, readParquetStore, runToEnd } from './harness.js'
+import { type ParquetUnit, rowsOf } from './probe.js'
 
 /** Every unit the store holds, table by table. */
-function unitsOf(store: S1Store): ParquetUnit[] {
+function unitsOf(store: ParquetStore): ParquetUnit[] {
   return TABLE_NAMES.flatMap((table) => store.tables[table].units)
 }
 
@@ -29,37 +30,34 @@ async function snapshotFiles(dir: string): Promise<Record<string, string>> {
 }
 
 /**
- * CT-1 on S1: simulator ↔ oracle lockstep, the structural validators, and a quiescence diff of the
- * sink store and the oracle against S1's fixed end state (spec/13). Every run makes all three
- * checks (`runS1`); each test adds the claim it is named for. The run is bounded, so quiescence is
- * its end.
+ * One uninterrupted run of S1 into Parquet (CT-1). `runToEnd` fails any run that does not end in
+ * S1's end state: the store and the oracle both hold every row of S1, the cursor at the range end
+ * and the last floor reported, and the store passes every structural validator. Each test adds the
+ * claim in its title.
  */
-describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
+describe('Parquet (class K) · S1 backfill · one uninterrupted run (CT-1)', () => {
   it('leaves exactly S1 in the store: every row, the cursor at the range end, the last floor', async ({
-    simulate,
+    simulateS1,
     dir,
   }) => {
-    const simulator = await simulate()
+    const simulator = await simulateS1()
 
-    const store = await runS1({ simulator, dir })
-    const rows = rowsOf(store)
-
-    expect(store.state).toStrictEqual(endStateOf(simulator))
-    expect(rows).toEqual(S1_ROWS)
+    // The claim is the end state itself, which `runToEnd` checks.
+    await runToEnd({ simulator, dir })
   })
 
-  it('leaves exactly S1 on a dataset without finality, with no floor (DEF-15, WP-47)', async ({ simulate, dir }) => {
-    const simulator = await simulate({ finalized: null })
+  it('leaves exactly S1 on a dataset without finality, with no floor (DEF-15, WP-47)', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1({ finalized: null })
 
-    const store = await runS1({ simulator, dir })
+    const store = await runToEnd({ simulator, dir })
 
     expect(store.state).toStrictEqual({ current: cursorAt(S1.to), finalized: undefined, rollbackChain: [] })
   })
 
-  it('passes every structural validator over many units and many requests', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('passes every structural validator over many units and many requests', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
 
-    const store = await runS1({ simulator, dir })
+    const store = await runToEnd({ simulator, dir })
     const violations = validateParquetSnapshot(store, RANGES)
     const fewestUnits = Math.min(...TABLE_NAMES.map((table) => store.tables[table].units.length))
 
@@ -70,14 +68,14 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
   })
 
   it('tiles the whole range in every table, the empty tail as a unit of its own (INV-4, RP-21)', async ({
-    simulate,
+    simulateS1,
     dir,
   }) => {
     const model = s1Oracle()
 
     // The source can merge responses into one batch, which would put the tail in the last row's
     // window. Holding the tail's request until that row is delivered gives the tail its own batch.
-    const simulator = await simulate({
+    const simulator = await simulateS1({
       delay: async ({ query }) => {
         if (query.fromBlock > S1.lastRow) {
           await vi.waitFor(() => expect(model.readState().current?.number).toBeGreaterThanOrEqual(S1.lastRow))
@@ -85,7 +83,7 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
       },
     })
 
-    const store = await runS1({ simulator, dir, model })
+    const store = await runToEnd({ simulator, dir, model })
     const tiling = TABLE_NAMES.map((table) => {
       const { units, next } = store.tables[table]
       const tail = units.at(-1)
@@ -106,10 +104,10 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     expect(tiling).toEqual(whole)
   })
 
-  it('anchors each request on the hash of the block before it (IB-3)', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('anchors each request on the hash of the block before it (IB-3)', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
 
-    await runS1({ simulator, dir })
+    await runToEnd({ simulator, dir })
 
     const anchors = simulator.chain.requests
       .filter((request) => request.query.fromBlock > S1.from)
@@ -123,10 +121,10 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     expect(unanchored).toEqual([])
   })
 
-  it('asks for nothing outside the configured range (INV-24)', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('asks for nothing outside the configured range (INV-24)', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
 
-    await runS1({ simulator, dir })
+    await runToEnd({ simulator, dir })
 
     const requests = simulator.chain.requests
     const outside = requests.filter((request) => request.query.fromBlock < S1.from || request.query.toBlock !== S1.to)
@@ -135,15 +133,15 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     expect(outside).toEqual([])
   })
 
-  it('commits the same rows however the portal cuts its responses (INV-22)', async ({ simulate, dir }) => {
-    const coarse = await simulate({ blocksPerResponse: 13 })
-    const fine = await simulate({ blocksPerResponse: 3 })
+  it('commits the same rows however the portal cuts its responses (INV-22)', async ({ simulateS1, dir }) => {
+    const coarse = await simulateS1({ blocksPerResponse: 13 })
+    const fine = await simulateS1({ blocksPerResponse: 3 })
     const second = await mkdtemp(path.join(tmpdir(), 'sqd-ct1-'))
 
     try {
-      const a = await runS1({ simulator: coarse, dir })
-      const b = await runS1({ simulator: fine, dir: second })
-      const unitNames = (store: S1Store) => unitsOf(store).map((unit) => unit.name)
+      const a = await runToEnd({ simulator: coarse, dir })
+      const b = await runToEnd({ simulator: fine, dir: second })
+      const unitNames = (store: ParquetStore) => unitsOf(store).map((unit) => unit.name)
       const rowsA = rowsOf(a)
       const rowsB = rowsOf(b)
 
@@ -156,29 +154,29 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     }
   })
 
-  it('changes nothing on a restart with nothing left to read (INV-10)', async ({ simulate, dir }) => {
-    const simulator = await simulate()
+  it('changes nothing on a restart with nothing left to read (INV-10)', async ({ simulateS1, dir }) => {
+    const simulator = await simulateS1()
     const model = s1Oracle()
 
-    await runS1({ simulator, dir, model })
+    await runToEnd({ simulator, dir, model })
     const before = await snapshotFiles(dir)
     const units = Object.keys(before).filter((file) => file.endsWith('.parquet'))
 
-    await runS1({ simulator, dir, model })
+    await runToEnd({ simulator, dir, model })
     const after = await snapshotFiles(dir)
 
     expect(units.length).toBeGreaterThan(1)
     expect(after).toEqual(before)
   })
 
-  it('delivers no block before it is final, and the rest once it is (INV-25)', async ({ simulate, dir }) => {
+  it('delivers no block before it is final, and the rest once it is (INV-25)', async ({ simulateS1, dir }) => {
     const lag = 30
-    const simulator = await simulate({ finalized: lag })
+    const simulator = await simulateS1({ finalized: lag })
     const model = s1Oracle()
 
     // The floor stays at the lag until stage 3 moves it, so a run that ends before then stopped early.
     let released = false
-    const run = runS1({ simulator, dir, model }).then((store) => {
+    const run = runToEnd({ simulator, dir, model }).then((store) => {
       if (!released) {
         throw new Error(`the run ended while the floor was ${lag}, before the range end ${S1.to}`)
       }
@@ -198,7 +196,7 @@ describe('CT-1 · S1 steady backfill · class K (Parquet)', () => {
     await Promise.race([run, polling])
 
     // Stage 2: nothing above the floor reached the store. Whether it has checkpointed yet is free.
-    const early = await readStore(dir)
+    const early = await readParquetStore(dir)
     const earlyCursor = early.state?.current?.number ?? -1
     const earlyBound = Math.max(-1, ...rowsOf(early).map((row) => row.block))
 

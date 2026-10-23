@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
 import path from 'node:path'
 
-import type { Observation } from './s1.js'
+import type { Observation } from '../scenarios/erc20.js'
 
 /** A step of the commit protocol, named by the file operation the kill lands on (FM-30, FM-31). */
 export type KillPoint =
@@ -38,6 +38,7 @@ export type JournalEntry = { batch: Observation } | { killed: string }
 
 /** What the parent hands the child, as JSON in its one argument. */
 export type KillRunOptions = {
+  range: { from: number; to: number }
   url: string
   dir: string
   journal: string

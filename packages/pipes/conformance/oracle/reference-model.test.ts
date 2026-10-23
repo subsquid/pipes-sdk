@@ -396,6 +396,60 @@ describe('ReferenceModel', () => {
       expect(blocksOf(postFork)).toEqual([0, 1, 2])
     })
 
+    it('takes any timestamp on the cursor a fork rolled back to, and pins every other field (CN-34)', () => {
+      const forked = () => {
+        const model = new ReferenceModel({ durability: 'T' })
+        model.batch(chain(0, 5), { finalized: block(1) })
+        model.fork([...chain(0, 2), ...chain(3, 6, 'b')])
+
+        return model
+      }
+      const postFork = { current: block(2), finalized: block(1), rollbackChain: [block(2)] }
+      const timed = { ...postFork, current: { ...block(2), timestamp: 2000 } }
+      const timedBatchEnd = {
+        current: { ...block(5), timestamp: 5000 },
+        finalized: block(1),
+        rollbackChain: chain(2, 5),
+      }
+      const otherFloor = { ...timed, finalized: block(0) }
+
+      const recovering = (state: PersistedState) => {
+        const model = forked()
+
+        return refusal(model, () => model.recover(state))
+      }
+
+      const accepted = recovering(timed)
+      const refusals = [timedBatchEnd, otherFloor].map(recovering)
+
+      expect(accepted).toBeUndefined()
+      expect(refusals).toEqual([ORACLE_ERRORS.STATE_UNCOMMITTED, ORACLE_ERRORS.STATE_UNCOMMITTED])
+    })
+
+    it('takes any timestamp on a deep fork’s ancestor, which comes timed from the retained history (CN-34)', () => {
+      const timed = (cursor: Cursor) => ({ ...cursor, timestamp: cursor.number * 1000 })
+      const forked = () => {
+        const model = new ReferenceModel({ durability: 'T' })
+        model.batch(chain(0, 5).map(timed), { finalized: block(1) })
+        // The window replaces every block it holds, so the search restarts below it (WP-42 deep fork).
+        model.fork(chain(4, 6, 'b'))
+
+        return model
+      }
+      const own = forked().readState()
+      const states = [own, { ...own, current: block(3) }, { ...own, current: { ...block(3), timestamp: 1 } }]
+
+      const recovering = (state: PersistedState) => {
+        const model = forked()
+
+        return refusal(model, () => model.recover(state))
+      }
+      const refusals = states.map(recovering)
+
+      expect(own.current).toEqual(timed(block(3)))
+      expect(refusals).toEqual([undefined, undefined, undefined])
+    })
+
     it('refuses a commit point from before the last recovery, which a later crash cannot reach (CN-40)', () => {
       const model = new ReferenceModel({ durability: 'K' })
       model.batch(chain(0, 1))
