@@ -2,6 +2,25 @@ import { IncomingMessage, Server, ServerResponse, createServer } from 'http'
 
 import { Portal } from '~/core/query-builder.js'
 
+import {
+  type ChainAnswer,
+  type ChainBlock,
+  type ChainFault,
+  type ChainRequest,
+  PortalChain,
+  type StreamEndpoint,
+} from './portal-chain.js'
+import {
+  LOOPBACK,
+  WireHead,
+  getServerAddress,
+  headHeaders,
+  listen,
+  readBody,
+  writeBlocks,
+  writeMetadata,
+} from './portal-wire.js'
+
 type ValidateRequest = (res: any) => unknown
 
 export type MockResponse =
@@ -57,15 +76,186 @@ export type MockPortal = {
   close(): Promise<void>
 }
 
+/** A block of the mock chain: a header plus the item lists of its network (`logs`, `instructions`, …). */
+export type MockPortalBlock = ChainBlock
+
+/** A stream request the mock portal received, with the status it answered. */
+export type MockPortalRequest = ChainRequest
+
+/** A transport failure the mock portal serves instead of the next answers. */
+export type MockPortalFault = ChainFault
+
+export type MockPortalOptions = {
+  /** Blocks with data. Every other block number up to the head exists as an empty block. */
+  blocks?: MockPortalBlock[]
+  /** The latest head. Defaults to the highest block in `blocks`. */
+  latest?: number
+  /** The finalized head. `null` makes the dataset report none. Defaults to the latest head. */
+  finalized?: number | null
+  /** `metadata.kind` of the dataset. Defaults to `evm`. */
+  kind?: string
+  /** The most blocks one response covers, like a worker chunk. Defaults to the whole request. */
+  blocksPerResponse?: number
+  /** How many canonical blocks a 409 carries in `previousBlocks`. Defaults to 10. */
+  previousBlocks?: number
+  /** Answers 400 to a query whose log requests carry more addresses than this in total. */
+  maxAddresses?: number
+  /** Called before a stream request is answered, to hold it back. */
+  delay?: (request: { endpoint: StreamEndpoint; query: MockPortalRequest['query'] }) => Promise<void> | void
+}
+
+export type MockChainPortal = MockPortal & {
+  /** Every stream request, in the order the portal received them, with the status it got. */
+  requests: MockPortalRequest[]
+  /** Extends the chain above the head and moves the head to the last new block. */
+  append(...blocks: MockPortalBlock[]): void
+  /**
+   * Replaces every block above `at` with `branch` and new empty blocks. A request anchored on a
+   * replaced block then gets a 409. Blocks in `branch` need hashes of their own.
+   */
+  fork(at: number, branch?: MockPortalBlock[]): void
+  setHead(head: { latest?: number; finalized?: number | null }): void
+  /** Answers the next stream requests with a failure instead of data. */
+  fail(fault: MockPortalFault): void
+}
+
 export async function finalizedMockPortal(mockResponses: MockResponse[]) {
   return mockPortal(mockResponses, {
     finalized: true,
   })
 }
 
-export async function mockPortal(
+// The list form comes first and again last, so code written against the list-only signature keeps
+// compiling: inference inside an argument (`mockPortal(items.map(...))`) settles on the first
+// overload, while `Parameters<typeof mockPortal>` and `ReturnType` read the last one.
+/**
+ * Starts a local portal.
+ *
+ * Given options, it answers every request from a chain it holds, the way the real portal does:
+ * it filters EVM logs, transactions, traces and state diffs by the query and its relation flags,
+ * reports heads, answers 204 at the head and 409 to a parent hash that is not on the chain. A
+ * restarted pipe, a fork, or a re-request therefore needs no scripted response.
+ *
+ * Given a list of responses, it answers stream requests with them in order, and with 500 after the
+ * list ends. Use it to send an exact response, such as a malformed one.
+ *
+ * @example
+ * ```ts
+ * const portal = await mockPortal({
+ *   blocks: [mockBlock({ number: 10, transactions: [{ logs: [event] }] })],
+ *   finalized: 5,
+ *   latest: 20,
+ * })
+ *
+ * portal.fork(7)
+ * portal.append(mockBlock({ number: 21 }))
+ * ```
+ */
+export function mockPortal(mockResponses: MockResponse[], options?: { finalized?: boolean }): Promise<MockPortal>
+export function mockPortal(options: MockPortalOptions): Promise<MockChainPortal>
+export function mockPortal(mockResponses: MockResponse[], options?: { finalized?: boolean }): Promise<MockPortal>
+export function mockPortal(
+  input: MockResponse[] | MockPortalOptions,
+  options: { finalized?: boolean } = {},
+): Promise<MockPortal | MockChainPortal> {
+  return Array.isArray(input) ? scriptedPortal(input, options) : chainPortal(input)
+}
+
+async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal> {
+  const chain = new PortalChain(options)
+
+  const handle = async (req: IncomingMessage, res: ServerResponse) => {
+    const body = await readBody(req)
+    const url = req.url ?? ''
+
+    if (url.startsWith('/metadata')) {
+      writeMetadata(res, options.kind ?? 'evm')
+
+      return
+    }
+
+    if (url === '/head' || url === '/finalized-head') {
+      const number = url === '/head' ? chain.latest : chain.finalized
+      // The client reads a `null` body as "no head"; a 404 would fail the request instead.
+      const head = number === null ? null : { number, hash: chain.hash(number) }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(head))
+
+      return
+    }
+
+    if (url === '/stream' || url === '/finalized-stream') {
+      const endpoint: StreamEndpoint = url === '/stream' ? 'stream' : 'finalized-stream'
+      const query = JSON.parse(body)
+
+      const request = chain.receive(endpoint, query)
+      await options.delay?.({ endpoint, query })
+      writeAnswer(res, chain.answer(request), chain.head())
+
+      return
+    }
+
+    res.writeHead(404)
+    res.end()
+  }
+
+  const server = await listen((req, res) => {
+    handle(req, res).catch((error) => {
+      res.writeHead(500)
+      res.end(String(error))
+    })
+  })
+
+  return {
+    server,
+    url: getServerAddress(server),
+    requests: chain.requests,
+    append: (...blocks) => chain.append(blocks),
+    fork: (at, branch) => chain.fork(at, branch),
+    setHead: (head) => chain.setHead(head),
+    fail: (fault) => chain.fail(fault),
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        // A held-back request would otherwise keep the server open.
+        server.closeAllConnections()
+        server.close((err) => (err ? reject(err) : resolve()))
+      }),
+  }
+}
+
+function writeAnswer(res: ServerResponse, answer: ChainAnswer, head: WireHead) {
+  switch (answer.kind) {
+    case 'blocks':
+      writeBlocks(res, answer.blocks, head)
+      res.end()
+      break
+
+    case 'at-head':
+      res.writeHead(204, headHeaders(head))
+      res.end()
+      break
+
+    case 'fork':
+      res.writeHead(409, { 'Content-Type': 'application/json', ...headHeaders(head) })
+      res.end(JSON.stringify({ previousBlocks: answer.previousBlocks }))
+      break
+
+    case 'refused':
+      res.writeHead(400, headHeaders(head))
+      res.end(answer.message)
+      break
+
+    case 'fault':
+      res.writeHead(answer.status, answer.retryAfter != null ? { 'Retry-After': answer.retryAfter } : {})
+      res.end()
+      break
+  }
+}
+
+async function scriptedPortal(
   mockResponses: MockResponse[],
-  { finalized = false }: { finalized?: boolean } = {},
+  { finalized = false }: { finalized?: boolean },
 ): Promise<MockPortal> {
   const promise = new Promise<Server>((resolve, reject) => {
     let requestCount = 0
@@ -74,19 +264,8 @@ export async function mockPortal(
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       if (req.url?.startsWith('/metadata')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.write(
-          JSON.stringify({
-            dataset: 'mock-dataset',
-            aliases: [],
-            real_time: true,
-            start_block: 0,
-            metadata: {
-              kind: 'evm',
-            },
-          }),
-        )
-        res.end()
+        writeMetadata(res, 'evm')
+
         return
       } else if (req.url !== streamUrl) {
         res.statusCode = 404
@@ -117,25 +296,7 @@ export async function mockPortal(
 
         switch (mockResp.statusCode) {
           case 200:
-            const headers: Record<string, string | number> = {
-              'Content-Type': 'application/jsonl',
-            }
-            // `!= null`: block 0 is a valid head; dropping the header would hide finality entirely.
-            if (mockResp.head?.finalized?.number != null) {
-              headers['X-Sqd-Finalized-Head-Number'] = mockResp.head.finalized.number
-            }
-            if (mockResp.head?.finalized?.hash != null) {
-              headers['X-Sqd-Finalized-Head-Hash'] = mockResp.head.finalized.hash
-            }
-            if (mockResp.head?.latest?.number != null) {
-              headers['X-Sqd-Head-Number'] = mockResp.head.latest.number
-            }
-
-            res.writeHead(mockResp.statusCode, headers)
-            // Send each mock data item as a JSON line
-            mockResp.data.forEach((data) => {
-              res.write(JSON.stringify(data) + '\n')
-            })
+            writeBlocks(res, mockResp.data, mockResp.head)
             break
 
           case 409:
@@ -153,8 +314,7 @@ export async function mockPortal(
       })
     })
 
-    server.listen(0, () => {
-      // console.log(`Listening ${getServerAddress(server)}`);
+    server.listen(0, LOOPBACK, () => {
       resolve(server)
     })
 
@@ -178,14 +338,6 @@ export async function mockPortal(
   }
 
   return portal
-}
-
-function getServerAddress(server: Server): string {
-  const address = server.address()
-  if (!address || typeof address === 'string') {
-    throw new Error('Invalid server address')
-  }
-  return `http://127.0.0.1:${address.port}`
 }
 
 /** @internal */
