@@ -40,7 +40,8 @@ cursor. Recovery: on every resume the sink invokes the repair hook (`recovery`, 
 cursor) which MUST remove rows above the cursor before streaming resumes. Delivery:
 at-least-once at the storage layer, effectively exactly-once **iff** the repair
 obligation (RP-42) is met. *(Hook optional by design — the binding is schema-blind; its
-absence is warned, not repaired: an accepted deviation, ADR-15.)*
+absence is warned, not repaired: an accepted deviation, ADR-15. With no cursor persisted
+yet, the hook is never called, so a crash in the first batch is not repaired — GAP-44.)*
 
 **CN-14 — Class ∅ (ephemeral).** No persistence; every run is a cold start; only
 rows delivered by the finalized-only route are emitted to author code, immediately.
@@ -140,8 +141,9 @@ rebuild *(GAP-6)*.
 persisted state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process
 crashes immediately after (fork completion is itself a commit point). *(The
 append-lagged binding persists nothing at fork completion — a crash before the next
-commit resumes pre-fork; GAP-21. The transactional binding persists the ancestor's own
-commit, whose floor and chain predate the fork — GAP-43.)*
+commit leaves the forked cursor over rows already rolled back; GAP-21. The
+transactional binding persists the ancestor's own commit, whose floor and chain
+predate the fork — GAP-43.)*
 
 ## Recovery contract
 

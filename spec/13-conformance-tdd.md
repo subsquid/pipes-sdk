@@ -1,7 +1,7 @@
 # 13 — Conformance & TDD (CT-n, GAP-n) — MUTABLE
 
-Last updated: 2026-10-23. Statuses reflect the actual TypeScript test inventory at
-mainline `051ed66` plus the conformance harness in `packages/pipes/conformance/`, not
+Last updated: 2026-10-24. Statuses reflect the actual TypeScript test inventory at
+mainline `11c92d6` plus the conformance harness in `packages/pipes/conformance/`, not
 aspiration.
 
 ## Harness architecture
@@ -29,25 +29,30 @@ chain form. It answers every request from the chain it holds, keyed by the reque
 anchor (IB-3), so a post-restart re-request, a fork (409 with the canonical window), a
 head move or a transport fault needs no script; a response-list form remains for exact
 sequences, and logs every request with the answer it got and the head it reported. The
-oracle, the structural validators, store probes for classes K and T and kill-point
-injectors for both live in `packages/pipes/conformance/`; CT-1 and CT-2 run S1 against
-classes K and T, and S3 reduced to one fork against class T. On S3 the oracle replays the
-portal's request log: a batch's blocks and floor come from the answer that served it, a
-fork's canonical chain from the 409, never from the pipe. A kill is a true kill: a child process runs the pipe and
-stops itself with SIGKILL at one step of the commit protocol or of recovery — a file
-operation for class K, an SQL statement for class T — so nothing unwinds and the store
-holds what a crash leaves; for class T the harness waits until the server has dropped
-the child's connections, and with them any transaction it held open. The child journals
-every batch before the store sees it, and the oracle follows the journal. Not built
-yet: kill points and store probes for classes W, A and C, the corrupted-state corpus,
-the observability scraper, and adversarial histories (duplicate or out-of-order
-blocks, over-return).
+oracle, the structural validators, store probes for classes K, T and A and kill-point
+injectors for all three live in `packages/pipes/conformance/`; CT-1 and CT-2 run S1
+against classes K, T and A, and S3 reduced to one fork against classes T and A. On S3
+the oracle replays the portal's request log: a batch's blocks and floor come from the
+answer that served it, a fork's canonical chain from the 409, never from the pipe. A
+kill is a true kill: a child process runs the pipe and stops itself with SIGKILL at one
+step of the commit protocol or of recovery — a file operation for class K, an SQL
+statement for class T, an HTTP request for class A — so nothing unwinds and the store
+holds what a crash leaves. For class T the harness waits until the server has dropped
+the child's connections, and with them any transaction it held open; for class A, until
+the server runs none of the child's queries. The class-A probe reads each table net of
+its cancel rows, with merges stopped and no folding on insert, so a row stored twice
+reads twice. The child
+journals every batch before the store sees it, and the oracle follows the journal. Not
+built yet: kill points and store probes for classes W and C, the corrupted-state corpus,
+the observability scraper, and adversarial histories (duplicate or out-of-order blocks,
+over-return).
 
 *Language neutrality:* the simulator speaks HTTP (IB-1…IB-11) and the probes read the
 persisted formats (IB-20…IB-28), so the simulator, the oracle, the validators and the
 probes serve any implementation. Three parts are bound to the TypeScript
 implementation: building the pipe, the batch journal (an in-process hook) and the kill
-switches, which patch the file system and the Postgres client inside the child. A
+switches, which patch the file system, the Postgres client and the ClickHouse client's
+HTTP connection inside the child. A
 second implementation needs its own driver for them, or kill points injected from
 outside its process. The harness layout is in `packages/pipes/conformance/README.md`.
 
@@ -194,18 +199,18 @@ gap-free unless the barrier is waived, RP-45; a repeated version is an outbox
 republish and must repeat the same operation) · no residue (nothing in flight left in
 the store, INV-42).
 
-## Traceability matrix (2026-10-23)
+## Traceability matrix (2026-10-24)
 
 Status: **C** covered · **P** partial · **U** unchecked. Suffix ⚠ = known-violated or
 known-suspect in the current implementation (see gap register).
 
 | Property | CT class | Status | Note |
 |---|---|---|---|
-| WP-1, WP-2 (resume, floor seed) | CT-1/2 | C | portal-source + watermark tests; CT-2 S1: every restart asks first for the block after the recovered cursor, anchored on it (classes K and T) |
+| WP-1, WP-2 (resume, floor seed) | CT-1/2 | C | portal-source + watermark tests; CT-2 S1: every restart asks first for the block after the recovered cursor, anchored on it (classes K, T and A); class A: a restart whose portal reports a lower floor keeps the persisted one |
 | WP-3 (id validation) | CT-1 | P ⚠ | rejects, but uncoded (GAP-4) |
 | WP-4 (range resolution) | CT-1 | C | range-algebra + builder tests |
-| WP-5/CN-40…CN-44 recovery-before-write | CT-2 | P ⚠ | classes K and T: the CT-2 kill-point matrix on S1, where the oracle requires the recovered state to be a commit point (CN-40), rollback records included for class T; class K skips its sweep before the first cursor write, pinned by CT-2 (GAP-41); classes W, A and C have no kill-point matrix (GAP-14); orphan guard W-only and table-wide rather than key-scoped (GAP-20) |
-| INV-40…INV-42 (recovery soundness, idempotence, no orphans) | CT-2 | P ⚠ | classes K and T: every CT-2 point on S1, and for class T on S3, ends in the scenario's end state with no residue, crashes during recovery and a second crash in the restart included; GAP-41 breaks class K before the first commit; GAP-43 leaves class T a state no commit wrote after a fork; classes W, A and C U (GAP-14) |
+| WP-5/CN-40…CN-44 recovery-before-write | CT-2 | P ⚠ | classes K, T and A: the CT-2 kill-point matrix on S1, where the oracle requires the recovered state to be a commit point (CN-40), rollback records included for class T; before the first cursor write class K skips its sweep (GAP-41) and class A its repair hook (GAP-44), both pinned by CT-2; classes W and C have no kill-point matrix (GAP-14); orphan guard W-only and table-wide rather than key-scoped (GAP-20) |
+| INV-40…INV-42 (recovery soundness, idempotence, no orphans) | CT-2 | P ⚠ | classes K, T and A: every CT-2 point on S1, and for classes T and A on S3, ends in the scenario's end state with no residue, crashes during recovery and a second crash in the restart included; GAP-41 and GAP-44 break classes K and A before the first commit; after a fork, GAP-43 leaves class T and GAP-21 class A a state no commit wrote; classes W and C U (GAP-14) |
 | INV-43 (re-fetch byte identity) | CT-2 | U | unit boundaries after a restart are free, so CT-2 diffs rows, not bytes |
 | INV-44 (refuse-before-delete) | CT-2 | P | class K refuses a straddling unit the coverage does not explain (E2317, target suite); no corrupted-state corpus |
 | WP-7, RP-7, DEF-15, INV-25, IB-11 (finalized-only selection) | CT-1/5 | C | portal-source asserts hot override + warning, finalized `latest` and its no-finality fallback, transformer-start view honouring an explicit hot head, per-pipe (non-sticky) selection, effective cache client and node-cache forwarding, quiet pre-finalized mode, and unchanged non-requiring mode; Parquet/memory assert direct delivery and the coded impossible-fork refusal; CT-1 S1 diffs the class-K store against the oracle under a lagging floor and with no finality |
@@ -222,25 +227,25 @@ known-suspect in the current implementation (see gap register).
 | WP-40…WP-43 (fork core) | CT-3 | C ⚠ | core fork, portal-source, and fork-capable target suites; WP-42 text normativized from the tested deep-fork/floor-fallback semantics; K/∅ excluded by WP-7; a full stream without finality keeps no chain to search (GAP-42) |
 | WP-41 (empty canonical) | CT-4 | U ⚠ | an empty or absent chain surfaces as a raw 409 HTTP error, pinned by a client test (GAP-8) |
 | WP-44 (finality conflict) | CT-3 | U ⚠ | the resolver test named for it never reaches the finality branch; the resolver checks each record's own floor, not F; the WP-42 search passes a canonical floor (GAP-6) |
-| WP-46 (rollback idempotence) | CT-2/3 | P | netting idempotence tested (one binding); class T: CT-2 S3 kills the fork transaction twice in a row and converges; others U |
+| WP-46 (rollback idempotence) | CT-2/3 | P | netting idempotence tested (one binding); classes T and A: CT-2 S3 kills the fork's rollback twice in a row and converges; others U |
 | WP-47 (depth bound) | CT-3 | P ⚠ | retention pruning tested; deep-fork restart e2e U; a full stream without finality retains nothing (GAP-42) |
 | RP-1…RP-6 (write loop) | CT-1 | C | per-target state suites |
 | RP-21, RP-22, INV-4 (coverage) | CT-7 | C | parquet coverage-naming suites: sparse stretch, trailing empty unit, disjoint-range gap, resume mid-gap |
 | RP-30…RP-32 (keying, migration) | CT-8 | P ⚠ | happy path C; concurrent migration U (GAP-7) |
-| RP-42 (delegated repair) | CT-2 | U ⚠ | hook optional by design, absence made loud (ADR-15); no-hook recovery kill-point owed (GAP-14) |
+| RP-42 (delegated repair) | CT-2 | P ⚠ | with the hook, every class-A CT-2 point recovers, a crash after one table's cancel rows included; without it, the restart warns and stores the crash window a second time: the accepted deviation, pinned (ADR-15); before the first cursor write the hook is never called (GAP-44) |
 | RP-43 (contract guard) | CT-3 | P ⚠ | one binding only (GAP-9) |
 | CN-10 T atomicity | CT-2 | C ⚠ | live tx tests; CT-2 on S1 kills the batch transaction before, inside and after it, with its commit unanswered too, and on S3 a batch above the floor with its undo records; every crash leaves the last commit the server acknowledged; retry and isolation ungated (GAP-26) |
 | CN-11 W protocol | CT-2 | P | unit/lifecycle C; integration gated off CI |
 | CN-12 K protocol | CT-1/2 | C ⚠ | finalized-route selection plus crash-safety + recovery suites; straddle refusal asserted (E2317); CT-2 kills S1 at every protocol step, a stretched unit's straddle included; first-checkpoint crash window open (GAP-41) |
-| CN-13 A protocol | CT-2 | U ⚠ | recovery/fork with a hook untested; no-hook window is an accepted deviation (ADR-15); kill-point owed (GAP-14) |
+| CN-13 A protocol | CT-2 | C ⚠ | CT-2 kills S1 before, between and after the data inserts, before, during and after the cursor write, and in recovery's cancel rows; S3 in a batch above the floor and in the fork's rollback; the first batch's window is never repaired (GAP-44); the no-hook window is an accepted deviation (ADR-15) |
 | CN-17, CN-35, CN-46 C protocol | CT-2/3 | P ⚠ | fold-per-id, baseline restore, route-declared inverse, seq monotonicity across forks and the commit-then-publish crash window are asserted against a publisher seam; no live-bus conformance run, and the lost-sequencer exposure is operational only (GAP-38) |
 | RP-24, RP-44 (changelog contract) | CT-5 | P ⚠ | canonical codec tested as a contract (accept/reject table + golden bytes); attribute inheritance through forks asserted; consumer-side convergence untested against a real subscription |
 | RP-45 (shared-feed contract) | CT-5 | P ⚠ | one payload shape, the split-counter and backwards-block refusals, and the finality reference (stamped on every message, on compensations, and on a restart's recovery drain) asserted against a publisher seam; the quiet-table stall and the consumer's max-read are stated limits, untested against a real subscription |
-| CN-34 (fork commit point) | CT-2 | P ⚠ | class T: CT-2 S3 kills inside and after the fork transaction; after it, the store holds the ancestor's own floor and chain (GAP-43); class A persists nothing at fork (GAP-21); other classes U |
+| CN-34 (fork commit point) | CT-2 | P ⚠ | class T: CT-2 S3 kills inside and after the fork transaction; after it, the store holds the ancestor's own floor and chain (GAP-43); class A: CT-2 S3 kills inside and after the fork's rollback; both leave the forked branch's cursor over rolled-back rows (GAP-21); other classes U |
 | CN-45 (cross-impl, clock indep.) | CT-5 | U ⚠ | single implementation; clock ordering in two bindings (GAP-10); cache codec undiscriminated (GAP-27) |
-| INV-1, INV-3, INV-5 (state well-formedness) | CT-1 | P | structural validators and the diff against S1's fixed end state on the class-K and class-T stores (two tables) at quiescence, class K with and without finality, and on the committed part after every CT-2 kill; no store probe for classes W, A and C |
+| INV-1, INV-3, INV-5 (state well-formedness) | CT-1 | P | structural validators and the diff against S1's fixed end state on the class-K, class-T and class-A stores (two tables) at quiescence, class K with and without finality, and on the committed part after every CT-2 kill; no store probe for classes W and C |
 | INV-2, INV-12 (floor) | CT-1/2 | C ⚠ | adversarial regression/genesis tests; class T lowers the persisted floor at a fork (GAP-43) |
-| INV-10 (frame condition) | CT-1 | P | CT-1 S1: a restart with nothing left to read leaves the class-K store byte-identical and the class-T store's read unchanged; no idle soak (CT-7) |
+| INV-10 (frame condition) | CT-1 | P | CT-1 S1: a restart with nothing left to read leaves the class-K store byte-identical and the reads of the class-T and class-A stores unchanged; no idle soak (CT-7) |
 | INV-13, INV-14 (fork safety) | CT-3 | C ⚠ | at batch boundaries; mid-flush U; a fork below F is not refused (GAP-6) |
 | INV-15, INV-35, LIV-10 (isolation) | CT-8 | U ⚠ | no co-resident/dual-instance tests; Parquet recovery acts on a co-resident pipe's files (GAP-35) |
 | INV-21, INV-23 (fidelity, selection) | CT-5 | C | validator fixtures incl. chain edge shapes |
@@ -258,7 +263,7 @@ known-suspect in the current implementation (see gap register).
 | IB-40…IB-46 observability | CT-5 | U ⚠ | consumed by dashboard, no golden scrapes (GAP-16) |
 | IB-50…IB-52 error registry | CT-5 | P ⚠ | declared codes synced with `docs/errors.md` by the spec check; the IB-50 table is outside the sync (GAP-13) |
 
-## Gap register (2026-10-23)
+## Gap register (2026-10-24)
 
 Priorities: P0 active production risk · P1 correctness hole, plausible trigger ·
 P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry point.
@@ -274,11 +279,11 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-10 | ClickHouse and BigQuery order cursor records by wall-clock timestamp (resume + fork-record + retention ordering; BigQuery's per-process monotonic counter resets on restart); clock regression can misorder — violates clock independence. ClickHouse's millisecond key has no tie-breaker either, so two commits in one millisecond tie with no clock regression at all | CN-45, CN-15 | P2 | two commits under a regressed clock, and two in one millisecond, per binding; resume must pick commit-order latest |
 | GAP-12 | Class-W binding assumes single-writer (client-assigned monotonic timestamps) with no lock and no detection; dual instance corrupts undetected | INV-15 (declaration) | P3 | document in IB-24; optional fencing probe |
 | GAP-13 | The spec check syncs the codes declared in source with `docs/errors.md` but not with the IB-50 table, so the table can drift unnoticed; CI runs the check only when `spec/**` changes, so a code-only change skips it | REQ-13, IB-50, IB-52 | P3 | diff declared codes against IB-50 in the check; run it on code changes |
-| GAP-14 | Classes K and T have kill-point matrices (CT-2 on S1, class T also on S3 with one fork). Classes W, A and C have none, and class A's no-hook recovery window (ADR-15) is unexercised | INV-40…INV-42, CN-34 | P1 | the class-A injector: kill after the data append and before the cursor write, restart without a repair hook and assert the rows above the cursor that ADR-15 accepts; with a hook, assert the restart converges |
+| GAP-14 | Classes K, T and A have kill-point matrices (CT-2 on S1, classes T and A also on S3 with one fork, class A with and without its repair hook). Class W has none for now, by decision: its store is reachable only in a real BigQuery project, which the harness does not use. Class C has none yet: it needs a bus, or a stand-in for one, whose messages outlive the killed child | INV-40…INV-42, CN-34 | P1 | the class-C injector: kill between the local commit and the publish confirmation; restart and assert the outbox republishes byte- and sequence-identically (CN-17, CN-46) |
 | GAP-15 | Indistinguishable-output collision (duplicate event signature) only logs in the evm module, whose decoder stops at the first matching output, so later outputs silently miss records. The solana module refuses a shared discriminator at construction (E0003), so the two modules disagree | WP-24 | P2 | two evm outputs, same signature → startup diagnostic asserted fatal (pending OQ-6) |
 | GAP-16 | Observability payloads are consumed by the dashboard but have no golden fixtures; shapes drift silently (a version-drift accommodation already exists in the dashboard) | IB-40…IB-46 | P3 | golden scrape of /stats, /metrics, preview against a scripted run |
 | GAP-20 | The orphan-data guard is table-wide where it must be key-scoped: the write-ahead binding (E2212) probes the tracked table with no key filter while reading its sync row by key, so a co-resident pipe's legitimate first run into a populated shared table is refused — one pipe's startup made dependent on another's data, blocking a configuration INV-35/RP-41 support. The other bindings run no guard at all and restart from scratch over genuinely orphan data | CN-44, INV-35, REQ-3 | P2 | second pipe id, first run into a table another pipe populates → assert start, not refusal; then on declared-exclusive tables delete cursor state and assert coded refusal per binding |
-| GAP-21 | Append-lagged fork completion persists nothing (no rewound cursor row); a crash after resolveFork and before the next commit resumes from pre-fork state. The other fork-capable bindings persist at fork completion | CN-34 | P2 | kill between resolveFork and the next commit; assert recovered C = ancestor |
+| GAP-21 | Append-lagged fork completion persists nothing (no rewound cursor row): until the next cursor row, a crash leaves the forked branch's cursor over rows already rolled back to the ancestor, and once the next batch's data is in, over rows of the new branch — states no commit wrote — and the restart converges only because its first request meets the fork again. Persisting the ancestor once the rollback ends would leave the same mismatch for a crash inside the rollback: the ancestor must be persisted before the repair hook removes rows, so a crash leaves only the class's own window above the cursor. CT-2 pins all three points (`conformance/clickhouse/fork-crash.test.ts`). The transactional binding has its own variant (GAP-43) | CN-34, CN-40 | P2 | flip the CT-2 S3 pins: kill inside and after the fork's rollback and in the next batch, assert C = ancestor, F unchanged, RC trimmed, and only rows not yet cancelled or not yet committed above C |
 | GAP-22 | A fork tears down and restarts the whole lifecycle (stop + start hooks, metrics server) per streaming segment — hooks fire per segment, not exactly once per run | WP-30, INV-17 | P2 | count start/stop hook invocations across one resolved fork; assert one each |
 | GAP-23 | Head-only (204) responses are dropped before the progress tracker (no per-signal OB-2 emission) and their finalized-head report is discarded — the floor stalls while idle at head, so persisted finality and rollback-retention state lag on quiet chains | WP-13, DEF-6 | P2 | serve 204 with a raised finalized header; assert floor advance + progress emission |
 | GAP-24 | Cursor timestamps are portal-verbatim and network-dependent — tron and substrate report milliseconds (hyperliquid presumed ms). Lag metrics normalize at the point of use (`blockTimestampSeconds`), but the cursor itself carries whichever unit the portal sent, and the class-T sync column converts it as if it were seconds | DEF-1, IB-20…IB-28 | P2 | tron fixture cursor round-trip asserting the declared unit; normalization decision is OQ-7 |
@@ -299,6 +304,7 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-41 | Class-K recovery skips the over-cursor sweep when no cursor was ever persisted: the state read returns before the sweep when the state file is absent. A crash between the first publish and the first state write leaves a published file no cursor covers; the restart either collides with it (E2309) or publishes an overlapping file beside it — silently duplicated rows — depending on batch partitioning, a declared free variable. Deleting unconditionally is not the fix while data files carry no pipe namespace (GAP-35). CT-2 pins it (`conformance/parquet/backfill-crash.test.ts`): killed before the first state rename, recovery keeps both published units and the restart does not converge | CN-12, INV-42, REQ-3 | P2 | crash after the first publish, before the first state write; restart → assert output equals an uninterrupted run (flip the CT-2 pin) |
 | GAP-42 | A full stream on a dataset without finality keeps no fork history: the source builds each batch's rollback chain only from blocks above a reported finalized head, so with no report every persisted record is empty, and the first fork, however shallow, halts as unresolvable (E1003) instead of rolling back. The model keeps every processed block above an absent floor, bounded by retention (WP-47) | WP-42, WP-47 | P2 | full stream over a dataset without finality, fork two blocks below the head → assert rollback to the common ancestor, not E1003 |
 | GAP-43 | The transactional binding writes nothing at fork completion: it drops the sync rows above the ancestor, so the ancestor's own row becomes the persisted state, with the floor and the chain of that older commit. When the floor rose after the ancestor was committed, a crash before the next commit recovers a lower floor and a chain that holds finalized blocks again; the next batch reports the floor again, so the run converges. CT-2 S3 pins it (`conformance/postgres/fork-crash.test.ts`): killed after the fork's commit, the store holds ⟨C = 26, F = 19, RC = 20…26⟩ where CN-34 wants F = 23 and RC = 24…26 | CN-34, INV-12 | P2 | flip the CT-2 S3 pin: kill after the fork's commit, assert ⟨C = ancestor, F unchanged, RC trimmed⟩ |
+| GAP-44 | Class-A recovery calls the repair hook only over a persisted cursor. A crash between the first batch's data and its cursor row leaves rows no state accounts for, and the restart, hook or not, stores them again: duplicated rows, no error. GAP-41 is the class-K sibling, and the fix shares its blocker: removing every row from the range start is safe only on tables declared exclusive (OQ-8, ADR-16). CT-2 pins it (`conformance/clickhouse/backfill-crash.test.ts`): killed before the first cursor write, the restart ends with the first batch's rows twice | CN-13, CN-44, RP-42, REQ-3 | P2 | crash after the first batch's data, before its cursor row; restart → assert output equal to an uninterrupted run, or a coded refusal on exclusive tables (flip the CT-2 pin) |
 
 ## Build order
 
@@ -309,8 +315,9 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
   are met. Open: adversarial histories (over-return for INV-24, duplicate/out-of-order
   for GAP-29, head regressions), which build on the same chain model.
 - **Phase 1 — P1 gaps**: GAP-35 (decide tracked-table exclusivity with OQ-8/ADR-16,
-  which also unblocks GAP-41), GAP-14 (the class-T matrix runs on S1 and S3; open is
-  the class-A no-hook recovery window, an accepted deviation under ADR-15). Exit:
+  which also unblocks GAP-41 and GAP-44), GAP-14 (the matrices of classes K, T and A
+  run, class A with and without its repair hook; open is class C, and class W has none
+  for now). Exit:
   register updated, fixes landed or accepted as documented deviations.
 - **Phase 2 — correctness core**: full CT-2 matrix all classes; CT-3 fork suite; CT-5
   format round-trips (this unblocks the second-language implementation). Exit: matrix
