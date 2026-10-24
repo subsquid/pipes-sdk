@@ -3,15 +3,15 @@ import { Codec, Sink } from '@subsquid/evm-codec'
 
 import {
   DecodeErrorHook,
+  EventDecoderConfigurationError,
   PortalRange,
   ProfilerOptions,
   Transformer,
   defaultDecodeError,
-  formatWarning,
   parsePortalRange,
   recordSuppressedDecode,
 } from '~/core/index.js'
-import { arrayify, findDuplicates } from '~/internal/array.js'
+import { arrayify } from '~/internal/array.js'
 import { Log, LogRequest } from '~/portal-client/query/evm.js'
 
 import { evmQuery } from './evm-query-builder.js'
@@ -158,28 +158,6 @@ const decodedEventFields = {
   },
 } as const
 
-const DUPLICATED_EVENTS = (duplicates: { props: string[]; event: string }[]) => {
-  const events = duplicates
-    .map((d) =>
-      `
-Topic:      ${d.event}
-Properties: ${d.props.join(', ')}
-
-${d.props.slice(1).join(', ')} property will miss events due to the duplicate signature.
-`.trim(),
-    )
-    .join('-----\n')
-
-  return formatWarning({
-    title: 'Duplicate event topics detected',
-    content: [
-      events,
-      '', // empty line
-      `Ensure each event has a unique signature to avoid decoding issues.`,
-    ],
-  })
-}
-
 export function isEventWithArgs<T extends AbiEvent<any>>(
   value: unknown,
 ): value is EventWithArgs<T> | EventWithArgsInput<T> {
@@ -272,15 +250,86 @@ function buildEventRequests<T extends AbiEvent<any>, C extends Contracts>(
     .filter((logRequest): logRequest is LogRequest => !!logRequest)
 }
 
-function getDuplicateEvents<T extends Events>(events: T, duplicates: string[]) {
-  return duplicates.map((duplicate) => {
-    const props = Object.keys(events).filter((name) => {
-      const eventValue = events[name]
-      const eventAbi = isEventWithArgs(eventValue) ? eventValue.event : eventValue
-      return eventAbi.topic === duplicate
-    })
-    return { props, event: duplicate }
-  })
+type EventEntry = {
+  name: string
+  event: AbiEvent<any>
+  /** Encoded values topic1…topic3 must hold, `undefined` where the entry accepts any. */
+  topicFilters: (Set<string> | undefined)[]
+}
+
+function getEventEntries(events: Events): EventEntry[] {
+  const entries: EventEntry[] = []
+
+  for (const name in events) {
+    const value = events[name]
+    const event = isEventWithArgs(value) ? value.event : value
+    const params = isEventWithArgs(value) ? getNormalizedEventParams(value.params) : {}
+    const { topic1, topic2, topic3 } = buildEventTopics(event, params)
+    const topicFilters = [topic1, topic2, topic3].map((values) => (values ? new Set(values) : undefined))
+
+    entries.push({ name, event, topicFilters })
+  }
+
+  return entries
+}
+
+/** The portal answers the union of every output's requests, so a log can carry the event but not this entry's parameters. */
+function matchesTopicFilters(entry: EventEntry, log: { topics: string[] }) {
+  for (let i = 0; i < entry.topicFilters.length; i++) {
+    const values = entry.topicFilters[i]
+    if (values !== undefined && !values.has(log.topics[i + 1])) {
+      return false
+    }
+  }
+
+  return true
+}
+
+function topicCount(event: AbiEvent<any>) {
+  const params = Object.values(event.params) as { indexed?: boolean }[]
+
+  return 1 + params.filter((param) => param.indexed === true).length
+}
+
+/** `AbiEvent.is` compares topic0 and the topic count only, so ERC-20 and ERC-721 `Transfer` never share a log. */
+function canMatchSameLog(a: EventEntry, b: EventEntry) {
+  const sameTopic0 = a.event.topic.toLowerCase() === b.event.topic.toLowerCase()
+  const sameTopicCount = topicCount(a.event) === topicCount(b.event)
+  if (!sameTopic0 || !sameTopicCount) {
+    return false
+  }
+
+  // One position both entries filter on disjoint values keeps every log out of one of them.
+  for (let i = 0; i < a.topicFilters.length; i++) {
+    const x = a.topicFilters[i]
+    const y = b.topicFilters[i]
+    const disjoint = x !== undefined && y !== undefined && ![...x].some((value) => y.has(value))
+    if (disjoint) {
+      return false
+    }
+  }
+
+  return true
+}
+
+/** A log goes to one entry only (WP-24), so two entries that can both match it would silently split the records. */
+function assertDistinctEntries(entries: EventEntry[]) {
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const [a, b] = [entries[i], entries[j]]
+      if (!canMatchSameLog(a, b)) {
+        continue
+      }
+
+      throw new EventDecoderConfigurationError([
+        `Events "${a.name}" and "${b.name}" can match the same log: ${b.event.signature}, topic0 ${b.event.topic}.`,
+        'A log goes to one entry only, so the other would silently miss it. Two entries for one event',
+        'are allowed only when an indexed parameter is filtered in both and the two value lists share',
+        'no value. Otherwise put each filter in its own evmEventDecoder(): every output then receives',
+        'all the logs its filter matches.',
+      ])
+    }
+  }
 }
 
 /**
@@ -328,6 +377,9 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
   profiler,
   onError: onErrorHook,
 }: DecodedEventPipeArgs<T, C>) {
+  const entries = getEventEntries(events)
+  assertDistinctEntries(entries)
+
   const decodedRange = parsePortalRange(range)
   const onError = onErrorHook || defaultDecodeError
   const normalizedEvents = getNormalizedEvents(events)
@@ -360,12 +412,6 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
   return query
     .build({
       setupQuery: (config) => {
-        const allEventTopics = normalizedEvents.map(({ event }) => event.topic)
-        const duplicates = findDuplicates(allEventTopics)
-        if (duplicates.length) {
-          config.logger.error(DUPLICATED_EVENTS(getDuplicateEvents(events, duplicates)))
-        }
-
         config.query.merge(query)
       },
     })
@@ -378,9 +424,8 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
       },
       transform: async (data, ctx): Promise<EventResponse<T, C>> => {
         const result = {} as EventResponse<T, C>
-        // TODO: should use normalizedEvents instead of events here
-        for (const eventName in events) {
-          ;(result[eventName as keyof T] as DecodeEventsFunctions<T>[]) = []
+        for (const entry of entries) {
+          ;(result[entry.name as keyof T] as DecodeEventsFunctions<T>[]) = []
         }
 
         if (Factory.isFactory(contracts)) {
@@ -421,26 +466,21 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
               continue
             }
 
-            for (const eventName in events) {
-              const eventValue = events[eventName]
-              let eventAbi: AbiEvent<any>
-
-              if (isEventWithArgs(eventValue)) {
-                eventAbi = eventValue.event
-              } else {
-                eventAbi = eventValue
-              }
+            for (const entry of entries) {
+              const eventAbi = entry.event
 
               const topic0 = log.topics[0]
               if (topic0 !== eventAbi.topic) {
                 continue
               } else if (!eventAbi.is(log)) {
                 continue
+              } else if (!matchesTopicFilters(entry, log)) {
+                continue
               }
 
               try {
                 const decoded = eventAbi.decode(log)
-                const eventArray = result[eventName as keyof T] as ReturnType<typeof eventAbi.decode>[]
+                const eventArray = result[entry.name as keyof T] as ReturnType<typeof eventAbi.decode>[]
 
                 eventArray.push({
                   event: decoded,

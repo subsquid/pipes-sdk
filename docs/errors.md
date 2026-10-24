@@ -29,15 +29,15 @@ See: https://docs.sqd.dev/en/sdk/pipes-sdk/errors/E0001
 Match on the code (or the `instanceof` class), not the message text — messages may be reworded, codes
 are stable. Codes are grouped by where they originate:
 
-| Prefix  | Area                        |
-| ------- | --------------------------- |
-| `E0xxx` | Source / pipe configuration |
-| `E1xxx` | Fork handling & rollback    |
-| `E20xx` | ClickHouse target           |
-| `E21xx` | Postgres (Drizzle) target   |
-| `E22xx` | BigQuery target             |
-| `E23xx` | Parquet target              |
-| `E24xx` | Google PubSub target       |
+| Prefix  | Area                                      |
+| ------- | ----------------------------------------- |
+| `E0xxx` | Source / pipe configuration               |
+| `E1xxx` | Fork handling & rollback, portal contract |
+| `E20xx` | ClickHouse target                         |
+| `E21xx` | Postgres (Drizzle) target                 |
+| `E22xx` | BigQuery target                           |
+| `E23xx` | Parquet target                            |
+| `E24xx` | Google PubSub target                      |
 
 ---
 
@@ -120,6 +120,50 @@ solanaInstructionDecoder({
 })
 ```
 
+### E0004 · Two event entries can match the same log
+
+An `evmEventDecoder` declares two entries that can match one log: the same `topic0` and the same number
+of topics, and no indexed parameter that both entries filter on value lists with no value in common. A
+log goes to one entry only, so the other would silently miss it.
+
+Two entries for one event are fine when their filters on one parameter share no value, such as
+`{ from: ALICE }` and `{ from: BOB }`. So are entries that share `topic0` but not the topic count, such as
+ERC-20 and ERC-721 `Transfer`.
+
+**Fix** — put each overlapping filter in its own `evmEventDecoder()`. Every output then receives all the
+logs its filter matches, so a log that fits both filters appears in both outputs.
+
+**Wrong** — a transfer from Alice to Bob matches both entries:
+
+```ts
+evmEventDecoder({
+  range: { from: 'latest' },
+  events: {
+    fromAlice: { event: erc20.events.Transfer, params: { from: ALICE } },
+    toBob: { event: erc20.events.Transfer, params: { to: BOB } }, // → E0004
+  },
+})
+```
+
+**Right** — one decoder per filter:
+
+```ts
+evmPortalStream({
+  id: 'transfers',
+  portal: '...',
+  outputs: {
+    fromAlice: evmEventDecoder({
+      range: { from: 'latest' },
+      events: { transfers: { event: erc20.events.Transfer, params: { from: ALICE } } },
+    }),
+    toBob: evmEventDecoder({
+      range: { from: 'latest' },
+      events: { transfers: { event: erc20.events.Transfer, params: { to: BOB } } },
+    }),
+  },
+})
+```
+
 ---
 
 ## Fork handling
@@ -127,7 +171,8 @@ solanaInstructionDecoder({
 Raised while unwinding a chain reorganization (fork). Targets that read the hot stream — ClickHouse,
 Postgres, BigQuery — handle forks themselves, so E1001–E1003 mostly surface in **custom** targets.
 The finalized-only targets (Parquet, memory) read `/finalized-stream`, where a fork cannot occur;
-they raise E1005 instead if one is reported anyway.
+they raise E1005 instead if one is reported anyway. E1006 guards the block order of every stream, forks
+or not. E1004–E1006 mean the portal broke its contract: report them against the portal.
 
 ### E1001 · Target does not support fork handling
 
@@ -169,6 +214,18 @@ design, so the pipe stopped without changing anything it had already written.
 restart, rewind (or clear) the target's persisted cursor to a block the portal still considers
 canonical — for the Parquet target that is the `_sqd_parquet_state.<pipe-id>.json` file in its
 output directory.
+
+### E1006 · Portal delivered a block out of order
+
+The portal delivered a block the request does not allow: one at or below a block it already delivered
+(a duplicate or an out-of-order block), one below the requested start, or one above the requested end.
+The message names the block and which of the three it is. Written as it came, the block would duplicate
+rows or store them out of order, so the pipe stops before the block reaches any transformer or target.
+Blocks with no matching data are skipped, so a gap between block numbers is not this error.
+
+**Fix** — none in user code; please
+[report it](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal. A restart resumes
+from the target's persisted cursor.
 
 ---
 

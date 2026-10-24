@@ -1,17 +1,19 @@
 import { event, indexed } from '@subsquid/evm-abi'
 import * as p from '@subsquid/evm-codec'
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest'
 
 import { PortalRange, QueryAwareTransformer } from '~/core/index.js'
 import { encodeEvent, mockBlock, resetMockBlockCounter } from '~/testing/evm/index.js'
 import { MockPortal, MockResponse, mockMetricsServer, mockPortal, readAll, testLogger } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
-import { commonAbis } from './abi/common.js'
+import { commonAbis, defineAbi } from './abi/common.js'
 import {
   DecodedEventPipeArgs,
   EventFilter,
   EventWithArgs,
   EventWithArgsInput,
+  Events,
   EventsMap,
   IndexedKeys,
   IndexedParams,
@@ -65,6 +67,20 @@ const swapAbi = {
     },
   ),
 }
+
+// Same topic0 as ERC-20 `Transfer`, one more topic: `tokenId` is indexed.
+const erc721Json = [
+  {
+    type: 'event',
+    name: 'Transfer',
+    inputs: [
+      { indexed: true, name: 'from', type: 'address' },
+      { indexed: true, name: 'to', type: 'address' },
+      { indexed: true, name: 'tokenId', type: 'uint256' },
+    ],
+  },
+] as const
+const erc721 = defineAbi(erc721Json)
 
 const FACTORY_ADDRESS = '0x1f98431c8ad98523631ae4a59f267346ea31f984'
 
@@ -690,81 +706,65 @@ describe('evmEventDecoder queries', () => {
   })
 
   describe('evmEventDecoder duplicate events', () => {
-    it('should log error when duplicate event topics are detected', async () => {
-      const logger = testLogger()
-      const errorSpy = vi.spyOn(logger, 'error')
-      const duplicateEvent = commonAbis.erc20.events.Transfer
-      const decoder = evmEventDecoder({
-        range: { from: 0, to: 100 },
-        contracts: ['0x123'],
-        events: {
-          transfers1: duplicateEvent,
-          transfers2: duplicateEvent,
-        },
+    function constructionError(events: Events) {
+      try {
+        evmEventDecoder({ range: { from: 0, to: 100 }, contracts: ['0x123'], events })
+      } catch (error) {
+        return error as Error
+      }
+
+      return undefined
+    }
+
+    it('refuses one event declared under two keys (E0004)', () => {
+      const error = constructionError({
+        transfers1: commonAbis.erc20.events.Transfer,
+        transfers2: commonAbis.erc20.events.Transfer,
       })
-      await captureQueryBuilder(decoder, logger)
 
-      expect(errorSpy).toHaveBeenCalledTimes(1)
-
-      const errorCall = errorSpy.mock.calls[0][0]
-      expect(errorCall).toContain('Duplicate event topics detected')
-      expect(errorCall).toContain('transfers1')
-      expect(errorCall).toContain('transfers2')
-      expect(errorCall).toContain(duplicateEvent.topic)
-
-      errorSpy.mockRestore()
+      expect(error).toMatchObject({ code: 'E0004', name: 'PipeConfiguration' })
+      expect(error?.message).toContain('"transfers1" and "transfers2"')
     })
 
-    it('should log error when duplicate event topics are detected across AbiEvent and EventWithArgs', async () => {
-      const logger = testLogger()
-      const errorSpy = vi.spyOn(logger, 'error')
-      const duplicateEvent = commonAbis.erc20.events.Transfer
-      const decoder = evmEventDecoder({
-        range: { from: 0, to: 100 },
-        contracts: ['0x123'],
-        events: {
-          transfers1: duplicateEvent,
-          transfers2: {
-            event: duplicateEvent,
-            params: {
-              from: '0x1',
-              to: '0x2',
-            },
-          },
-        },
-      })
+    it.each([
+      {
+        overlap: 'filters on different parameters',
+        first: { event: commonAbis.erc20.events.Transfer, params: { from: '0x1' } },
+        second: { event: commonAbis.erc20.events.Transfer, params: { to: '0x2' } },
+      },
+      {
+        overlap: 'an unfiltered entry and a filtered one',
+        first: commonAbis.erc20.events.Transfer,
+        second: { event: commonAbis.erc20.events.Transfer, params: { from: '0x1' } },
+      },
+      {
+        overlap: 'value lists that share a value',
+        first: { event: commonAbis.erc20.events.Transfer, params: { from: ['0x1', '0x2'] } },
+        second: { event: commonAbis.erc20.events.Transfer, params: { from: '0x2' } },
+      },
+    ])('refuses two entries for one event with $overlap (E0004)', ({ first, second }) => {
+      const error = constructionError({ first, second })
 
-      await captureQueryBuilder(decoder, logger)
-
-      expect(errorSpy).toHaveBeenCalledTimes(1)
-
-      const errorCall = errorSpy.mock.calls[0][0]
-      expect(errorCall).toContain('Duplicate event topics detected')
-      expect(errorCall).toContain('transfers1')
-      expect(errorCall).toContain('transfers2')
-      expect(errorCall).toContain(duplicateEvent.topic)
-
-      errorSpy.mockRestore()
+      expect(error).toMatchObject({ code: 'E0004', name: 'PipeConfiguration' })
+      expect(error?.message).toContain('"first" and "second" can match the same log')
     })
 
-    it('should not log error when all events have unique topics', async () => {
-      const logger = testLogger()
-      const errorSpy = vi.spyOn(logger, 'error')
-
-      const decoder = evmEventDecoder({
-        range: { from: 0, to: 100 },
-        contracts: ['0x123'],
-        events: {
-          transfers: commonAbis.erc20.events.Transfer,
-          approvals: commonAbis.erc20.events.Approval,
-        },
+    it('accepts two entries for one event whose filters on one parameter share no value', () => {
+      const error = constructionError({
+        fromA: { event: commonAbis.erc20.events.Transfer, params: { from: '0x1' } },
+        fromB: { event: commonAbis.erc20.events.Transfer, params: { from: '0x2', to: '0x3' } },
       })
 
-      await captureQueryBuilder(decoder, logger)
+      expect(error).toBeUndefined()
+    })
 
-      expect(errorSpy).not.toHaveBeenCalled()
+    it('accepts events that share topic0 but differ in topic count', () => {
+      const error = constructionError({
+        tokens: commonAbis.erc20.events.Transfer,
+        nfts: erc721.events.Transfer,
+      })
 
-      errorSpy.mockRestore()
+      expect(error).toBeUndefined()
     })
   })
 
@@ -1527,5 +1527,127 @@ describe('evmEventDecoder factory decode errors', () => {
       ),
     ).rejects.toThrow(/decod/i)
     expect(metrics.counter('sqd_decode_errors_skipped_total')).toBeUndefined()
+  })
+})
+
+describe('evmEventDecoder events sharing topic0', () => {
+  const TOKEN = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const FROM = '0x0000000000000000000000000000000000000001'
+  const TO = '0x0000000000000000000000000000000000000002'
+
+  withPortal('hands each log to the entry whose topic count it matches', async ({ portal: open }) => {
+    const tokenTransfer = encodeEvent({
+      abi: commonAbis.erc20.abi,
+      eventName: 'Transfer',
+      address: TOKEN,
+      args: { from: FROM, to: TO, value: 5n },
+    })
+    const nftTransfer = encodeEvent({
+      abi: erc721Json,
+      eventName: 'Transfer',
+      address: TOKEN,
+      args: { from: FROM, to: TO, tokenId: 7n },
+    })
+    const portal = await open({
+      blocks: [mockBlock({ number: 1, transactions: [{ logs: [tokenTransfer] }, { logs: [nftTransfer] }] })],
+    })
+
+    const stream = evmPortalStream({
+      id: 'test',
+      portal: portal.url,
+      logger: false,
+      outputs: evmEventDecoder({
+        range: { from: 0, to: 1 },
+        events: { tokens: commonAbis.erc20.events.Transfer, nfts: erc721.events.Transfer },
+      }),
+    })
+
+    const tokens: unknown[] = []
+    const nfts: unknown[] = []
+    for await (const { data } of stream) {
+      tokens.push(...data.tokens.map((e) => e.event))
+      nfts.push(...data.nfts.map((e) => e.event))
+    }
+
+    expect(tokens).toEqual([{ from: FROM, to: TO, value: 5n }])
+    expect(nfts).toEqual([{ from: FROM, to: TO, tokenId: 7n }])
+  })
+})
+
+describe('evmEventDecoder indexed-parameter filters', () => {
+  const TOKEN = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const ALICE = '0x0000000000000000000000000000000000000001'
+  const BOB = '0x0000000000000000000000000000000000000003'
+  const TO = '0x0000000000000000000000000000000000000002'
+
+  function transfer(from: `0x${string}`) {
+    return encodeEvent({
+      abi: commonAbis.erc20.abi,
+      eventName: 'Transfer',
+      address: TOKEN,
+      args: { from, to: TO, value: 1n },
+    })
+  }
+
+  function aliceAndBobBlock() {
+    return mockBlock({ number: 1, transactions: [{ logs: [transfer(ALICE)] }, { logs: [transfer(BOB)] }] })
+  }
+
+  withPortal('hands each log to the entry whose filter it matches', async ({ portal: open }) => {
+    const portal = await open({ blocks: [aliceAndBobBlock()] })
+
+    const stream = evmPortalStream({
+      id: 'test',
+      portal: portal.url,
+      logger: false,
+      outputs: evmEventDecoder({
+        range: { from: 0, to: 1 },
+        events: {
+          fromAlice: { event: commonAbis.erc20.events.Transfer, params: { from: ALICE } },
+          fromBob: { event: commonAbis.erc20.events.Transfer, params: { from: BOB } },
+        },
+      }),
+    })
+
+    const fromAlice: string[] = []
+    const fromBob: string[] = []
+    for await (const { data } of stream) {
+      fromAlice.push(...data.fromAlice.map((e) => e.event.from))
+      fromBob.push(...data.fromBob.map((e) => e.event.from))
+    }
+
+    expect(fromAlice).toEqual([ALICE])
+    expect(fromBob).toEqual([BOB])
+  })
+
+  // The portal answers the union of both decoders' requests, which holds every transfer.
+  withPortal('drops logs another output requested that its filter excludes', async ({ portal: open }) => {
+    const portal = await open({ blocks: [aliceAndBobBlock()] })
+
+    const stream = evmPortalStream({
+      id: 'test',
+      portal: portal.url,
+      logger: false,
+      outputs: {
+        alice: evmEventDecoder({
+          range: { from: 0, to: 1 },
+          events: { transfers: { event: commonAbis.erc20.events.Transfer, params: { from: ALICE } } },
+        }),
+        all: evmEventDecoder({
+          range: { from: 0, to: 1 },
+          events: { transfers: commonAbis.erc20.events.Transfer },
+        }),
+      },
+    })
+
+    const alice: string[] = []
+    const all: string[] = []
+    for await (const { data } of stream) {
+      alice.push(...data.alice.transfers.map((e) => e.event.from))
+      all.push(...data.all.transfers.map((e) => e.event.from))
+    }
+
+    expect(alice).toEqual([ALICE])
+    expect(all).toEqual([ALICE, BOB])
   })
 })

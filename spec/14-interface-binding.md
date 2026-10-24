@@ -285,8 +285,8 @@ consumers MUST NOT read it as a block number.
 
 | Band | Area | Codes in use |
 |---|---|---|
-| E0xxx | pipe configuration | E0001 blank/default pipe id *(currently dead — GAP-4)*, E0002 invalid range/date, E0003 unusable instruction discriminator set (mixed widths across the decoder, shared discriminator, or an instruction with none or several) |
-| E1xxx | fork handling | E1001 sink lacks fork support, E1002 empty canonical chain, E1003 ancestor unresolvable, E1004 portal contract violation (canonical below cursor), E1005 fork reported on the finalized-only route |
+| E0xxx | pipe configuration | E0001 blank/default pipe id *(currently dead — GAP-4)*, E0002 invalid range/date, E0003 unusable instruction discriminator set (mixed widths across the decoder, shared discriminator, or an instruction with none or several), E0004 event-decoder entries that can match one log |
+| E1xxx | fork handling, portal contract | E1001 sink lacks fork support, E1002 empty canonical chain, E1003 ancestor unresolvable, E1004 portal contract violation (canonical below cursor), E1005 fork reported on the finalized-only route, E1006 block outside the request window (duplicate, out of order or out of range) |
 | E20xx | ClickHouse binding | E2001–E2007 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler) |
 | E21xx | Postgres binding | E2101–E2107 (client, config, advisory lock, untracked table, missing PK, FK cycle, unresolved column name) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |

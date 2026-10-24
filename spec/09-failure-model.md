@@ -31,7 +31,7 @@ Bands 10–19.
 | FM-13 | finalized-only delivery cannot establish finality (no-finality dataset), or receives a fork signal | no floor: degrade with the explicit "not reorg-safe" limitation; fork: fail-safe because the sink intentionally has no rollback path (WP-45) |
 | FM-14 | fork signal with empty canonical chain | fail-safe with coded contract violation (WP-41) |
 | FM-15 | canonical chain entirely below persisted cursor | fail-safe with coded contract violation (RP-43) |
-| FM-16 | duplicate / out-of-order blocks within a stream | fail-safe: violates the trusted-ordering premise (ADR-1); MUST NOT be silently reordered *(no local detection exists today — GAP-29)* |
+| FM-16 | duplicate / out-of-order blocks within a stream | fail-safe: violates the trusted-ordering premise (ADR-1); a block at or below one already delivered, or outside the requested range, halts with a coded error before any stage sees it (ADR-1); MUST NOT be silently reordered |
 | FM-17 | oversized single block (> assembly budget) | degrade: deliver as its own batch (bounded overshoot, WP-11); alarm if it exceeds hard memory bounds |
 | FM-18 | retryable status / retry-after from portal | mask: honor server pacing (WP-14), count in OB-12 |
 | FM-19 | equivocating heads across reconnects (different finalized reports for same height) | mask via clamp; the floor keeps the maximum; data content conflicts surface as FM-16 |

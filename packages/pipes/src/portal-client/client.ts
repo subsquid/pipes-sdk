@@ -2,6 +2,7 @@ import { Readable } from 'stream'
 
 import { unexpectedCase, wait, withErrorContext } from '@subsquid/util-internal'
 
+import { PortalBlockOrderError } from '~/core/index.js'
 import {
   HttpBody,
   HttpClient,
@@ -269,6 +270,7 @@ function createPortalStream<Q extends Query>(
   const buffer = new StreamBuffer<GetBlock<Q>>(bufferOptions)
 
   let { fromBlock = 0, toBlock, parentBlockHash } = query
+  const start = fromBlock
 
   // Outside the loop: a response carrying no blocks hands its counters to no batch, so they must
   // survive into the next iteration.
@@ -323,9 +325,18 @@ function createPortalStream<Q extends Query>(
           for (let line of data) {
             try {
               const block = JSON.parse(line)
+              const number = block.header.number
+
+              // `fromBlock` is the request start, then one past the last block delivered.
+              const outOfWindow = number < fromBlock || (toBlock != null && number > toBlock)
+              if (outOfWindow) {
+                const previous = fromBlock > start ? fromBlock - 1 : undefined
+
+                throw new PortalBlockOrderError({ block: number, previous, range: { from: start, to: toBlock } })
+              }
 
               // Update for next request
-              fromBlock = block.header.number + 1
+              fromBlock = number + 1
               parentBlockHash = block.header.hash
 
               // Collect a block and its size

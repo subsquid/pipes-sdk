@@ -7,7 +7,8 @@ import { Target, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
 import { PortalBlockStreamOptions, PortalClient, Query } from '~/portal-client/index.js'
-import { MockPortal, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
+import { MockPortal, MockResponse, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
 /**
  * Tallies span starts and ends per name. A single global total hides the interesting cases — a
@@ -132,7 +133,7 @@ describe('Portal abstract stream', () => {
       const stream = evmPortalStream({
         id: 'test',
         portal: portal.url,
-        outputs: blockDecoder({ from: 0, to: 2 }),
+        outputs: blockDecoder({ from: 0, to: 14 }),
       })
 
       let firstCtx
@@ -1178,4 +1179,41 @@ describe('stall reporting', () => {
       }),
     )
   })
+})
+
+describe('Portal stream block order', () => {
+  function blocks(numbers: number[]): MockResponse {
+    return {
+      statusCode: 200,
+      data: numbers.map((number) => ({ header: { number, hash: `0x${number}`, timestamp: number * 1000 } })),
+      head: { finalized: { number: 0, hash: '0x0' } },
+    }
+  }
+
+  // Delivery timing decides how much of the first response the target drains first, so only a prefix is fixed.
+  withPortal(
+    'stops the pipe with E1006 before a block that steps back reaches the target',
+    async ({ portal: serve }) => {
+      const portal = await serve([blocks([1, 2, 3]), blocks([2])])
+      const written: number[] = []
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger: 'silent',
+        outputs: blockDecoder({ from: 1, to: 5 }),
+      }).pipeTo(
+        createTarget({
+          write: async ({ read }) => {
+            for await (const { data } of read()) {
+              written.push(...data.map((header) => header.number))
+            }
+          },
+        }),
+      )
+
+      await expect(run).rejects.toMatchObject({ code: 'E1006', name: 'PortalContract' })
+      expect(written).toEqual([1, 2, 3].slice(0, written.length))
+    },
+  )
 })

@@ -51,6 +51,24 @@ generator groups by program identity (the reference-deployment address, not the 
 name) and range, so it emits one decoder per (program, range) and never merges distinct
 programs — including two whose names normalise to the same identifier.
 
+## Event decoders
+
+The evm event decoder follows the same rule for logs. An entry matches a log by topic0,
+topic count and its indexed-parameter filter, and the decoder re-checks that filter on
+the encoded topics its query sent (WP-22). The portal answers the union of every
+output's requests (WP-25), so without the re-check a filtered decoder emitted logs that
+another output had asked for, and two entries for one event left one empty while the
+other received records its filter excludes — reported in a log, not refused.
+
+The decoder refuses at construction, with a coded configuration error (E0004), two
+entries that can match one log: the same topic0 and topic count, and no indexed parameter
+that both filter on value lists with no value in common. A log goes to one entry only
+(WP-24), so the other would silently miss it. Entries with disjoint filters, or with a
+different topic count such as ERC-20 and ERC-721 `Transfer`, stay legal. Overlapping
+filters belong in separate decoders, where each output receives every log its filter
+matches. The refusal is fatal, as for instructions; a logged report would leave the
+records split.
+
 ## Alternatives considered
 
 *Accommodate mixed widths* by emitting one request per width and letting both streams
@@ -67,7 +85,7 @@ a field that cannot be sent is a trap, not a reserve.
 The mixed-program decoders the generator itself could produce — previously a silent
 corruption — now fail loudly at startup (REQ-2, ADR-9's fail-at-startup posture). The
 Token / Token-2022 multi-deployment configuration remains a single decoder. IB-8 no
-longer lists `d0`, and IB-50 registers E0003.
+longer lists `d0`, and IB-50 registers E0003 and E0004.
 
 INV-24 is **not** mechanically enforced by this decision. `programId` is decoder-level,
 so nothing binds an instruction definition to the program it was generated from; the

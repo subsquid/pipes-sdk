@@ -97,7 +97,9 @@ blocks received before the drop are never re-delivered downstream.
 
 **WP-15 — Duplicate/gap discipline.** [MUST] Within a run, no block number is delivered
 twice and none is skipped inside a covered range. Configured inter-range gaps are
-preserved, never backfilled.
+preserved, never backfilled. A block at or below one already delivered for the request,
+or outside the requested range, halts the pipe with a coded error before any stage sees
+it (FM-16, ADR-1).
 
 **WP-16 — Malformed input.** [MUST] A batch line that fails schema validation is an
 integrity fault (FM-11): fail with a diagnostic identifying the offending block; never
@@ -116,8 +118,8 @@ schema derived from the *selected* fields before user code sees it; selected-but
 collections read as empty collections, unselected fields are absent (INV-23).
 
 **WP-22 — Filter fidelity.** [MUST] Decoders re-check their filters locally (address
-normalization, discriminator match) and drop portal over-returns silently; a record
-matching no declared output is not an error.
+normalization, indexed-parameter topics, discriminator match) and drop portal over-returns
+silently; a record matching no declared output is not an error.
 
 **WP-23 — Decode-error policy.** [MUST] One uniform rule across every network module
 (ADR-12): a decode failure is *fatal by default* (it halts the pipe). A user-supplied
@@ -127,9 +129,8 @@ re-throwing keeps the failure fatal. Suppressed records are skipped and counted 
 semantics are part of the shared conformance surface.
 
 **WP-24 — Attribution uniqueness.** [MUST] Within one module, each input record maps to
-at most one output key. Declaring two outputs with an indistinguishable signature is
-reported at startup. *(Currently a logged error in the evm module, while solana refuses
-at construction — GAP-15; whether the report must be fatal is OQ-6.)*
+at most one output key. Declaring two outputs that can match one input record is refused
+at construction with a coded configuration error (ADR-17).
 
 **WP-25 — Query union.** [MUST] Composed outputs merge into one portal query: for each
 overlapping range sub-interval, the union of all outputs' filters; field selections

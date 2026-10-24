@@ -4,6 +4,7 @@ import { HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 import { isForkException } from '~/portal-client/fork-exception.js'
 import { MockPortal, MockResponse, mockPortal } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
 let portal: MockPortal | undefined
 
@@ -203,6 +204,93 @@ describe('PortalClient fork detection', () => {
     expect(isForkException(err)).toBe(false)
     expect(err).toBeInstanceOf(HttpError)
     expect((err as HttpError).response.status).toBe(409)
+  })
+})
+
+describe('PortalClient block order', () => {
+  /** Block numbers the stream delivered, and the error it ended with. */
+  async function readUntilError(client: PortalClient, range: { fromBlock: number; toBlock: number }) {
+    const delivered: number[] = []
+    try {
+      for await (const batch of client.getStream({ ...query, ...range }, { request: { retryAttempts: 0 } })) {
+        delivered.push(...batch.blocks.map((b: any) => b.header.number))
+      }
+    } catch (error) {
+      return { delivered, error: error as Error }
+    }
+
+    return { delivered, error: undefined }
+  }
+
+  function blocks(numbers: number[]): MockResponse {
+    return { statusCode: 200, data: numbers.map(block), head: { finalized: { number: 0, hash: '0x0' } } }
+  }
+
+  // Response chunking decides how much arrives before the bad block, so only a prefix is fixed.
+  withPortal('refuses a duplicate block within one response', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 2, 3])])
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }), {
+      fromBlock: 0,
+      toBlock: 3,
+    })
+
+    expect(error).toMatchObject({ code: 'E1006', name: 'PortalContract' })
+    expect(error?.message).toContain('block 2 after block 2: a duplicate or out-of-order block')
+    expect(delivered).toEqual([1, 2].slice(0, delivered.length))
+  })
+
+  // Re-requesting from one past the lower block would deliver blocks 3 and above a second time.
+  withPortal('refuses a later response that steps back below a delivered block', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3]), blocks([2])])
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }), {
+      fromBlock: 0,
+      toBlock: 10,
+    })
+
+    expect(error).toMatchObject({ code: 'E1006', name: 'PortalContract' })
+    expect(error?.message).toContain('block 2 after block 3')
+    expect(delivered).toEqual([1, 2, 3].slice(0, delivered.length))
+  })
+
+  withPortal('refuses a block below the requested start', async ({ portal: serve }) => {
+    const portal = await serve([blocks([3, 5])])
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }), {
+      fromBlock: 5,
+      toBlock: 10,
+    })
+
+    expect(error).toMatchObject({ code: 'E1006', name: 'PortalContract' })
+    expect(error?.message).toContain('block 3, below the requested start 5')
+    expect(delivered).toEqual([])
+  })
+
+  withPortal('refuses a block above the requested end', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3, 4])])
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }), {
+      fromBlock: 0,
+      toBlock: 3,
+    })
+
+    expect(error).toMatchObject({ code: 'E1006', name: 'PortalContract' })
+    expect(error?.message).toContain('block 4, above the requested end 3')
+    expect(delivered).toEqual([1, 2, 3].slice(0, delivered.length))
+  })
+
+  // Blocks with no matching data are skipped, so a gap between numbers is not a violation.
+  withPortal('delivers ascending blocks with gaps between them', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 5]), blocks([9])])
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }), {
+      fromBlock: 0,
+      toBlock: 9,
+    })
+
+    expect(error).toBeUndefined()
+    expect(delivered).toEqual([1, 5, 9])
   })
 })
 

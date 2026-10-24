@@ -1,6 +1,6 @@
 import { arrayify } from '~/internal/array.js'
 
-import { joinLines } from './formatters.js'
+import { formatNumber, joinLines } from './formatters.js'
 
 const DOCS_BASE = 'https://docs.sqd.dev/en/sdk/pipes-sdk/errors'
 
@@ -8,6 +8,7 @@ export enum SdkErrorName {
   PipeConfiguration = 'PipeConfiguration',
   ForkHandling = 'ForkHandling',
   TargetConfiguration = 'TargetConfiguration',
+  PortalContract = 'PortalContract',
 }
 
 export class PipeError extends Error {
@@ -57,6 +58,17 @@ export class BlockRangeConfigurationError extends PipeError {
 export class InstructionDecoderConfigurationError extends PipeError {
   constructor(message: string | string[]) {
     super('E0003', SdkErrorName.PipeConfiguration, message)
+  }
+}
+
+/**
+ * E0004: Thrown when an event decoder declares two entries that can match the same log: the same
+ * topic0 and topic count, and no indexed parameter that both filter on disjoint values. A log goes to
+ * one entry only, so the other would silently miss it.
+ */
+export class EventDecoderConfigurationError extends PipeError {
+  constructor(message: string | string[]) {
+    super('E0004', SdkErrorName.PipeConfiguration, message)
   }
 }
 
@@ -124,4 +136,42 @@ export class ForkOnFinalizedStreamError extends PipeError {
       'the portal still considers canonical.',
     ])
   }
+}
+
+/**
+ * E1006: Thrown when the portal delivers a block outside the window its request allows: at or below
+ * a block it already delivered (a duplicate or an out-of-order block), below the requested
+ * `fromBlock`, or above `toBlock`. The pipe stops before the block reaches any transformer or target
+ * rather than write it twice or out of order (FM-16).
+ */
+export class PortalBlockOrderError extends PipeError {
+  constructor({ block, previous, range }: { block: number; previous?: number; range: { from: number; to?: number } }) {
+    super('E1006', SdkErrorName.PortalContract, [
+      portalBlockOrderReason({ block, previous, range }),
+      'Blocks must arrive in ascending order and inside the requested range. The pipe stopped',
+      'before this block reached any transformer or target.',
+      '',
+      'Report it against the portal. A restart resumes from the persisted cursor.',
+    ])
+  }
+}
+
+function portalBlockOrderReason({
+  block,
+  previous,
+  range,
+}: {
+  block: number
+  previous?: number
+  range: { from: number; to?: number }
+}) {
+  if (previous !== undefined && block <= previous) {
+    return `The portal delivered block ${formatNumber(block)} after block ${formatNumber(previous)}: a duplicate or out-of-order block.`
+  }
+
+  if (block < range.from) {
+    return `The portal delivered block ${formatNumber(block)}, below the requested start ${formatNumber(range.from)}.`
+  }
+
+  return `The portal delivered block ${formatNumber(block)}, above the requested end ${formatNumber(range.to ?? Infinity)}.`
 }
