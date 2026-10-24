@@ -1,7 +1,8 @@
-import { Query } from '~/portal-client/index.js'
+import { PortalClient, Query } from '~/portal-client/index.js'
 
 import { Heap } from '../internal/heap.js'
 import { BlockRangeConfigurationError } from './errors.js'
+import { Logger } from './logger.js'
 import { PortalRange, parsePortalRange } from './portal-range.js'
 import { QueryAwareTransformer, SetupQueryFn, TransformerArgs } from './transformer.js'
 
@@ -34,9 +35,39 @@ export type QueryTransformerOpts<In, Out, Query extends QueryBuilder<any>> = Tra
   setupQuery?: SetupQueryFn<Query>
 }
 
+export type PlanRequestArgs = {
+  /** The first block the stream fetches next. */
+  from: number
+  /** The last block of the range the stream is in. Absent for an open range. */
+  to?: number
+  portal: PortalClient
+  logger: Logger
+}
+
+export type PlannedRequest<R> = {
+  request: R
+  /** The last block the request holds for. Absent: it holds to the end of the range. */
+  to?: number
+}
+
+/**
+ * Picks a request while the stream runs, for data whose best filter is only learned on the way.
+ *
+ * The stream calls the planner before it fetches a block range, uses the answer up to the block it
+ * holds for, then calls the planner again for the blocks after it. Every answer must select at least
+ * the items the transformers keep: a narrower request silently drops data.
+ */
+export type RequestPlanner<R> = (args: PlanRequestArgs) => Promise<PlannedRequest<R>>
+
+/** A resolved range with its static request and the planners that add to it while the stream runs. */
+export type PlannedRangeRequest<R> = RangeRequest<R> & {
+  planners?: RequestPlanner<R>[]
+}
+
 export abstract class QueryBuilder<F extends {}, R = any> {
   protected fields: F = {} as F
   protected requests: RangeRequest<R, NaturalRange>[] = []
+  protected planners: RangeRequest<RequestPlanner<R>, NaturalRange>[] = []
 
   abstract getType(): string
   abstract mergeDataRequests(...requests: R[]): R
@@ -59,11 +90,18 @@ export abstract class QueryBuilder<F extends {}, R = any> {
     return this
   }
 
+  /** Adds a request that a {@link RequestPlanner} picks while the stream runs. */
+  addPlannedRequest({ range, planner }: { range: PortalRange; planner: RequestPlanner<R> }): this {
+    this.planners.push({ range: parsePortalRange(range), request: planner })
+    return this
+  }
+
   /** Merges another query builder's requests and fields into this one. */
   merge(query?: QueryBuilder<F, R>) {
     if (!query) return this
 
     this.requests = [...query.requests, ...this.requests]
+    this.planners = [...query.planners, ...this.planners]
     this.addFields(query.getFields())
 
     return this
@@ -84,12 +122,19 @@ export abstract class QueryBuilder<F extends {}, R = any> {
   }: {
     bound?: Range
     portal: Portal
-  }): Promise<{ bounded: RangeRequest<R>[]; raw: RangeRequest<R>[] }> {
-    const latest = this.requests.some((r) => r.range.from === 'latest') ? await portal.getHead() : undefined
+  }): Promise<{ bounded: PlannedRangeRequest<R>[]; raw: PlannedRangeRequest<R>[] }> {
+    // Planners take part in range merging as requests of their own, so each merged range knows
+    // which planners cover it.
+    const entries: RangeRequest<MergedRequest<R>, NaturalRange>[] = [
+      ...this.requests.map((r) => ({ range: r.range, request: { request: r.request || ({} as R), planners: [] } })),
+      ...this.planners.map((p) => ({ range: p.range, request: { request: {} as R, planners: [p.request] } })),
+    ]
 
-    const resolvedTimestamps = await this.resolveTimestamps(portal)
+    const latest = entries.some((r) => r.range.from === 'latest') ? await portal.getHead() : undefined
 
-    const resolvedRequests = this.requests.map((r) => ({
+    const resolvedTimestamps = await this.resolveTimestamps(portal, entries)
+
+    const resolvedRequests = entries.map((r) => ({
       range:
         r.range.from === 'latest'
           ? {
@@ -100,7 +145,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
               from: resolveRequiredRangeValue(r.range.from, resolvedTimestamps),
               to: resolveOptionalRangeValue(r.range.to, resolvedTimestamps),
             },
-      request: r.request || ({} as R),
+      request: r.request,
     }))
 
     for (const r of resolvedRequests) {
@@ -112,7 +157,10 @@ export abstract class QueryBuilder<F extends {}, R = any> {
       }
     }
 
-    const ranges = mergeRangeRequests(resolvedRequests, this.mergeDataRequests)
+    const ranges = mergeRangeRequests<MergedRequest<R>>(resolvedRequests, (a, b) => ({
+      request: this.mergeDataRequests(a.request, b.request),
+      planners: [...a.planners, ...b.planners],
+    }))
 
     if (!ranges.length) {
       // FIXME request should be optional
@@ -123,15 +171,15 @@ export abstract class QueryBuilder<F extends {}, R = any> {
     }
 
     return {
-      raw: ranges,
-      bounded: applyRangeBound(ranges, bound),
+      raw: ranges.map(unwrapMergedRequest),
+      bounded: applyRangeBound(ranges, bound).map(unwrapMergedRequest),
     }
   }
 
-  private async resolveTimestamps(portal: Portal): Promise<Map<number, number>> {
+  private async resolveTimestamps(portal: Portal, requests: { range: NaturalRange }[]): Promise<Map<number, number>> {
     const timestamps = new Set<number>()
 
-    for (const r of this.requests) {
+    for (const r of requests) {
       if (r.range.from instanceof Date) {
         timestamps.add(dateToSeconds(r.range.from))
       }
@@ -161,6 +209,16 @@ export abstract class QueryBuilder<F extends {}, R = any> {
 
     return resolved
   }
+}
+
+type MergedRequest<R> = { request: R; planners: RequestPlanner<R>[] }
+
+function unwrapMergedRequest<R>({ range, request }: RangeRequest<MergedRequest<R>>): PlannedRangeRequest<R> {
+  if (request.planners.length === 0) {
+    return { range, request: request.request }
+  }
+
+  return { range, request: request.request, planners: request.planners }
 }
 
 /** Minimal portal interface needed by `QueryBuilder.calculateRanges` to resolve head and timestamps. */

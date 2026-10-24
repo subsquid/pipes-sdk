@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
+import { evmQuery } from '~/evm/evm-query-builder.js'
+
 import {
+  type Portal,
   type RangeRequest,
+  type RequestPlanner,
   applyRangeBound,
   mergeRangeRequests,
   rangeDifference,
@@ -211,5 +215,52 @@ describe('applyRangeBound', () => {
     const result = applyRangeBound([rr(0, 100, ['a'])], { from: 0, to: 0 })
 
     expect(result).toEqual([rr(0, 0, ['a'])])
+  })
+})
+
+// ── planned requests ──
+
+describe('planned requests', () => {
+  const portal: Portal = {
+    getHead: async () => ({ number: 1_000, hash: '0x' }),
+    resolveTimestamp: async () => 0,
+  }
+
+  const planner: RequestPlanner<any> = async () => ({ request: {} })
+  const logs = { logs: [{ topic0: ['0xaa'] }] }
+
+  it('attaches a planner to every merged range it covers, and to no other', async () => {
+    const query = evmQuery()
+      .addLogRequest({ range: { from: 0, to: 100 }, request: logs.logs[0] })
+      .addPlannedRequest({ range: { from: 50 }, planner })
+
+    const { raw } = await query.calculateRanges({ portal })
+
+    expect(raw).toEqual([
+      { range: { from: 0, to: 49 }, request: logs },
+      { range: { from: 50, to: 100 }, request: logs, planners: [planner] },
+      { range: { from: 101 }, request: {}, planners: [planner] },
+    ])
+    expect(raw[0]).not.toHaveProperty('planners')
+  })
+
+  it('applies the resume bound to planned ranges', async () => {
+    const query = evmQuery().addPlannedRequest({ range: { from: 0, to: 100 }, planner })
+
+    const { bounded, raw } = await query.calculateRanges({ portal, bound: { from: 60 } })
+
+    expect(raw).toEqual([{ range: { from: 0, to: 100 }, request: {}, planners: [planner] }])
+    expect(bounded).toEqual([{ range: { from: 60, to: 100 }, request: {}, planners: [planner] }])
+  })
+
+  it('keeps planners through merge', async () => {
+    const other: RequestPlanner<any> = async () => ({ request: {} })
+    const query = evmQuery()
+      .addPlannedRequest({ range: { from: 0, to: 10 }, planner })
+      .merge(evmQuery().addPlannedRequest({ range: { from: 0, to: 10 }, planner: other }))
+
+    const { raw } = await query.calculateRanges({ portal })
+
+    expect(raw).toEqual([{ range: { from: 0, to: 10 }, request: {}, planners: [other, planner] }])
   })
 })
