@@ -36,7 +36,7 @@ interchangeable mid-stream — an implementation may resume from state written b
 ## Sink bindings
 
 Where to read about each sink. Navigation only — enforcement (locks, legacy migration,
-tracked-table exclusivity) is tabulated normatively in **IB-27**, and per-binding status
+tracked-data attribution) is tabulated normatively in **IB-27**, and per-binding status
 lives in [13-conformance-tdd.md](13-conformance-tdd.md).
 
 | Binding | Durability class | State format | Fork mechanics | Sink-specific decisions |
@@ -52,8 +52,7 @@ Binding-independent: the contract every sink implements is
 [ADR-2 — cursor keyed by pipe id](decisions/ADR-2-cursor-keyed-by-pipe-id.md) ·
 [ADR-4 — coded error taxonomy](decisions/ADR-4-coded-error-taxonomy.md) ·
 [ADR-5 — durability classes](decisions/ADR-5-durability-classes.md) ·
-[ADR-16 — tracked-table exclusivity](decisions/ADR-16-tracked-table-exclusivity.md)
-*(proposed)* ·
+[ADR-16 — shared tracked data](decisions/ADR-16-tracked-table-exclusivity.md) ·
 [ADR-22 — finalized-only source selection](decisions/ADR-22-finalized-only-source-selection.md).
 
 ## Conventions

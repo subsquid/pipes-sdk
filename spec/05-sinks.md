@@ -57,10 +57,10 @@ A consumer never observes a torn batch within the class's atomic unit (CN-20…C
 The no-finality limitation of DEF-15/FM-13 applies.
 
 **RP-21 — Coverage honesty (file sinks).** [MUST] Every published unit is named for the
-coverage window it accounts for (DEF-14): windows tile the processed range per table —
-no overlaps, no gaps within a covered range; a window absent from a table means "not
-processed", never "processed, empty". Sparse tables stretch windows; empty windows at
-stream end publish as explicit empty units.
+coverage window it accounts for (DEF-14): windows tile the processed range per table and
+cursor key — no overlaps, no gaps within a covered range; a window absent from a table
+means "not processed", never "processed, empty". Sparse tables stretch windows; empty
+windows at stream end publish as explicit empty units.
 
 **RP-22 — Rows within window.** [MUST] Every row in a published unit is attributed to a
 block inside that unit's window.
@@ -91,8 +91,8 @@ key. An explicit key disables both adoption and migration.
 declare migration (the transactional and append-lagged DB bindings, IB-21/IB-20)
 migrate legacy-keyed state to the new key exactly once, observably (warning log), and
 never again. Write-ahead and file bindings do not migrate — they start fresh or, where
-tracked tables are declared exclusive (IB-27), refuse via the orphan-data guard (ADR-2,
-RP-32, CN-44).
+their tracked data is attributable to the key (CN-44), refuse via the orphan-data guard
+(ADR-2, RP-32).
 
 **RP-32 — Migration safety.** [MUST] Migration is race-safe: under concurrent first
 runs, at most one pipe adopts the legacy state; others start fresh. *(One binding
