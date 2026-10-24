@@ -118,3 +118,57 @@ describe('BigQuerySyncState — cursor key binding', () => {
     expect(state.cursorKey).toBe('stream')
   })
 })
+
+describe('BigQuerySyncState — fork records', () => {
+  function syncRow(
+    rollbackChain: { number: number; hash: string }[],
+    finalized: { number: number; hash: string },
+    timestamp: number,
+  ) {
+    return { ...committedRow(finalized), rollback_chain: JSON.stringify(rollbackChain), timestamp }
+  }
+
+  // Newest first: the match, block 5, comes before the record that holds the highest floor.
+  const rows = [syncRow([block(5), block(7)], block(4), 2), syncRow([], block(6), 1)]
+
+  /** Answers like BigQuery: newest first, below the cutoff, at most `limit` rows. */
+  function pagedState(maxRows?: number) {
+    const queries: Record<string, unknown>[] = []
+    const store = {
+      query: async (_sql: string, params: Record<string, unknown>) => {
+        queries.push(params)
+        const cutoff = params['cutoff'] as number | undefined
+        const page = rows.filter((row) => cutoff === undefined || row.timestamp < cutoff)
+
+        return page.slice(0, params['limit'] as number)
+      },
+    }
+
+    const state = new BigQuerySyncState({
+      store: store as any,
+      bigquery: {} as any,
+      trackedTables: [],
+      options: { projectId: 'p', dataset: 'd', maxRows },
+    })
+
+    return { state, queries }
+  }
+
+  it('reads the floor from a later page before it resolves the fork', async () => {
+    const { state, queries } = pagedState(1)
+
+    const { safeCursor } = await state.fork([block(5), block(6, '0x6b'), block(7, '0x7b')])
+
+    expect(safeCursor).toBeNull()
+    expect(queries).toHaveLength(3)
+  })
+
+  it('reads every record in one query when they fit in maxRows', async () => {
+    const { state, queries } = pagedState()
+
+    const { safeCursor } = await state.fork([block(5), block(6, '0x6b'), block(7, '0x7b')])
+
+    expect(safeCursor).toBeNull()
+    expect(queries).toHaveLength(1)
+  })
+})

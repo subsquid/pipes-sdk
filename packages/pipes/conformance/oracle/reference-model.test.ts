@@ -306,18 +306,30 @@ describe('ReferenceModel', () => {
       expect(refusal(model, () => model.fork(chain(2, 4, 'b')))).toBe(ORACLE_ERRORS.NO_ANCESTOR)
     })
 
-    it('halts when the ancestor lies below the current floor (WP-44, GAP-6)', () => {
+    it('falls back to the floor when the window also holds blocks below it (WP-42)', () => {
       const model = new ReferenceModel({ durability: 'T' })
       model.batch(chain(0, 5), { finalized: block(1) })
       model.batch(chain(6, 8), { finalized: block(6) })
 
-      // Blocks 7 and 8 are replaced. The newest record holds nothing at or below the floor, and
-      // the window keeps more than the floor, so the search reaches the older record and matches
-      // block 5. As written, WP-44 halts here although the floor itself is canonical (GAP-6).
-      const canonical = [...chain(4, 6), ...chain(7, 8, 'b')]
+      // Blocks 7 and 8 are replaced, and the newest record holds nothing at or below the floor.
+      const ancestor = model.fork([...chain(4, 6), ...chain(7, 8, 'b')])
+
+      expect(ancestor).toEqual(block(6))
+      expect(model.readState()).toEqual({ current: block(6), finalized: block(6), rollbackChain: [] })
+      expect(blocksOf(model)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    })
+
+    it('halts when the ancestor lies below the current floor (WP-44)', () => {
+      const model = new ReferenceModel({ durability: 'T' })
+      model.batch(chain(0, 5), { finalized: block(1) })
+      model.batch(chain(6, 8), { finalized: block(6) })
+
+      // The floor itself is replaced, so the search reaches the older record and matches block 5.
+      const canonical = [...chain(4, 5), ...chain(6, 8, 'b')]
 
       expect(refusal(model, () => model.fork(canonical))).toBe(ORACLE_ERRORS.FINALITY_CONFLICT)
       expect(model.readState().current).toEqual(block(8))
+      expect(blocksOf(model)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
     })
   })
 

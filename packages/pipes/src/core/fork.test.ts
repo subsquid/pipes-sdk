@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { RollbackRecord, resolveForkCursor } from './fork.js'
+import { BlockCursor } from './types.js'
 
 function block(number: number, hash?: string) {
   return { number, hash: hash ?? `0x${number}` }
@@ -74,7 +75,7 @@ describe('resolveForkCursor', () => {
       expect(result).toEqual(block(5))
     })
 
-    it('should not fall back to finalized if multiple previous blocks remain', async () => {
+    it('should fall back to finalized when the window holds other blocks too', async () => {
       const result = await resolveForkCursor(
         [
           {
@@ -82,10 +83,10 @@ describe('resolveForkCursor', () => {
             finalized: block(5),
           },
         ],
-        [block(5), block(6, '0x6b')],
+        [block(4), block(5), block(6, '0x6b'), block(7, '0x7b')],
       )
 
-      expect(result).toBeNull()
+      expect(result).toEqual(block(5))
     })
   })
 
@@ -131,8 +132,8 @@ describe('resolveForkCursor', () => {
     it('should handle records with empty rollback chains', async () => {
       const result = await resolveForkCursor(
         [
-          { rollbackChain: [], finalized: block(9) },
-          { rollbackChain: [], finalized: block(7) },
+          { rollbackChain: [], finalized: block(4) },
+          { rollbackChain: [], finalized: block(4) },
           {
             rollbackChain: [block(5), block(6)],
             finalized: block(4),
@@ -166,16 +167,132 @@ describe('resolveForkCursor', () => {
     it('should return null when deep fork goes below finalized', async () => {
       const result = await resolveForkCursor(
         [
-          {
-            rollbackChain: [block(3, '0x3a')],
-            finalized: block(5),
-          },
+          { rollbackChain: [block(7, '0x7a'), block(8, '0x8a')], finalized: block(6) },
+          { rollbackChain: [block(4), block(5)], finalized: block(3) },
         ],
-        // Doesn't match, previousBlocks becomes empty
-        [block(3, '0x3b')],
+        [block(6, '0x6b'), block(7, '0x7b'), block(8, '0x8b')],
       )
 
-      // Block 3 < finalized 5 → return null
+      // The window empties at block 5, and the restart cursor 4 lies below the floor 6
+      expect(result).toBeNull()
+    })
+  })
+
+  describe('finalized floor', () => {
+    const records = [
+      { rollbackChain: [block(7), block(8)], finalized: block(6) },
+      { rollbackChain: [block(2), block(3), block(4), block(5)], finalized: block(1) },
+    ]
+
+    it('should resolve to the floor when the window also holds blocks below it', async () => {
+      const result = await resolveForkCursor(records, [
+        block(4),
+        block(5),
+        block(6),
+        block(7, '0x7b'),
+        block(8, '0x8b'),
+      ])
+
+      expect(result).toEqual(block(6))
+    })
+
+    it('should search older records for blocks above the floor before falling back to it', async () => {
+      const result = await resolveForkCursor(
+        [
+          { rollbackChain: [block(7), block(8)], finalized: block(4) },
+          { rollbackChain: [block(5), block(6)], finalized: block(4) },
+        ],
+        [block(3), block(4), block(5), block(6), block(7, '0x7b'), block(8, '0x8b')],
+      )
+
+      expect(result).toEqual(block(6))
+    })
+
+    it('should restart from a retained block at the floor when the window empties', async () => {
+      const result = await resolveForkCursor(
+        [
+          { rollbackChain: [block(7, '0x7a'), block(8, '0x8a')], finalized: block(6) },
+          { rollbackChain: [block(5), block(6)], finalized: block(4) },
+        ],
+        [block(7, '0x7b'), block(8, '0x8b')],
+      )
+
+      expect(result).toEqual(block(6))
+    })
+
+    it('should return null when a canonical match lies below the floor', async () => {
+      const result = await resolveForkCursor(records, [
+        block(4),
+        block(5),
+        block(6, '0x6b'),
+        block(7, '0x7b'),
+        block(8, '0x8b'),
+      ])
+
+      expect(result).toBeNull()
+    })
+
+    it('should return null when only an older record floor is canonical', async () => {
+      const result = await resolveForkCursor(records, [block(1), block(6, '0x6b'), block(7, '0x7b'), block(8, '0x8b')])
+
+      expect(result).toBeNull()
+    })
+
+    it('should take the floor from a record after the match', async () => {
+      const result = await resolveForkCursor(
+        [
+          { rollbackChain: [block(5), block(7)], finalized: block(4) },
+          { rollbackChain: [], finalized: block(6) },
+        ],
+        [block(5), block(6, '0x6b'), block(7, '0x7b')],
+      )
+
+      expect(result).toBeNull()
+    })
+
+    it('should hold the highest floor when records arrive out of order', async () => {
+      const result = await resolveForkCursor(
+        [
+          { rollbackChain: [block(8)], finalized: block(4) },
+          { rollbackChain: [block(7)], finalized: block(6) },
+          { rollbackChain: [block(4), block(5)], finalized: block(3) },
+        ],
+        [block(5), block(6, '0x6b'), block(7, '0x7b'), block(8, '0x8b')],
+      )
+
+      expect(result).toBeNull()
+    })
+
+    it('should take the floor from a record with an empty chain', async () => {
+      const result = await resolveForkCursor(
+        [
+          { rollbackChain: [], finalized: block(9) },
+          { rollbackChain: [block(5), block(6)], finalized: block(4) },
+        ],
+        [block(5), block(6, '0x6a')],
+      )
+
+      expect(result).toBeNull()
+    })
+
+    it('should resolve to the floor of a record with an empty chain', async () => {
+      const result = await resolveForkCursor(
+        [
+          { rollbackChain: [], finalized: block(9) },
+          { rollbackChain: [block(5), block(6)], finalized: block(4) },
+        ],
+        [block(8), block(9), block(10, '0x10b')],
+      )
+
+      expect(result).toEqual(block(9))
+    })
+
+    it('should treat a finalized cursor without a block number as absent', async () => {
+      const result = await resolveForkCursor(
+        [{ rollbackChain: [], finalized: {} as BlockCursor }, ...records],
+        [block(4), block(5), block(6, '0x6b'), block(7, '0x7b'), block(8, '0x8b')],
+      )
+
       expect(result).toBeNull()
     })
   })
@@ -194,26 +311,15 @@ describe('resolveForkCursor', () => {
       expect(result).toEqual(block(5))
     })
 
-    it('should stop consuming records once a match is found', async () => {
-      let recordsConsumed = 0
-
+    it('should read every record of an async source before the search', async () => {
       async function* records(): AsyncIterable<RollbackRecord> {
-        recordsConsumed++
-        yield {
-          rollbackChain: [block(5), block(6)],
-          finalized: block(4),
-        }
-        recordsConsumed++
-        yield {
-          rollbackChain: [block(3), block(4)],
-          finalized: block(2),
-        }
+        yield { rollbackChain: [block(5), block(7)], finalized: block(4) }
+        yield { rollbackChain: [], finalized: block(6) }
       }
 
-      const result = await resolveForkCursor(records(), [block(5), block(6, '0x6a')])
+      const result = await resolveForkCursor(records(), [block(5), block(6, '0x6b'), block(7, '0x7b')])
 
-      expect(result).toEqual(block(5))
-      expect(recordsConsumed).toBe(1)
+      expect(result).toBeNull()
     })
   })
 

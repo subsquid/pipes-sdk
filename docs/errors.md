@@ -191,9 +191,14 @@ violation.
 
 ### E1003 · resolveFork() returned no cursor
 
-The target's `resolveFork()` returned nothing instead of a cursor.
+The target's `resolveFork()` returned nothing instead of a cursor. A built-in target returns nothing
+in two cases: none of the blocks it retained is on the canonical chain, or the fork reaches below the
+finalized block. Finalized data is never rolled back, so the pipe stops instead.
 
-**Fix** — return the cursor to resume from after rolling back.
+**Fix** — in a custom target, return the cursor to resume from after rolling back. With a built-in
+target, the fork is deeper than the target's retained history or reaches finalized blocks:
+[report it](https://github.com/subsquid-labs/pipes-sdk/issues), then index again from a block below
+the fork.
 
 ### E1004 · Portal contract violation
 

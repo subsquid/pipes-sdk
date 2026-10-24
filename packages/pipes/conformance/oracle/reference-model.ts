@@ -256,17 +256,16 @@ export class ReferenceModel {
       )
     }
 
-    const ancestor = searchAncestor(this.#records, canonical)
-    if (!ancestor) {
-      throw new OracleError(ORACLE_ERRORS.NO_ANCESTOR, 'WP-42: no common ancestor in the rollback records')
-    }
-
-    // WP-44: checked against the current floor, not each record's own (GAP-6).
-    if (this.#finalized && ancestor.number < this.#finalized.number) {
+    const { ancestor, reachedFloor } = searchAncestor(this.#records, canonical, this.#finalized)
+    if (!ancestor && reachedFloor) {
       throw new OracleError(
         ORACLE_ERRORS.FINALITY_CONFLICT,
-        `WP-44: the ancestor ${ancestor.number} is below the floor ${this.#finalized.number}`,
+        `WP-44: no common ancestor at or above the floor ${this.#finalized?.number}`,
       )
+    }
+
+    if (!ancestor) {
+      throw new OracleError(ORACLE_ERRORS.NO_ANCESTOR, 'WP-42: no common ancestor in the rollback records')
     }
 
     this.#atomically(() => {
@@ -563,33 +562,43 @@ function requireBlocks(source: string, cursors: readonly Cursor[]): void {
 
 /**
  * WP-42: walk the records newest → oldest, each chain descending, and narrow the canonical window
- * past every cursor visited.
+ * past every cursor visited. The walk stops at the first cursor below the current floor (WP-44), and
+ * then the floor is the ancestor only if the window holds it.
  */
-function searchAncestor(records: readonly RollbackRecord[], canonical: readonly Cursor[]): Cursor | undefined {
+function searchAncestor(
+  records: readonly RollbackRecord[],
+  canonical: readonly Cursor[],
+  floor: Cursor | undefined,
+): { ancestor?: Cursor; reachedFloor: boolean } {
   let window = [...canonical]
 
   for (const record of [...records].reverse()) {
     const chain = [...record.rollbackChain].sort((a, b) => b.number - a.number)
 
     for (const visited of chain) {
+      if (floor && visited.number < floor.number) {
+        return { ancestor: canonicalFloor(window, floor), reachedFloor: true }
+      }
+
       const match = window.find((entry) => entry.hash === visited.hash)
       if (match) {
-        return match
+        return { ancestor: match, reachedFloor: false }
       }
 
       // Deep-fork restart: the next retained cursor below the exhausted window.
       if (!window.length) {
-        return visited
+        return { ancestor: visited, reachedFloor: false }
       }
 
       window = window.filter((entry) => entry.number < visited.number)
     }
-
-    const floorFallback = record.finalized && window.length === 1 && window[0].hash === record.finalized.hash
-    if (floorFallback) {
-      return record.finalized
-    }
   }
 
-  return undefined
+  return { ancestor: canonicalFloor(window, floor), reachedFloor: false }
+}
+
+function canonicalFloor(window: readonly Cursor[], floor: Cursor | undefined): Cursor | undefined {
+  const canonical = floor !== undefined && window.some((entry) => entry.hash === floor.hash)
+
+  return canonical ? floor : undefined
 }

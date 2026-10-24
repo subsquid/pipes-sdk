@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
+import { RollbackRecord, resolveForkCursor } from '~/core/fork.js'
 import { defaultLogger } from '~/core/logger.js'
 import { PortalCache } from '~/core/portal-source.js'
 import { SpanHooks } from '~/core/profiling.js'
@@ -1216,4 +1217,47 @@ describe('Portal stream block order', () => {
       expect(written).toEqual([1, 2, 3].slice(0, written.length))
     },
   )
+})
+
+describe('Portal stream fork below the finalized floor', () => {
+  function blocks(numbers: number[], finalized: number): MockResponse {
+    return {
+      statusCode: 200,
+      data: numbers.map((number) => ({ header: { number, hash: `0x${number}`, timestamp: number * 1000 } })),
+      head: { finalized: { number: finalized, hash: `0x${finalized}` } },
+    }
+  }
+
+  withPortal('stops the pipe with E1003 when the fork replaces the finalized block', async ({ portal: serve }) => {
+    // The fork replaces the floor, block 3, so the only canonical match, block 2, lies below it.
+    const replaced = [3, 4].map((number) => ({ number, hash: `0x${number}b` }))
+    const portal = await serve([
+      blocks([1, 2], 0),
+      blocks([3, 4], 3),
+      {
+        statusCode: 409,
+        data: { previousBlocks: [{ number: 1, hash: '0x1' }, { number: 2, hash: '0x2' }, ...replaced] },
+      },
+    ])
+    const records: RollbackRecord[] = []
+
+    const run = evmPortalStream({
+      id: 'test',
+      portal: portal.url,
+      logger: 'silent',
+      outputs: blockDecoder({ from: 1, to: 10 }),
+    }).pipeTo(
+      createTarget({
+        write: async ({ read }) => {
+          for await (const { ctx } of read()) {
+            // Newest first, as a store reads its records back.
+            records.unshift({ rollbackChain: ctx.stream.state.rollbackChain, finalized: ctx.stream.head.finalized })
+          }
+        },
+        resolveFork: (canonical) => resolveForkCursor(records, canonical),
+      }),
+    )
+
+    await expect(run).rejects.toMatchObject({ code: 'E1003', name: 'ForkHandling' })
+  })
 })

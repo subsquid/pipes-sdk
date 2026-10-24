@@ -169,20 +169,20 @@ entries strictly below it. A visited cursor whose hash appears in the window is 
 ancestor. If the window empties while retained cursors remain (the fork reaches below
 the canonical chain), the next retained cursor below the exhausted window is the
 ancestor — a **deep-fork restart**: streaming resumes from it and the portal supplies a
-longer canonical chain if it is still not canonical. If that cursor would lie below `F`,
-resolution fails — see WP-44. If a record is exhausted without a match and exactly one
-window entry remains matching the record's finalized cursor, the floor itself is the
-ancestor (rollback to `F`).
+longer canonical chain if it is still not canonical. The search stops at the first
+retained cursor below `F`, or when no retained cursor is left. If the window then holds
+`F`, `F` is the ancestor (rollback to `F`). If it does not, the search has no result
+(WP-44).
 
 **WP-43 — Rollback effect.** [MUST] Given ancestor `A`: all sink data attributed to
 blocks `> A.number` is removed (per class mechanism, 06); `C ← A`; `RC` is trimmed to
 `≤ A.number`; `F` is unchanged. Then WP-32, then streaming resumes at `A.number + 1`
 with `A.hash` as the new anchor.
 
-**WP-44 — Finality conflict.** [MUST] A fork that cannot resolve above the finalized
-floor halts the pipe with the coded fork error *(today the generic ancestor-unresolvable
-code E1003 — the resolve layer returns ⊥ with an open TODO)*. Finalized data is never
-rolled back (INV-13). *(Whether halt is the final intent is OQ-2/GAP-6.)*
+**WP-44 — Finality conflict.** [MUST] The WP-42 search never goes below the current
+floor `F`. When it stops there without a result, the pipe halts with the
+ancestor-unresolvable code (E1003) before the sink removes data. The pipe never rolls
+back finalized data (INV-13, ADR-3).
 
 **WP-45 — Sink capability.** [MUST] A fork arriving at a sink that does not implement
 rollback halts with the coded not-supported error. Fork support is per full-stream sink,

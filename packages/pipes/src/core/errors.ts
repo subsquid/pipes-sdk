@@ -105,7 +105,8 @@ export class ForkCursorMissingError extends PipeError {
   constructor() {
     super('E1003', SdkErrorName.ForkHandling, [
       'A blockchain fork was detected, but the target resolveFork() did not return a new cursor.',
-      'The resolveFork() method must return the cursor to resume from after rolling back.',
+      'A built-in target returns none when none of its retained blocks is canonical, or when the fork reaches below the finalized block, which is never rolled back.',
+      'A custom resolveFork() must return the cursor to resume from after rolling back.',
     ])
   }
 }

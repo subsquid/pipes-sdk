@@ -104,21 +104,21 @@ fork(canonical):                                     # T-FORK
   require mode = full else CODED-ERROR                # WP-45 / FM-13
   require canonical ≠ ∅ else CODED-ERROR              # WP-41
   require max(canonical).number ≥ C.number else CODED-ERROR   # RP-43 (class W enforces today — GAP-9)
-  A ← search(R, canonical)                            # WP-42
-  if A = ⊥ → CODED-ERROR                              # no ancestor (E1003)
-  if F ≠ ⊥ and A.number < F.number → CODED-ERROR      # WP-44: against the current F (GAP-6)
+  A ← search(R, canonical, F)                         # WP-42
+  if A = ⊥ → CODED-ERROR                              # no ancestor at or above F (E1003, WP-44)
   D ← D − rows(> A.number)                            # class C compensates instead (CN-35)
   C ← A; RC ← RC[≤ A.number]; R ← R ++ [⟨RC, F⟩]      # F unchanged; INV-13/14
   commit-point(fork)                                   # CN-34 (class A deviates — GAP-21)
 
-search(R, canonical):                                # WP-42
+search(R, canonical, F):                             # WP-42
   W ← canonical                                       # narrowing window
-  for rec ∈ R newest → oldest:
+  walk: for rec ∈ R newest → oldest:
     for r ∈ rec.RC newest → oldest:
+      if F ≠ ⊥ and r.number < F.number → break walk   # never below F (WP-44)
       if ∃w ∈ W : w.hash = r.hash → return w          # canonical match
       if W = ∅ → return r                             # deep-fork restart (below exhausted window)
       W ← {w ∈ W : w.number < r.number}
-    if |W| = 1 and W.hash = rec.F.hash → return rec.F # floor fallback
+  if F ≠ ⊥ and ∃w ∈ W : w.hash = F.hash → return F    # floor fallback
   return ⊥
 
 read_state(): return ⟨C, F, RC⟩                       # same taxonomy as the API
@@ -226,7 +226,7 @@ known-suspect in the current implementation (see gap register).
 | WP-30…WP-32 (lifecycle) | CT-1 | P ⚠ | stop-once + partial-start tested; fork path re-fires start/stop per segment (GAP-22) |
 | WP-40…WP-43 (fork core) | CT-3 | C ⚠ | core fork, portal-source, and fork-capable target suites; WP-42 text normativized from the tested deep-fork/floor-fallback semantics; K/∅ excluded by WP-7; a full stream without finality keeps no chain to search (GAP-42) |
 | WP-41 (empty canonical) | CT-4 | U ⚠ | an empty or absent chain surfaces as a raw 409 HTTP error, pinned by a client test (GAP-8) |
-| WP-44 (finality conflict) | CT-3 | U ⚠ | the resolver test named for it never reaches the finality branch; the resolver checks each record's own floor, not F; the WP-42 search passes a canonical floor (GAP-6) |
+| WP-44 (finality conflict) | CT-3 | P | Resolver unit tests: the search stops at the first block below `F`, so a match, a deep-fork restart or an older floor below `F` gives ⊥. `F` is the highest floor of all records, also of a record with an empty chain or after the match. `F` is the ancestor only when no older record holds a canonical block above it. The oracle pins the halt and the fallback. A pipe test stops with E1003 when the fork replaces the finalized block. No built-in target or CT-3 test asserts the halt |
 | WP-46 (rollback idempotence) | CT-2/3 | P | netting idempotence tested (one binding); classes T and A: CT-2 S3 kills the fork's rollback twice in a row and converges; others U |
 | WP-47 (depth bound) | CT-3 | P ⚠ | retention pruning tested; deep-fork restart e2e U; a full stream without finality retains nothing (GAP-42) |
 | RP-1…RP-6 (write loop) | CT-1 | C | per-target state suites |
@@ -246,7 +246,7 @@ known-suspect in the current implementation (see gap register).
 | INV-1, INV-3, INV-5 (state well-formedness) | CT-1 | P | structural validators and the diff against S1's fixed end state on the class-K, class-T and class-A stores (two tables) at quiescence, class K with and without finality, and on the committed part after every CT-2 kill; no store probe for classes W and C |
 | INV-2, INV-12 (floor) | CT-1/2 | C ⚠ | adversarial regression/genesis tests; class T lowers the persisted floor at a fork (GAP-43) |
 | INV-10 (frame condition) | CT-1 | P | CT-1 S1: a restart with nothing left to read leaves the class-K store byte-identical and the reads of the class-T and class-A stores unchanged; no idle soak (CT-7) |
-| INV-13, INV-14 (fork safety) | CT-3 | C ⚠ | at batch boundaries; mid-flush U; a fork below F is not refused (GAP-6) |
+| INV-13, INV-14 (fork safety) | CT-3 | C | at batch boundaries; mid-flush U; the fork search stops at `F`, and the pipe halts before the sink removes data (WP-44) |
 | INV-15, INV-35, LIV-10 (isolation) | CT-8 | U ⚠ | no co-resident/dual-instance tests; Parquet recovery acts on a co-resident pipe's files (GAP-35) |
 | INV-21, INV-23 (fidelity, selection) | CT-5 | C | validator fixtures incl. chain edge shapes |
 | INV-22 (determinism) | CT-1 | P | CT-1 S1: two runs under different response partitionings commit the same rows (class K); no cross-implementation diff |
@@ -272,7 +272,6 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 |---|---|---|---|---|
 | GAP-4 | Blank-pipe-id guard throws an uncoded error; the documented code exists but is dead | REQ-13, WP-3 | P3 | blank id + sink → assert the coded configuration error |
 | GAP-5 | Malformed and truncated NDJSON lines are not told apart, and neither is coded: a line split across chunks is rejoined, but a malformed line — or an unterminated final line at a clean end of body — surfaces as a raw parse error | WP-16, FM-11 | P2 | send one malformed line (must fail coded, naming the block); end a body mid-line (must re-request or fail coded) |
-| GAP-6 | Fork resolution never compares against the current floor: the finality check tests each visited cursor against its own record's finalized cursor, which that record's chain lies above by construction, and a canonical match returns unchecked. A canonical chain that disagrees below `F` therefore resolves to an ancestor below `F` — rolling back finalized data — instead of halting; halt is provisional intent (OQ-2). The resolver test named for this case returns through the no-ancestor path and passes with the finality branch deleted, and both paths return ⊥, so no assertion can tell them apart. The WP-42 search also passes a canonical floor: its floor fallback fires only when the window has narrowed to `F` alone, so when the newest record keeps nothing at or below `F` and the window still holds blocks below it, the search matches an older record's cursor below `F`. Blocks 0–8 committed with `F` = 6, then 7–8 replaced and a window from block 4: the resolver returns 5 and rolls back finalized block 6, and the pseudocode's check against the current `F` halts instead, although `F` is a safe ancestor; the oracle pins the spec's halt (`conformance/oracle/reference-model.test.ts`), and whether `F` resolves such a fork joins OQ-2 | WP-44, WP-42, INV-13 | P2 | records whose chains reach below the current `F`; canonical chain matching nothing above `F` → assert the coded halt and no deletion at or below `F` |
 | GAP-7 | Legacy cursor migration in one binding is unlocked: concurrent first runs can both adopt legacy state and inherit a foreign monotonic floor that never self-corrects | RP-32, INV-35 | P2 | two concurrent first runs against legacy-keyed store; ≤ 1 adopts |
 | GAP-8 | A fork response with an empty or absent canonical chain is not read as a fork: it surfaces as a raw 409 HTTP error, so the coded guard is unreachable, and a client test pins the uncoded error | WP-41, FM-14 | P3 | 409 with an empty `previousBlocks` → assert the coded contract violation, not an HTTP error |
 | GAP-9 | Canonical-chain-below-cursor guard enforced by one binding only (E1004). The other fork-capable bindings delete everything above the ancestor without an upper bound, so no orphan rows remain, but they accept the contract violation instead of refusing it | RP-43, FM-15 | P3 | fork with max(canonical) < cursor against each class; assert coded refusal |

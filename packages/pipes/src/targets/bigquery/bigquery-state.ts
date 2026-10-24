@@ -495,18 +495,19 @@ export class BigQuerySyncState {
 
   /**
    * Async iterable of RollbackRecords newest-first, paged directly from BigQuery via
-   * `ORDER BY timestamp DESC`. Drives `resolveForkCursor`.
+   * `ORDER BY timestamp DESC`. Drives `resolveForkCursor`, which reads every record to find the
+   * highest floor.
    *
    * Each page is bounded by the timestamp of the previous page's last row, so the same row
    * is never yielded twice — server-assigned `CURRENT_TIMESTAMP()` gives µs precision and is
-   * unique per write within a stream. Cost: 1 BQ query for any fork that resolves within
-   * `PAGE_SIZE`; deeper forks page until exhausted.
+   * unique per write within a stream. A page holds `maxRows` rows, the bound cleanup keeps,
+   * so a fork costs one BQ query unless cleanup has fallen behind.
    */
   async *#streamRollbackRecords(): AsyncGenerator<RollbackRecord> {
-    const PAGE_SIZE = 1000
+    const pageSize = this.options.maxRows
     let cutoff: string | number | undefined
     while (true) {
-      const params: Record<string, unknown> = { id: this.#key.value, limit: PAGE_SIZE }
+      const params: Record<string, unknown> = { id: this.#key.value, limit: pageSize }
       let where = `\`id\` = @id AND \`committed\` = TRUE`
       if (cutoff !== undefined) {
         params['cutoff'] = cutoff
@@ -520,6 +521,10 @@ export class BigQuerySyncState {
       for (const row of rows) {
         yield this.#rowToRollbackRecord(row)
       }
+      if (rows.length < pageSize) {
+        break
+      }
+
       const last = rows[rows.length - 1].timestamp
       if (last == null) break // unreachable on a server-managed timestamp, but defensive
       cutoff = last

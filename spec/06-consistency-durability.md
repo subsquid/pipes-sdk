@@ -135,7 +135,7 @@ their partition, and before the source re-streams the canonical blocks. On the f
 dead-end (WP-44), the entire rollbackable manifest is compensated back to the finalized
 baselines before the sink returns ⊥ — fail-closed, not a convergence claim: if the fork
 invalidated the persisted floor, local data cannot repair it and consumers need a
-rebuild *(GAP-6)*.
+rebuild (ADR-3).
 
 **CN-34 — Ancestor persistence.** [MUST] After any fork-capable class's fork completes,
 persisted state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process
