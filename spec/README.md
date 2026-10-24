@@ -75,6 +75,18 @@ Binding-independent: the contract every sink implements is
   entry the reference implementation violates MAY carry an italic parenthetical
   pointer to its gap-register entry (`*(… — GAP-n)*`); it names the GAP id, so the
   machine check flags it once that entry closes.
+- **Language**: write the documents in `spec/`, ADRs included, in ASD-STE100 Simplified
+  Technical English (STE). Do not rewrite text that you do not change. When you add a
+  sentence or change what a sentence says, write that sentence in STE. A sentence where
+  you change only an ID or a link can stay as it is. IDs, code names, error codes and
+  formulas are technical names: use them as they are. The main rules are:
+  - Use only STE approved words with their approved meanings, plus technical names and
+    technical verbs.
+  - Write a maximum of 20 words in an instruction and 25 words in a descriptive sentence.
+  - Use the active voice, and only the present, simple past and simple future tense.
+  - Do not use the -ing form of a verb, except in a technical name.
+  - Write a maximum of three words in a noun cluster and six sentences in a paragraph.
+  - Use a vertical list for a sequence of steps or a group of conditions.
 - **Machine check**: `node spec/check-spec.mjs` validates the ID system (definitions,
   references, ranges) and every relative link (target file exists, anchor matches a
   heading); CI runs it on every spec change.
