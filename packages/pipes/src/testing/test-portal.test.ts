@@ -7,14 +7,9 @@ import { evmPortalStream } from '~/evm/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 
 import { mockBlock } from './evm/mock-block.js'
+import { withPortal } from './portal-fixture.js'
 import { blockDecoder } from './test-block-stream.js'
-import {
-  type MockChainPortal,
-  type MockPortal,
-  type MockPortalOptions,
-  finalizedMockPortal,
-  mockPortal,
-} from './test-portal.js'
+import { type MockChainPortal, type MockPortal, finalizedMockPortal, mockPortal } from './test-portal.js'
 
 const A = '0x00000000000000000000000000000000000000aa'
 const B = '0x00000000000000000000000000000000000000bb'
@@ -380,19 +375,6 @@ describe('mockPortal over a chain', () => {
     expect(before?.number).toBe(10)
     expect(state?.latest.number).toBe(12)
   })
-})
-
-const withPortal = it.extend<{ portal: (options: MockPortalOptions) => Promise<MockChainPortal> }>({
-  portal: async ({}, use) => {
-    const opened: MockChainPortal[] = []
-    await use(async (options) => {
-      const portal = await mockPortal(options)
-      opened.push(portal)
-
-      return portal
-    })
-    await Promise.all(opened.map((portal) => portal.close()))
-  },
 })
 
 describe('mockPortal request log', () => {

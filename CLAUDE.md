@@ -9,29 +9,10 @@
 
 ## Testing
 
-- Tests live next to source files: `feature.ts` → `feature.test.ts`
-- Always use the internal testing framework from `~/testing/` — do NOT create ad-hoc HTTP mocks
-- EVM test helpers: `mockBlock`, `encodeEvent`, `resetMockBlockCounter` from `~/testing/evm/`
-- General helpers: `mockPortal`, `readAll`, `testLogger` from `~/testing/`
-- Mock a portal with `mockPortal({ blocks, latest, finalized, ... })`: it answers queries from the chain it holds. Use the list form `mockPortal(responses, { finalized? })` only for an exact response sequence. Do not use the deprecated `mockEvmPortalStream` or `finalizedMockPortal`
-- Stub the `Portal` interface (head + timestamp lookup) with `stubPortal` from `~/testing/stub-portal.js`
-- Create mock portals through a vitest `test.extend` fixture that closes them after the test, not in a `let` with `afterEach` or `try/finally`. Write new tests this way, and move an existing test over when you change it:
-  ```ts
-  const it = base.extend<{ portal: (options: MockPortalOptions) => Promise<MockChainPortal> }>({
-    portal: async ({}, use) => {
-      const opened: MockChainPortal[] = []
-      await use(async (options) => {
-        const portal = await mockPortal(options)
-        opened.push(portal)
-
-        return portal
-      })
-      await Promise.all(opened.map((portal) => portal.close()))
-    },
-  })
-  ```
-- Run tests: `pnpm vitest run src/path/to/file.test.ts` (from `packages/pipes/`)
-- Some tests require external services (ClickHouse, PostgreSQL) — exclude with `--exclude` flags when running locally
+- Tests sit next to the source (`feature.ts` → `feature.test.ts`) and use `~/testing/`, never ad-hoc HTTP mocks: `mockPortal`, `readAll`, `testLogger`; `mockBlock`, `encodeEvent`, `resetMockBlockCounter` from `~/testing/evm/`; `stubPortal` from `~/testing/stub-portal.js` for the `Portal` interface
+- `mockPortal({ blocks, latest, finalized })` answers from the chain it holds; the list form `mockPortal(responses)` is only for an exact response sequence. `mockEvmPortalStream` and `finalizedMockPortal` are deprecated
+- Every resource a test opens is a vitest `test.extend` fixture released when the test ends, never a `let` + `afterEach` or `try/finally`; move an existing test over when you change it. A fixture several files need lives once in a test-only module (mock portals: `withPortal` from `~/testing/portal-fixture.js`), and such a module is never re-exported from `~/testing/index.ts`, because it imports vitest
+- Run from `packages/pipes/`: `pnpm vitest run <file>`; `--exclude` the tests that need ClickHouse or Postgres when they are not running
 
 ## PR workflow
 
