@@ -116,14 +116,22 @@ P-PG-UNFINALIZED-RETENTION blocks of snapshots. Legacy migration: single guarded
 **IB-22 — Parquet binding (class K).** State sidecar `_sqd_parquet_state.<id>.json`
 (id-less form `_sqd_parquet_state.json` — written only when the target is configured
 without an id, unreachable through a source-connected pipe, WP-3): `{id?, cursor,
-finalized?, coverage: {<table>: next-window-start}}`, written temp-file → fsync →
-rename → dir-fsync. Data files `<table>/<from>-<to>.parquet`, names zero-padded to 12
-digits, window = coverage (DEF-14) not row min/max; publish refuses to overwrite
-(coded). Recovery deletes `*.tmp-*` always and any file with `to > cursor`; a file
-straddling the cursor is a coded refusal unless its `from` equals the table's recorded
-coverage start, which makes it the interrupted checkpoint's own file. A recorded coverage
-start ahead of what the cursor allows is clamped with a warning, not refused. Column types:
-INT64/INT32/UTF8/BYTE_ARRAY/BOOLEAN/DOUBLE/
+finalized?, coverage: {<table>: next-window-start}, keyed?: true}`, written temp-file →
+fsync → rename → dir-fsync. Data files `<table>/<from>-<to>.<key>.parquet`, temp files
+`.tmp-<n>.<key>.parquet`; `<key>` is the cursor key (DEF-9) with every byte outside
+`[A-Za-z0-9_-]` percent-encoded (`%XX`, UTF-8, upper-case hex), `<from>`/`<to>` are
+zero-padded to 12 digits, window = coverage (DEF-14) not row min/max; publish refuses to
+overwrite (coded). Recovery and publish consider only files whose `<key>`, compared
+whole, is the pipe's own (ADR-16); keyless files follow their own rule, below. Recovery
+deletes the key's temp files always and its files with `to > cursor`; a file straddling
+the cursor is a coded refusal unless its `from` equals the table's recorded coverage
+start, which makes it the interrupted checkpoint's own file. A recorded coverage start
+ahead of what the cursor allows is clamped with a warning, not refused. With no state,
+files carrying the key are orphan data: a coded refusal (CN-44). Keyless files
+(`<from>-<to>.parquet`, `.tmp-*`) predate keyed names: a state without `keyed` runs its
+first recovery over them by the rules above, then is written with `keyed: true`; a state
+with it, or no state, never touches them. *(Names carry no key yet, and recovery acts on
+every file in the directory — GAP-35.)* Column types: INT64/INT32/UTF8/BYTE_ARRAY/BOOLEAN/DOUBLE/
 TIMESTAMP(millis)/DATE/JSON/LIST/STRUCT; DECIMAL deliberately unsupported; block
 column INT64/INT32 required non-null. Compression: SNAPPY (default), GZIP, BROTLI,
 UNCOMPRESSED. The target declares IB-11 finalized-only delivery, appends every delivered
@@ -206,15 +214,17 @@ reader feature-detects by runtime instead — GAP-27)*.
 **IB-26 — Legacy cursor key.** The literal `stream` (DEF-9, RP-31).
 
 **IB-27 — Binding declarations.** Per-binding enforcement, indexed here; the cited
-entries remain authoritative for detail. *Exclusivity* = whether a binding's tracked
-tables are declared to belong to a single cursor key; it is the precondition that lets
-the orphan-data guard run at all (CN-44).
+entries remain authoritative for detail. *Attribution* = how a binding tells its own
+cursor key's tracked data from a co-resident pipe's (ADR-16): by name (the key is in
+every file name), by the author (a repair hook scopes its own removal), or by declaring
+its tracked tables *exclusive* to one cursor key. The orphan-data guard runs only over
+data attributable by name or by declaration (CN-44).
 
-| Binding | Class | Lock (IB-24) | Legacy migration (RP-31) | Tracked-table exclusivity |
+| Binding | Class | Lock (IB-24) | Legacy migration (RP-31) | Attribution |
 |---|---|---|---|---|
-| ClickHouse | A | none | yes | not declared — guard off |
-| Postgres | T | advisory, per batch | yes | not declared — guard off |
-| Parquet | K | none | no | not declared — guard off *(yet refuses shared directories via filename collision: GAP-35)* |
+| ClickHouse | A | none | yes | by the author (RP-42); exclusivity not declared — guard off |
+| Postgres | T | advisory, per batch | yes | exclusivity not declared — guard off |
+| Parquet | K | none | no | by name (IB-22) — guard on, over the key's files *(names carry no key yet, and no guard runs: GAP-35)* |
 | BigQuery | W | none | no | assumed exclusive — guard on, probed table-wide *(GAP-20)* |
 | Pub/Sub | C | exclusive state-file lock, process-lifetime | no | n/a — the sink owns no tables; ids are namespaced per producer |
 
@@ -223,7 +233,7 @@ value governs whether CN-44 applies. Declaring exclusivity over tables that co-r
 pipes in fact share is an operator error the spec does not detect.
 
 *Decision index.* Applying to every binding: ADR-2 (cursor keyed by pipe id), ADR-4
-(coded error taxonomy), ADR-5 (durability classes), ADR-16 (exclusivity, proposed).
+(coded error taxonomy), ADR-5 (durability classes), ADR-16 (shared tracked data).
 Binding-specific, with the entry carrying each one's detail:
 
 - **ClickHouse** — IB-20, IB-24 · ADR-7 (sign-netting rollback), ADR-15 (class-A repair

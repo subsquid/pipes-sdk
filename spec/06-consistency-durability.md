@@ -162,16 +162,17 @@ accumulates across crash loops nor blocks retention cleanup.
 state it cannot fully interpret (unknown format version, corrupt record) with a coded
 integrity error — before modifying anything.
 
-**CN-44 — Orphan-data guard.** [MUST — exclusive tracked tables only] Where cursor state
-is absent but tracked tables contain data (state deleted, wrong key, half-migration),
-the sink refuses with a coded error rather than restarting from scratch and duplicating
-history. Applies only where the binding declares its tracked tables **exclusive** to one
-cursor key (IB-27). On tables shared with co-resident pipes the condition is
+**CN-44 — Orphan-data guard.** [MUST — attributable tracked data only] Where cursor state
+is absent but tracked data attributable to the cursor key exists (state deleted, wrong
+key, half-migration), the sink refuses with a coded error rather than restarting from
+scratch and duplicating history. Data is attributable where the binding names it with the
+cursor key (IB-22) or declares its tracked tables **exclusive** to one cursor key
+(IB-27; ADR-16). Over shared data the sink cannot attribute the condition is
 undecidable — "table non-empty" is not evidence of *orphan* data, the rows may belong to
 another key — and probing them would make one pipe's startup depend on another's data,
-contrary to INV-35; a sink over shared tables MUST NOT run the guard. *(The one
-implementation probes table-wide and so refuses a legitimate first run into a populated
-shared table — GAP-20; exclusivity model ADR-16/OQ-8.)*
+contrary to INV-35; such a sink MUST NOT run the guard. *(The one implementation probes
+table-wide and so refuses a legitimate first run into a populated shared table — GAP-20;
+the file binding's names carry no key yet — GAP-35.)*
 
 **CN-45 — Cross-implementation recovery.** [MUST] Recovery reads state via the formats
 of IB-20…IB-28 only; any conforming implementation recovers state written by any other
