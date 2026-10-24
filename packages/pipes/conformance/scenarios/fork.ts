@@ -1,7 +1,13 @@
 import { mockBlock } from '~/testing/evm/index.js'
 import { type MockChainPortal, mockPortal } from '~/testing/index.js'
 
-import { type Cursor, type OracleRow, type OracleState, ReferenceModel } from '../oracle/reference-model.js'
+import {
+  type Cursor,
+  type DurabilityClass,
+  type OracleRow,
+  type OracleState,
+  ReferenceModel,
+} from '../oracle/reference-model.js'
 import { erc20Logs, inStoreOrder, numbers } from './erc20.js'
 
 /**
@@ -126,8 +132,9 @@ export function s3EndState(): OracleState {
   }
 }
 
-export function s3Oracle(): ReferenceModel {
-  return new ReferenceModel({ durability: 'T', mode: 'full', ranges: S3_RANGES, transform: s3RowsAt })
+/** The oracle for S3, as a full-stream class. */
+export function s3Oracle(durability: DurabilityClass): ReferenceModel {
+  return new ReferenceModel({ durability, mode: 'full', ranges: S3_RANGES, transform: s3RowsAt })
 }
 
 /** The portal of S3, which forks once (`s3Portal`). */

@@ -9,19 +9,11 @@ import type { BlockCursor } from '~/core/index.js'
 import { type MockChainPortal, testLogger } from '~/testing/index.js'
 
 import { killChild } from '../kill/spawn.js'
-import {
-  type Cursor,
-  type OracleRow,
-  type OracleState,
-  type PersistedState,
-  ReferenceModel,
-} from '../oracle/reference-model.js'
-import { Replay } from '../oracle/replay.js'
-import { type BlockRange, type PostgresSnapshot, validatePostgresSnapshot } from '../oracle/validators.js'
-import { RANGES, S1, type S1Simulator, S1_ROWS, endStateOf, follow, rowsAt } from '../scenarios/backfill.js'
+import type { PersistedState, ReferenceModel } from '../oracle/reference-model.js'
+import { type PostgresSnapshot, validatePostgresSnapshot } from '../oracle/validators.js'
 import { type Observation, PIPE_ID, TABLE_NAMES, type TableName, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
-import { S3, type S3Simulator, S3_RANGES, S3_ROWS, s3EndState, s3Oracle, s3RowsUpTo } from '../scenarios/fork.js'
+import { type FullStreamScenario, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
 import type { KillEvidence, StatementJournalEntry, StatementKillPoint } from './kill-switch.js'
 import { postgresDdl, postgresPool, streamPostgres } from './pipe.js'
 import { readPostgresSnapshot, rowsOfPostgres } from './probe.js'
@@ -60,50 +52,11 @@ export const it = scenarios.extend<{ database: Database }>({
   },
 })
 
-/** Feeds the oracle a run's batches and forks, as the pipe met them. */
-export type Follower = {
-  batch(observation: Observation): void
-  fork(canonical: BlockCursor[]): void
-}
-
-/** What a class-T run needs to know of its scenario. */
-export type PostgresScenario<Sim extends { chain: MockChainPortal }> = {
-  range: { from: number; to: number }
-  ranges: BlockRange[]
-  oracle: () => ReferenceModel
-  /** The state and rows a finished run leaves, from the scenario and the simulator alone. */
-  end: (simulator: Sim) => { state: OracleState; rows: OracleRow[] }
-  /** The rows a store holds whose cursor is `cursor`, from the scenario alone. */
-  rowsUpTo: (cursor: Cursor | undefined) => OracleRow[]
-  /** A follower for one run, whose first request is `from` in the portal's log. */
-  follower: (model: ReferenceModel, simulator: Sim, from: number) => Follower
-}
-
 /** S1 as class T: the full stream, one commit per batch (CN-10), no fork. */
-export const S1_POSTGRES: PostgresScenario<S1Simulator> = {
-  range: { from: S1.from, to: S1.to },
-  ranges: RANGES,
-  oracle: () =>
-    new ReferenceModel({ durability: 'T', mode: 'full', ranges: RANGES, transform: (block) => rowsAt(block.number) }),
-  end: (simulator) => ({ state: endStateOf(simulator), rows: S1_ROWS }),
-  rowsUpTo: (cursor) => S1_ROWS.filter((row) => row.block <= (cursor?.number ?? -1)),
-  follower: (model, simulator) => ({
-    batch: (observation) => follow(model, simulator, observation),
-    fork: () => {
-      throw new Error('S1 takes no fork')
-    },
-  }),
-}
+export const S1_POSTGRES = s1FullStream('T')
 
 /** S3 as class T: an unfinalized tail, a floor that rises once, one fork. */
-export const S3_POSTGRES: PostgresScenario<S3Simulator> = {
-  range: { from: S3.from, to: S3.to },
-  ranges: S3_RANGES,
-  oracle: s3Oracle,
-  end: () => ({ state: s3EndState(), rows: S3_ROWS }),
-  rowsUpTo: s3RowsUpTo,
-  follower: (model, simulator, from) => new Replay(model, simulator.chain.requests, from),
-}
+export const S3_POSTGRES = s3FullStream('T')
 
 /** A read of a class-T store of the ERC-20 tables. */
 export type PostgresStore = PostgresSnapshot<TableName>
@@ -144,7 +97,7 @@ export async function runToEnd<Sim extends { chain: MockChainPortal }>({
   database,
   model = scenario.oracle(),
 }: {
-  scenario: PostgresScenario<Sim>
+  scenario: FullStreamScenario<Sim>
   simulator: Sim
   database: Database
   /** Pass one to watch it during the run, or to carry it across a restart or a crash. */
@@ -193,7 +146,7 @@ export async function runUnwatched<Sim extends { chain: MockChainPortal }>({
   simulator,
   database,
 }: {
-  scenario: PostgresScenario<Sim>
+  scenario: FullStreamScenario<Sim>
   simulator: Sim
   database: Database
 }): Promise<PostgresStore> {
@@ -241,7 +194,7 @@ export async function runKilled<Sim extends { chain: MockChainPortal }>({
   model,
   point,
 }: {
-  scenario: PostgresScenario<Sim>
+  scenario: FullStreamScenario<Sim>
   simulator: Sim
   database: Database
   model: ReferenceModel
@@ -292,7 +245,7 @@ export async function runKilled<Sim extends { chain: MockChainPortal }>({
  * structural validator and hold exactly the scenario's rows up to its cursor.
  */
 export async function crashAt<Sim extends { chain: MockChainPortal }>(options: {
-  scenario: PostgresScenario<Sim>
+  scenario: FullStreamScenario<Sim>
   simulator: Sim
   database: Database
   model: ReferenceModel
@@ -321,7 +274,7 @@ export async function resumeToEnd<Sim extends { chain: MockChainPortal }>({
   model,
   store,
 }: {
-  scenario: PostgresScenario<Sim>
+  scenario: FullStreamScenario<Sim>
   simulator: Sim
   database: Database
   model: ReferenceModel

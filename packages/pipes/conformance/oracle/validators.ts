@@ -618,23 +618,7 @@ export function validatePostgresSnapshot(snapshot: PostgresSnapshot, ranges: rea
     violations.push({ validator: 'decodable', property: 'IB-21', message: 'the snapshot reads no table' })
   }
 
-  // Every sync row is a commit point, so each must be a sound state of its own.
-  sync.forEach((record, index) => {
-    const found = validateWatermarks(record)
-
-    violations.push(...found.map((violation) => ({ ...violation, message: `sync row ${index}: ${violation.message}` })))
-  })
-
-  // INV-12: from the oldest row to the newest, the floor never goes down.
-  const floors = sync.map((record) => record.finalized?.number ?? -1)
-  const lowered = floors.findIndex((floor, i) => i > 0 && floor < floors[i - 1])
-  if (lowered > 0) {
-    violations.push({
-      validator: 'watermark-coherence',
-      property: 'INV-12',
-      message: `the floor goes down from ${floors[lowered - 1]} to ${floors[lowered]} at sync row ${lowered}`,
-    })
-  }
+  violations.push(...validateSyncRecords(sync))
 
   // A cursor that is not a block bounds nothing; validateWatermarks reports it.
   const current = state?.current
@@ -642,16 +626,7 @@ export function validatePostgresSnapshot(snapshot: PostgresSnapshot, ranges: rea
   const rows: Attributed[] = []
 
   for (const [table, { rows: tableRows, undo }] of entries) {
-    const found: Violation[] = []
-
-    // CN-44: rows that no state accounts for are orphans.
-    if (state === undefined && tableRows.length) {
-      found.push({
-        validator: 'watermark-coherence',
-        property: 'CN-44',
-        message: 'the table holds rows, but the store holds no state',
-      })
-    }
+    const found: Violation[] = [...validateAccountedFor(state, tableRows)]
 
     // INV-42: the undo log is written in the batch's own transaction, so a record above the cursor belongs to no commit.
     const strayUndo = undo.filter((block) => block > cursor)
@@ -669,11 +644,109 @@ export function validatePostgresSnapshot(snapshot: PostgresSnapshot, ranges: rea
     rows.push(...tableRows)
   }
 
-  if (state !== undefined) {
-    const dataBound = rows.length ? rows.reduce((max, row) => Math.max(max, row.block), 0) : undefined
+  violations.push(...validateDataBound(state, rows))
 
-    violations.push(...validateWatermarks(state, { dataBound }))
+  return violations
+}
+
+/** One table of a class-A store, as one snapshot read it. */
+export type ClickhouseTableSnapshot<Row extends Attributed = OracleRow> = {
+  /** The rows net of their cancel rows (IB-20): a row inserted twice and never cancelled is here twice. */
+  rows: Row[]
+}
+
+/**
+ * One read of a class-A store: the pipe's sync rows, the state they hold, and every declared
+ * table. Every field is required, so no check can be skipped by leaving its input out.
+ */
+export type ClickhouseSnapshot<Table extends string = string, Row extends Attributed = OracleRow> = {
+  /** The pipe's sync rows, oldest first. */
+  sync: SyncRecord[]
+  /** ⟨C, F⟩ from the newest row, RC from the newest fragment of each block; `undefined` only with no row. */
+  state: OracleState | undefined
+  /** Every declared table, by name, in declaration order. */
+  tables: Record<Table, ClickhouseTableSnapshot<Row>>
+}
+
+/**
+ * Every structural validator a class-A store answers to, over one snapshot of it. Rows above the
+ * cursor are the class's crash window: at quiescence there are none, so the data bound reports them.
+ */
+export function validateClickhouseSnapshot(snapshot: ClickhouseSnapshot, ranges: readonly BlockRange[]): Violation[] {
+  const { sync, state, tables } = snapshot
+  const entries = Object.entries<ClickhouseTableSnapshot>(tables)
+  const violations: Violation[] = []
+
+  // With no table read, every per-table check below would pass vacuously.
+  if (!entries.length) {
+    violations.push({ validator: 'decodable', property: 'IB-20', message: 'the snapshot reads no table' })
+  }
+
+  violations.push(...validateSyncRecords(sync))
+
+  const rows: Attributed[] = []
+
+  for (const [table, { rows: tableRows }] of entries) {
+    const found = [
+      ...validateAccountedFor(state, tableRows),
+      ...validateOrdered(tableRows),
+      ...validateInRange(tableRows, ranges),
+    ]
+
+    violations.push(...found.map((violation) => ({ ...violation, message: `${table}: ${violation.message}` })))
+    rows.push(...tableRows)
+  }
+
+  violations.push(...validateDataBound(state, rows))
+
+  return violations
+}
+
+/** Every sync row is a commit point, so each must be a sound state of its own; and the floor never goes down (INV-12). */
+function validateSyncRecords(sync: readonly SyncRecord[]): Violation[] {
+  const violations: Violation[] = []
+
+  sync.forEach((record, index) => {
+    const found = validateWatermarks(record)
+
+    violations.push(...found.map((violation) => ({ ...violation, message: `sync row ${index}: ${violation.message}` })))
+  })
+
+  const floors = sync.map((record) => record.finalized?.number ?? -1)
+  const lowered = floors.findIndex((floor, i) => i > 0 && floor < floors[i - 1])
+  if (lowered > 0) {
+    violations.push({
+      validator: 'watermark-coherence',
+      property: 'INV-12',
+      message: `the floor goes down from ${floors[lowered - 1]} to ${floors[lowered]} at sync row ${lowered}`,
+    })
   }
 
   return violations
+}
+
+/** CN-44: rows that no state accounts for are orphans. */
+function validateAccountedFor(state: OracleState | undefined, rows: readonly Attributed[]): Violation[] {
+  if (state !== undefined || !rows.length) {
+    return []
+  }
+
+  return [
+    {
+      validator: 'watermark-coherence',
+      property: 'CN-44',
+      message: 'the table holds rows, but the store holds no state',
+    },
+  ]
+}
+
+/** The state is coherent, and the committed data stays at or below its cursor (INV-5). */
+function validateDataBound(state: OracleState | undefined, rows: readonly Attributed[]): Violation[] {
+  if (state === undefined) {
+    return []
+  }
+
+  const dataBound = rows.length ? rows.reduce((max, row) => Math.max(max, row.block), 0) : undefined
+
+  return validateWatermarks(state, { dataBound })
 }

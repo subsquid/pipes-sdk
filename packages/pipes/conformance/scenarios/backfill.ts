@@ -65,13 +65,13 @@ export function reportedAt(number: number): Cursor {
 }
 
 /**
- * The state S1 must leave in the store: the cursor at the range end and the last floor the portal
- * reported. Class K keeps no rollback chain (WP-47).
+ * The state S1 must leave in the store: the cursor at the range end and `floor`, the highest floor
+ * the portal reported. Class K keeps no rollback chain (WP-47).
  */
-export function s1EndState(lastReport: number | undefined): OracleState {
+export function s1EndState(floor: number | undefined): OracleState {
   return {
     current: cursorAt(S1.to),
-    finalized: lastReport === undefined ? undefined : reportedAt(lastReport),
+    finalized: floor === undefined ? undefined : reportedAt(floor),
     rollbackChain: [],
   }
 }
@@ -153,7 +153,9 @@ export function follow(model: ReferenceModel, simulator: S1Simulator, { current,
   model.batch(covered, head)
 }
 
-/** The state S1 must leave in the store, from the simulator alone. */
+/** The state S1 must leave in the store, from the simulator alone: a lower report never lowers the floor (INV-12). */
 export function endStateOf(simulator: S1Simulator) {
-  return s1EndState(simulator.reported.at(-1))
+  const highest = simulator.reported.length ? Math.max(...simulator.reported) : undefined
+
+  return s1EndState(highest)
 }
