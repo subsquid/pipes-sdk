@@ -3,10 +3,12 @@ import fs from 'node:fs/promises'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { PortalBatch } from '~/core/index.js'
+import { createTarget } from '~/core/target.js'
 import { evmPortalStream } from '~/evm/index.js'
 import { portalSqliteCache } from '~/portal-cache/node/node-sqlite-cache-adapter.js'
 import { createMemoryTarget } from '~/targets/memory/memory-target.js'
 import { MockPortal, blockDecoder, mockPortal } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
 // Transform batch to only include data and meta without any functions or complex objects
 const transformBatch = ({
@@ -685,5 +687,83 @@ describe('Portal cache', () => {
         [1, 2],
       ])
     })
+  })
+})
+
+describe('Portal cache finalized floor', () => {
+  beforeEach(async () => {
+    await fs.rm(DB_PATH).catch(() => {})
+  })
+
+  // The cache makes its own portal call, and the source splits what it returns.
+  withPortal('splits the portal tail against the persisted floor', async ({ portal: serve }) => {
+    const portal = await serve([
+      {
+        statusCode: 200,
+        data: [6, 7, 8].map((n) => ({ header: { number: n, hash: `0x${n}`, timestamp: n * 1000 } })),
+      },
+    ])
+
+    const shapes: number[][] = []
+    const target = createTarget<{ number: number }[]>({
+      write: async ({ read }) => {
+        const resume = { latest: { number: 5, hash: '0x5' }, finalized: { number: 5, hash: '0x5' } }
+
+        for await (const { data } of read(resume, { perBlockUnfinalized: true })) {
+          shapes.push(data.map((b) => b.number))
+        }
+      },
+    })
+
+    await evmPortalStream({
+      id: 'test',
+      portal: portal.url,
+      logger: 'silent',
+      outputs: blockDecoder({ from: 0, to: 8 }),
+      cache: portalSqliteCache({ path: DB_PATH }),
+    }).pipeTo(target)
+
+    expect(shapes).toEqual([[6], [7], [8]])
+  })
+
+  // A new pipe has no persisted floor, so only the cached blocks tell it where finality is.
+  withPortal('splits the portal tail against the finality the cached blocks carry', async ({ portal: serve }) => {
+    const portal = await serve([
+      {
+        statusCode: 200,
+        data: [1, 2, 3, 4, 5].map((n) => ({ header: { number: n, hash: `0x${n}`, timestamp: n * 1000 } })),
+        head: { finalized: { number: 5, hash: '0x5' } },
+      },
+      {
+        statusCode: 200,
+        data: [6, 7, 8].map((n) => ({ header: { number: n, hash: `0x${n}`, timestamp: n * 1000 } })),
+      },
+    ])
+
+    const cache = portalSqliteCache({ path: DB_PATH })
+    const run = async (to: number) => {
+      const shapes: number[][] = []
+      const target = createTarget<{ number: number }[]>({
+        write: async ({ read }) => {
+          for await (const { data } of read(undefined, { perBlockUnfinalized: true })) {
+            shapes.push(data.map((b) => b.number))
+          }
+        },
+      })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger: 'silent',
+        outputs: blockDecoder({ from: 1, to }),
+        cache,
+      }).pipeTo(target)
+
+      return shapes
+    }
+
+    await run(5)
+
+    expect(await run(8)).toEqual([[1, 2, 3, 4, 5], [6], [7], [8]])
   })
 })

@@ -1,5 +1,7 @@
 import { Future, createFuture } from '@subsquid/util-internal'
 
+import { maxFinalized } from '~/core/finalized-watermark.js'
+
 export type BlockRef = {
   hash: string
   number: number
@@ -111,7 +113,8 @@ export class StreamBuffer<B> {
     }
 
     this.buffer.blocks.push(...data.blocks)
-    this.buffer.head = data.head
+    // A merged response can come without the finalized header, and finality never moves back.
+    this.buffer.head = { ...data.head, finalized: maxFinalized(this.buffer.head.finalized, data.head.finalized) }
     this.buffer.meta.bytes += data.meta.bytes
     this.buffer.meta.requests = mergeRequests(this.buffer.meta.requests, data.meta.requests)
     this.buffer.meta.requestedFromBlock = Math.min(this.buffer.meta.requestedFromBlock, data.meta.requestedFromBlock)
@@ -132,19 +135,6 @@ export class StreamBuffer<B> {
   flush() {
     if (this.buffer == null) return
     this._ready()
-  }
-
-  /**
-   * Deliver whatever is pending as its own batch. Unlike `flush()` this waits until the consumer
-   * has taken it, so a following `put` cannot merge into the same batch.
-   */
-  async cut(): Promise<void> {
-    if (this.buffer == null) return
-    // Terminal states never resolve a fresh consumedSignal; _cleanup() already released this one.
-    if (this.state === 'closed' || this.state === 'failed') return
-
-    this._ready()
-    await this.consumedSignal.promise()
   }
 
   close() {

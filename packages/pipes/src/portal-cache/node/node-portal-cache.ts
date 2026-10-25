@@ -64,13 +64,11 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
     portal,
     query,
     logger,
-    perBlockUnfinalized,
     finalized,
   }: {
     portal: PortalClient
     query: Query
     logger: Logger
-    perBlockUnfinalized?: boolean
     finalized?: boolean
   }): PortalBlockStream<GetBlock<Q>> {
     const queryHash = await hashQuery(query)
@@ -104,7 +102,7 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
         fromBlock: cursor.number,
         parentBlockHash: cursor.hash,
       } as Q,
-      { perBlockUnfinalized, finalized },
+      { finalized },
     )) {
       const finalizedHead = batch.head.finalized?.number
       // TODO add warning

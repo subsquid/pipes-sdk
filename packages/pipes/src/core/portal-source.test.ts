@@ -4,10 +4,10 @@ import { RollbackRecord, resolveForkCursor } from '~/core/fork.js'
 import { defaultLogger } from '~/core/logger.js'
 import { PortalCache } from '~/core/portal-source.js'
 import { SpanHooks } from '~/core/profiling.js'
-import { Target, createTarget } from '~/core/target.js'
+import { ReadOptions, Target, TargetState, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
-import { PortalBlockStreamOptions, PortalClient, Query } from '~/portal-client/index.js'
+import { PortalBlockStreamOptions, PortalClient, PortalClientOptions, Query } from '~/portal-client/index.js'
 import { MockPortal, MockResponse, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
@@ -1179,6 +1179,108 @@ describe('stall reporting', () => {
         phase: 'processing block 1',
       }),
     )
+  })
+})
+
+describe('Portal stream per-block batches', () => {
+  function blocks(numbers: number[], finalized?: number): MockResponse {
+    return {
+      statusCode: 200,
+      data: numbers.map((number) => ({ header: { number, hash: `0x${number}`, timestamp: number * 1000 } })),
+      head: finalized == null ? undefined : { finalized: { number: finalized, hash: `0x${finalized}` } },
+    }
+  }
+
+  /** Block numbers and request counts per batch the target reads. */
+  async function readBatches(
+    portal: PortalClientOptions,
+    { resume, to = 3, ...options }: ReadOptions & { resume?: TargetState; to?: number } = {},
+  ) {
+    const shapes: number[][] = []
+    const requests: Record<number, number>[] = []
+    const target = createTarget<{ number: number }[]>({
+      write: async ({ read }) => {
+        for await (const { data, ctx } of read(resume, options)) {
+          shapes.push(data.map((b) => b.number))
+          requests.push(ctx.batch.requests)
+        }
+      },
+    })
+
+    await evmPortalStream({ id: 'test', portal, logger: 'silent', outputs: blockDecoder({ from: 0, to }) }).pipeTo(
+      target,
+    )
+
+    return { shapes, requests }
+  }
+
+  withPortal('keeps one batch per response unless the target asks for more', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3], 1)])
+
+    const { shapes } = await readBatches({ url: portal.url })
+
+    expect(shapes).toEqual([[1, 2, 3]])
+  })
+
+  // Postgres keys undo snapshots by the batch's last block.
+  withPortal('splits every unfinalized block into its own batch when asked', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3], 1)])
+
+    const { shapes } = await readBatches({ url: portal.url }, { perBlockUnfinalized: true })
+
+    expect(shapes).toEqual([[1], [2], [3]])
+  })
+
+  // Read as "no finality", every hot block would be filed as finalized instead.
+  withPortal('treats a finalized head of block 0 as finality, not as its absence', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3], 0)])
+
+    const { shapes } = await readBatches({ url: portal.url }, { perBlockUnfinalized: true })
+
+    expect(shapes).toEqual([[1], [2], [3]])
+  })
+
+  // maxIdleTimeMs is pinned high, so the client merges both responses into one batch.
+  withPortal('never merges finalized blocks into an unfinalized block batch', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1], 1), blocks([2, 3], 1)])
+
+    const { shapes } = await readBatches({ url: portal.url, maxIdleTimeMs: 60_000 }, { perBlockUnfinalized: true })
+
+    expect(shapes).toEqual([[1], [2], [3]])
+  })
+
+  // The portal can drop the finalized header for a while. Read as "all final", the blocks would share
+  // one batch, and the undo log could no longer roll back to the blocks inside it.
+  withPortal(
+    'splits blocks without a finalized head against the head an earlier response reported',
+    async ({ portal: serve }) => {
+      const portal = await serve([blocks([1], 1), blocks([2, 3])])
+
+      const { shapes } = await readBatches({ url: portal.url, maxIdleTimeMs: 60_000 }, { perBlockUnfinalized: true })
+
+      expect(shapes).toEqual([[1], [2], [3]])
+    },
+  )
+
+  withPortal(
+    'splits blocks without a finalized head against the persisted floor after a restart',
+    async ({ portal: serve }) => {
+      const portal = await serve([blocks([6, 7, 8])])
+
+      const resume = { latest: { number: 5, hash: '0x5' }, finalized: { number: 5, hash: '0x5' } }
+      const { shapes } = await readBatches({ url: portal.url }, { resume, to: 8, perBlockUnfinalized: true })
+
+      expect(shapes).toEqual([[6], [7], [8]])
+    },
+  )
+
+  // Passing the counters to each part would bill one response three times over.
+  withPortal('counts one response as one request however many batches it becomes', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3], 0)])
+
+    const { requests } = await readBatches({ url: portal.url }, { perBlockUnfinalized: true })
+
+    expect(requests).toEqual([{ 200: 1 }, {}, {}])
   })
 })
 

@@ -6,10 +6,11 @@ import {
   PortalClient,
   PortalClientOptions,
   Query,
+  StreamData,
   isForkException,
 } from '~/portal-client/index.js'
 
-import { last } from '../internal/array.js'
+import { last, partition } from '../internal/array.js'
 import { stallWatchdog } from '../internal/stall-watchdog.js'
 import {
   ForkCursorMissingError,
@@ -110,7 +111,6 @@ export interface PortalCache {
     portal: PortalClient
     query: Q
     logger: Logger
-    perBlockUnfinalized?: boolean
     finalized?: boolean
   }): PortalBlockStream<GetBlock<Q>>
 }
@@ -179,6 +179,25 @@ export function extractRollbackChain({ blocks, head }: { blocks: PartialBlock[];
       return b.header.number > head.number
     })
     .map(cursorFromHeader)
+}
+
+/**
+ * Gives every block above the finalized head its own batch, after the finalized blocks before it.
+ * A target that tags its undo records with the batch's last block can then roll back to any of them.
+ * With no finalized head, every block counts as finalized (GAP-42).
+ */
+function splitByFinality<B extends PartialBlock>(batch: StreamData<B>, finalized?: BlockCursor): StreamData<B>[] {
+  if (finalized == null) return [batch]
+
+  const [finalizedBlocks, unfinalizedBlocks] = partition(batch.blocks, (b) => b.header.number <= finalized.number)
+  const parts = [finalizedBlocks, ...unfinalizedBlocks.map((b) => [b])].filter((blocks) => blocks.length > 0)
+
+  // Bytes and request counts belong to the response, so the first part carries them all.
+  return parts.map((blocks, i) => ({
+    blocks,
+    head: batch.head,
+    meta: i === 0 ? batch.meta : { ...batch.meta, bytes: 0, requests: {} },
+  }))
 }
 
 export type PortalStreamOptions<Query> = {
@@ -345,20 +364,16 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
             portal,
             logger: this.#logger,
             query,
-            perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
             finalized: finalizedStream,
           })
-        : portal.getStream(query, {
-            perBlockUnfinalized: options?.perBlockUnfinalized ?? false,
-            finalized: finalizedStream,
-          })
+        : portal.getStream(query, { finalized: finalizedStream })
 
       let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
       let readSpan = batchSpan.start('fetch data').addLabels('core')
       try {
         watchdog.begin(WAITING_FOR_PORTAL)
 
-        for await (const batch of source) {
+        for await (const { batch, finalized } of this.applyFinality(source, options)) {
           readSpan.end()
 
           const blocks = batch.blocks
@@ -368,12 +383,6 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
           watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
 
           if (blocks.length > 0) {
-            // Clamp the portal's finalized head through the monotonic watermark before it
-            // reaches any consumer, so a regressed or transiently-missing finalized head can
-            // never un-finalize already-committed data. The rollback chain is derived from the
-            // CLAMPED head so the two stay consistent (clamp can only raise finalized).
-            const finalized = this.#watermark.clamp(batch.head.finalized)
-
             // TODO WTF with any?
             const lastBatchBlock = last(blocks as { header: { number: number } }[])
 
@@ -450,6 +459,38 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     // Cleanup is owned by the callers (pipeTo/[Symbol.asyncIterator]), which run stop() in a
     // finally on every exit path. Calling it here too is what caused the double stop() on normal
     // completion; the idempotency guard in stop() remains as a safety net.
+  }
+
+  /**
+   * Cached and portal batches pass here alike, so the split and the rollback chain see the same
+   * finalized head.
+   */
+  private async *applyFinality(
+    source: AsyncIterable<StreamData<any>>,
+    options?: ReadOptions,
+  ): AsyncIterable<{ batch: StreamData<any>; finalized?: BlockCursor }> {
+    for await (const batch of source) {
+      // An empty batch reaches no consumer and leaves the floor alone (GAP-23).
+      if (batch.blocks.length === 0) {
+        yield { batch, finalized: this.#watermark.floor }
+        continue
+      }
+
+      // Clamp the portal's finalized head through the monotonic watermark before it
+      // reaches any consumer, so a regressed or transiently-missing finalized head can
+      // never un-finalize already-committed data. The rollback chain is derived from the
+      // CLAMPED head so the two stay consistent (clamp can only raise finalized).
+      const finalized = this.#watermark.clamp(batch.head.finalized)
+
+      if (!options?.perBlockUnfinalized) {
+        yield { batch, finalized }
+        continue
+      }
+
+      for (const part of splitByFinality(batch, finalized)) {
+        yield { batch: part, finalized }
+      }
+    }
   }
 
   pipe<Out>(options: TransformerArgs<T, Out>): PortalStream<Q, Out> {

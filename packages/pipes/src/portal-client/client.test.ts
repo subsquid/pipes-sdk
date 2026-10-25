@@ -24,10 +24,10 @@ function block(number: number) {
   return { header: { number, hash: `0x${number}` } }
 }
 
-/** Block numbers per delivered batch — the shape targets actually observe. */
-async function batchShapes(client: PortalClient, perBlockUnfinalized: boolean, options?: { maxIdleTimeMs?: number }) {
+/** Block numbers per delivered batch. */
+async function batchShapes(client: PortalClient) {
   const shapes: number[][] = []
-  for await (const batch of client.getStream(query, { ...options, perBlockUnfinalized })) {
+  for await (const batch of client.getStream(query)) {
     shapes.push(batch.blocks.map((b: any) => b.header.number))
   }
 
@@ -37,11 +37,10 @@ async function batchShapes(client: PortalClient, perBlockUnfinalized: boolean, o
 /** Requests attributed across every delivered batch, keyed by status. */
 async function countRequests(
   client: PortalClient,
-  perBlockUnfinalized = false,
   options?: { request?: { retryAttempts?: number; retrySchedule?: number[] } },
 ) {
   const counted: Record<number, number> = {}
-  for await (const batch of client.getStream(query, { ...options, perBlockUnfinalized })) {
+  for await (const batch of client.getStream(query, options)) {
     for (const [status, count] of Object.entries(batch.meta.requests ?? {})) {
       counted[Number(status)] = (counted[Number(status)] ?? 0) + count
     }
@@ -51,23 +50,8 @@ async function countRequests(
 }
 
 describe('PortalClient batching', () => {
-  // What every target except Postgres gets.
-  it('delivers one batch per response by default', async () => {
-    portal = await mockPortal([
-      {
-        statusCode: 200,
-        data: [block(1), block(2), block(3)],
-        head: { finalized: { number: 2, hash: '0x2' } },
-      },
-    ])
-
-    const client = new PortalClient({ url: portal.url })
-
-    expect(await batchShapes(client, false)).toEqual([[1, 2, 3]])
-  })
-
-  // Postgres keys undo snapshots by the batch's last block.
-  it('splits every unfinalized block into its own batch when asked', async () => {
+  // The source splits a batch by finality, so the client never does.
+  it('delivers one batch per response', async () => {
     portal = await mockPortal([
       {
         statusCode: 200,
@@ -78,28 +62,34 @@ describe('PortalClient batching', () => {
 
     const client = new PortalClient({ url: portal.url })
 
-    expect(await batchShapes(client, true)).toEqual([[1], [2], [3]])
+    expect(await batchShapes(client)).toEqual([[1, 2, 3]])
   })
 
-  // Read as "no finality", every hot block would be filed as finalized instead.
-  it('treats a finalized head of block 0 as finality, not as its absence', async () => {
-    portal = await mockPortal([
+  // maxIdleTimeMs is pinned high so that only a flush can separate the batches.
+  withPortal('flushes a response with unfinalized blocks at once', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
-        data: [block(1), block(2), block(3)],
+        data: [block(1), block(2)],
         head: { finalized: { number: 0, hash: '0x0' } },
+      },
+      {
+        statusCode: 200,
+        data: [block(3)],
+        head: { finalized: { number: 3, hash: '0x3' } },
       },
     ])
 
-    const client = new PortalClient({ url: portal.url })
+    // A head of block 0 is finality, not its absence, so blocks 1 and 2 are unfinalized.
+    const client = new PortalClient({ url: portal.url, maxIdleTimeMs: 60_000 })
 
-    expect(await batchShapes(client, true)).toEqual([[1], [2], [3]])
+    expect(await batchShapes(client)).toEqual([[1, 2], [3]])
   })
 
-  // maxIdleTimeMs is pinned high so only cut() can separate the batches — on the default 300ms an
-  // idle flush would hide a regression.
-  it('never merges pending finalized blocks into an unfinalized block batch', async () => {
-    portal = await mockPortal([
+  // The portal can drop the finalized header for a while. Without the head of the earlier response,
+  // the source would read the merged blocks as final.
+  withPortal('keeps the finalized head when it merges a response without one', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [block(1)],
@@ -108,16 +98,17 @@ describe('PortalClient batching', () => {
       {
         statusCode: 200,
         data: [block(2), block(3)],
-        head: { finalized: { number: 1, hash: '0x1' } },
       },
-    ] satisfies MockResponse[])
+    ])
 
-    const client = new PortalClient({ url: portal.url })
+    const client = new PortalClient({ url: portal.url, maxIdleTimeMs: 60_000 })
 
-    const shapes = await batchShapes(client, true, { maxIdleTimeMs: 60_000 })
+    const batches = []
+    for await (const batch of client.getStream(query)) {
+      batches.push({ blocks: batch.blocks.map((b: any) => b.header.number), finalized: batch.head.finalized })
+    }
 
-    expect(shapes.some((s) => s.includes(1) && s.length > 1)).toBe(false)
-    expect(shapes).toEqual([[1], [2], [3]])
+    expect(batches).toEqual([{ blocks: [1, 2, 3], finalized: { number: 1, hash: '0x1' } }])
   })
 })
 
@@ -295,22 +286,6 @@ describe('PortalClient block order', () => {
 })
 
 describe('PortalClient request accounting', () => {
-  // Every hot block gets its own batch, so passing the counters to each would bill one response
-  // three times over.
-  it('counts one response as one request however many batches it becomes', async () => {
-    portal = await mockPortal([
-      {
-        statusCode: 200,
-        data: [block(1), block(2), block(3)],
-        head: { finalized: { number: 0, hash: '0x0' } },
-      },
-    ])
-
-    const client = new PortalClient({ url: portal.url })
-
-    expect(await countRequests(client, true)).toEqual({ 200: 1 })
-  })
-
   // A 200 with an empty body hands its counters to no batch. They have to survive into the next
   // response rather than being reset with the loop.
   it('keeps the counters of a response that carries no blocks', async () => {
@@ -359,7 +334,7 @@ describe('PortalClient request accounting', () => {
 
     const client = new PortalClient({ url: portal.url })
 
-    expect(await countRequests(client, false, { request: { retryAttempts: 2, retrySchedule: [1] } })).toEqual({
+    expect(await countRequests(client, { request: { retryAttempts: 2, retrySchedule: [1] } })).toEqual({
       200: 2,
       503: 1,
     })
@@ -379,7 +354,7 @@ describe('PortalClient request accounting', () => {
 
     const client = new PortalClient({ url: portal.url })
 
-    expect(await countRequests(client, false, { request: { retryAttempts: 2, retrySchedule: [1] } })).toEqual({
+    expect(await countRequests(client, { request: { retryAttempts: 2, retrySchedule: [1] } })).toEqual({
       200: 1,
       529: 1,
     })

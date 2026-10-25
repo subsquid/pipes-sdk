@@ -5,7 +5,7 @@ import { BlockCursor } from './types.js'
  * "high-watermark". `undefined` is treated as the lowest possible head, so any
  * concrete cursor wins over it; two `undefined`s stay `undefined`.
  */
-export function maxFinalized(a: BlockCursor | undefined, b: BlockCursor | undefined): BlockCursor | undefined {
+export function maxFinalized<T extends BlockCursor>(a: T | undefined, b: T | undefined): T | undefined {
   if (!a) return b
   if (!b) return a
 

@@ -174,6 +174,32 @@ describe('StreamBuffer', () => {
 
       buffer.close()
     })
+
+    // The portal can drop the finalized header for a while. The merged batch keeps the head it had,
+    // or its blocks look final to the source.
+    it('keeps the highest finalized head when a later put has none', async () => {
+      const buffer = new StreamBuffer({ maxBytes: 1000, maxIdleTime: 100, maxWaitTime: 5000 })
+
+      const takePromise = buffer.take()
+
+      await buffer.put({
+        blocks: [],
+        head: { finalized: { hash: '0x5', number: 5 }, latest: { number: 6 } },
+        meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(0), requests: {} },
+      })
+      await buffer.put({
+        blocks: [],
+        head: { latest: { number: 8 } },
+        meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(0), requests: {} },
+      })
+
+      vi.advanceTimersByTime(100)
+
+      const result = await takePromise
+      expect(result?.head).toEqual({ finalized: { hash: '0x5', number: 5 }, latest: { number: 8 } })
+
+      buffer.close()
+    })
   })
 
   describe('backpressure', () => {
@@ -456,76 +482,6 @@ describe('StreamBuffer', () => {
       const buffer = new StreamBuffer({ maxBytes: 1000, maxIdleTime: 100, maxWaitTime: 5000 })
       buffer.close()
       buffer.fail(new Error('nope')) // should not throw or change state
-    })
-  })
-
-  describe('cut', () => {
-    // No timer may fire on its own here: the batch separation must come from cut(), not a flush.
-    const noTimers = { maxBytes: 1_000_000, maxIdleTime: 1_000_000, maxWaitTime: 1_000_000 }
-
-    it('delivers pending data as its own batch', async () => {
-      const buffer = new StreamBuffer<string>(noTimers)
-
-      const collected = collectAll(buffer)
-
-      await buffer.put(makeData(['a']))
-      await buffer.cut()
-      await buffer.put(makeData(['b']))
-      await buffer.cut()
-      buffer.close()
-
-      expect((await collected).map((d) => d.blocks)).toEqual([['a'], ['b']])
-    })
-
-    // Why cut() exists: flush() marks the batch ready without waiting, so the next put re-enters
-    // the same buffer and appends to it.
-    it('flush alone lets the next put merge into the same batch', async () => {
-      const buffer = new StreamBuffer<string>(noTimers)
-
-      await buffer.put(makeData(['a']))
-      buffer.flush()
-      await buffer.put(makeData(['b']))
-
-      expect((await buffer.take())?.blocks).toEqual(['a', 'b'])
-
-      buffer.close()
-    })
-
-    it('is a no-op when nothing is pending', async () => {
-      const buffer = new StreamBuffer<string>(noTimers)
-
-      await buffer.cut()
-
-      buffer.close()
-    })
-
-    it('resolves instead of hanging on a closed buffer', async () => {
-      const buffer = new StreamBuffer<string>(noTimers)
-
-      await buffer.put(makeData(['a']))
-      buffer.close()
-
-      await buffer.cut()
-    })
-
-    it('resolves instead of hanging on a failed buffer', async () => {
-      const buffer = new StreamBuffer<string>(noTimers)
-
-      await buffer.put(makeData(['a']))
-      buffer.fail(new Error('boom'))
-
-      await buffer.cut()
-    })
-
-    it('is released when the consumer abandons the iterator', async () => {
-      const buffer = new StreamBuffer<string>(noTimers)
-
-      await buffer.put(makeData(['a']))
-      const cutting = buffer.cut()
-
-      await buffer.iterate()[Symbol.asyncIterator]().return!()
-
-      await cutting
     })
   })
 })

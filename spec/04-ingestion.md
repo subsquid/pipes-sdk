@@ -71,12 +71,13 @@ portal's fork signal rather than re-verifying hashes.)*
 
 **WP-11 — Batch assembly bounds.** [MUST] Batch assembly flushes on any of: byte budget
 P-STREAM-MAX-BYTES, idle gap P-STREAM-MAX-IDLE-MS, total wait P-STREAM-MAX-WAIT-MS, or
-(near head) per-unfinalized-block immediate flush. Peak assembly memory ≤
+(near head) a response that carries unfinalized blocks. Peak assembly memory ≤
 P-STREAM-MAX-BYTES + one transport chunk.
 *Notes:* the total-wait clock starts when the consumer demands the batch, not at its
 first block; the byte budget counts UTF-16 code units of raw NDJSON lines (a proxy —
-HZ-1); the first unfinalized block MAY co-batch with pending finalized rows — per-block
-isolation is guaranteed only from the next one on.
+HZ-1). A batch keeps the highest finalized head of its responses, because a response
+can come without the header. Assembly does not split batches by finality: the source
+does that after the floor clamp, for a class-T sink (CN-30).
 
 **WP-12 — Pull-driven backpressure with single-slot prefetch.** [MUST] The pipeline is
 demand-driven end to end, with exactly one slot of lookahead: while the consumer
@@ -199,8 +200,8 @@ class-specific retention (P-CH-CURSOR-RETENTION, P-PG-UNFINALIZED-RETENTION,
 P-BQ-CURSOR-RETENTION, and the class-C rollback manifest down to `F`). A fork deeper
 than retention (but above `F`) resolves via the deep-fork restart of WP-42. Classes K/∅
 use finalized-only delivery and therefore do not retain fork history for rollback.
-*(Currently a full stream on a dataset without finality retains nothing either, so its
-first fork halts as unresolvable; GAP-42.)*
+*(Currently a full stream keeps no history while `F = ⊥`, so a fork before the first
+finalized header stops with E1003; GAP-42.)*
 
 ## Commit & acknowledgement
 

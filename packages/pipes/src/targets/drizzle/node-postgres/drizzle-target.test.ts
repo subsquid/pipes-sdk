@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { evmPortalStream } from '~/evm/index.js'
 import { MockPortal, MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
 import { drizzleTarget } from './index.js'
 
@@ -60,11 +61,13 @@ function forkAtBlockTwo(): MockResponse[] {
 }
 
 describe('Drizzle target', () => {
-  let portal: MockPortal
+  let portal: MockPortal | undefined
   const db = drizzle(pool)
 
+  // Reset, or a later test that opens its portal through the fixture closes this one a second time.
   afterEach(async () => {
     await portal?.close()
+    portal = undefined
   })
   afterAll(async () => {
     await pool.end()
@@ -82,8 +85,8 @@ describe('Drizzle target', () => {
       `)
     })
 
-    it('should throw an error if table is not tracked', async () => {
-      portal = await mockPortal([
+    withPortal('should throw an error if table is not tracked', async ({ portal: serve }) => {
+      const portal = await serve([
         {
           statusCode: 200,
           data: [
@@ -344,8 +347,8 @@ describe('Drizzle target', () => {
        `)
     })
 
-    it('should handle simple fork', async () => {
-      portal = await mockPortal([
+    withPortal('should handle simple fork', async ({ portal: serve }) => {
+      const portal = await serve([
         {
           // 1. The First response is okay, it gets 5 blocks
           statusCode: 200,
@@ -492,12 +495,13 @@ describe('Drizzle target', () => {
       `)
 
       // The fork drops the rolled-back sync rows above the safe cursor (block 3): the checkpoints
-      // for the dead blocks 4/5 are removed, while the unforked checkpoints (finalized block 1, then
-      // 2 and 3) and the reprocessed head (7) remain — so getCursor resumes from the last write (7)
-      // rather than a stale higher block. Block 1 is finalized, so the portal delivers it in its own
-      // batch and it keeps its own checkpoint.
+      // for the dead blocks 0x4/0x5 are removed, so getCursor resumes from the last write (7) rather
+      // than a stale higher block. The reprocessed blocks arrive without a finalized header, but sit
+      // above the finalized block 1, so each keeps its own checkpoint.
       const sync = await getAllFromSyncTable()
-      expect(sync.map((r) => Number(r['current_number']))).toEqual([1, 2, 3, 7])
+      const checkpoints = sync.map((r) => `${r['current_number']}:${r['current_hash']}`)
+
+      expect(checkpoints).toEqual(['1:0x1', '2:0x2', '3:0x3', '4:0x4a', '5:0x5a', '6:0x6a', '7:0x7a'])
     })
 
     it('should rollback updates', async () => {
@@ -943,6 +947,119 @@ describe('Drizzle target', () => {
       // Block 2 was undone; block 1 predates the fork and stays.
       expect(rolledBack).toEqual([1])
     })
+  })
+
+  // The undo log tags a batch's writes with its last block, so a fork to a block inside a shared
+  // batch would undo the ancestor's own writes too.
+  describe('class-T fork after a response without a finalized head', () => {
+    const balances = pgTable('balances', {
+      account: integer().primaryKey(),
+      balance: integer().notNull(),
+    })
+
+    const finalizedBlockOne: MockResponse = {
+      statusCode: 200,
+      data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
+      head: { finalized: { number: 1, hash: '0x1' } },
+    }
+
+    const forkAfterHeaderlessResponse: MockResponse[] = [
+      {
+        // The header is gone, but blocks 2-4 are still above the finalized block 1.
+        statusCode: 200,
+        data: [2, 3, 4].map((n) => ({ header: { number: n, hash: `0x${n}`, timestamp: n * 1000 } })),
+      },
+      {
+        // Forks blocks 3 and 4; the ancestor is block 2.
+        statusCode: 409,
+        data: {
+          previousBlocks: [
+            { number: 1, hash: '0x1' },
+            { number: 2, hash: '0x2' },
+            { number: 3, hash: '0x3a' },
+          ],
+        },
+      },
+      {
+        statusCode: 200,
+        data: [3, 4, 5].map((n) => ({ header: { number: n, hash: `0x${n}a`, timestamp: n * 1000 } })),
+        head: { finalized: { number: 1, hash: '0x1' } },
+      },
+    ]
+
+    /** Writes one row per block and reports the cursor a rollback lands on. */
+    function balancesTarget(onRollback?: (cursor: number) => void) {
+      return drizzleTarget<{ number: number }[]>({
+        db,
+        tables: [balances],
+        onData: async ({ tx, data }) => {
+          for (const b of data) {
+            await tx.insert(balances).values({ account: b.number, balance: b.number }).onConflictDoNothing()
+          }
+        },
+        onAfterRollback: async ({ cursor }) => {
+          onRollback?.(cursor.number)
+        },
+      })
+    }
+
+    async function accounts() {
+      const rows = await db.select().from(balances)
+
+      return rows.map((r) => r.account).sort((a, b) => a - b)
+    }
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE balances (
+          account integer PRIMARY KEY,
+          balance integer NOT NULL
+        );
+      `)
+    })
+
+    withPortal('keeps the writes of an ancestor block that arrived without the header', async ({ portal: serve }) => {
+      const portal = await serve([finalizedBlockOne, ...forkAfterHeaderlessResponse])
+
+      let forkCursor: number | undefined
+
+      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
+        balancesTarget((cursor) => {
+          forkCursor = cursor
+        }),
+      )
+
+      expect(forkCursor).toEqual(2)
+      expect(await accounts()).toEqual([1, 2, 3, 4, 5])
+    })
+
+    // The second run knows the floor only from the persisted state. In one shared batch, the rollback
+    // to block 2 would remove the rows of block 2 with no error.
+    withPortal(
+      'keeps the writes of an ancestor block that arrived without the header after a restart',
+      async ({ portal: serve }) => {
+        const first = await serve([finalizedBlockOne])
+
+        await evmPortalStream({ id: 'test', portal: first.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
+          balancesTarget(),
+        )
+
+        const second = await serve(forkAfterHeaderlessResponse)
+
+        let forkCursor: number | undefined
+
+        await evmPortalStream({ id: 'test', portal: second.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
+          balancesTarget((cursor) => {
+            forkCursor = cursor
+          }),
+        )
+
+        expect(forkCursor).toEqual(2)
+        expect(await accounts()).toEqual([1, 2, 3, 4, 5])
+      },
+    )
   })
 
   describe('forks on tables with foreign keys', () => {

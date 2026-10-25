@@ -106,6 +106,8 @@ pre-change value is what lets a row whose prior value predates every snapshot �
 it was written in a finalized block — land back on that value. This holds only while a
 record's block tag is exact, so a class-T sink must be fed batches carrying at most one
 unfinalized block and never mixing finalized blocks into one (`perBlockUnfinalized`).
+The source makes this split after it clamps the finalized head (DEF-6), so batches from
+the cache and from the portal split against the same `F`.
 
 **CN-31 — W.** Fork is a ranged delete `(ancestor, max(canonical)]` on every tracked
 table, bracketed by intent/commit WAL records; both bounds mandatory (bounded work,
