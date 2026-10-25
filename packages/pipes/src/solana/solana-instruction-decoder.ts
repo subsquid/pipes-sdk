@@ -3,14 +3,17 @@ import {
   InstructionDecoderConfigurationError,
   PortalRange,
   ProfilerOptions,
+  QueryAwareTransformer,
   defaultDecodeError,
+  formatWarning,
   parsePortalRange,
   recordSuppressedDecode,
 } from '~/core/index.js'
 import { arrayify } from '~/internal/array.js'
 import { FieldSelection, Instruction, TokenBalance, Transaction } from '~/portal-client/query/solana.js'
 
-import { solanaQuery } from './solana-query-builder.js'
+import type { SolanaPortalData } from './solana-portal-source.js'
+import { SolanaQueryBuilder, solanaQuery } from './solana-query-builder.js'
 import { getInstructionD1, getInstructionD2, getInstructionD4, getInstructionD8 } from './types.js'
 
 const decodedEventFields = {
@@ -79,26 +82,106 @@ export type EventResponse<T extends Instructions> = {
   [K in keyof T]: AbiDecodeInstruction<T[K]>[]
 }
 
-type DecodedEventPipeArgs<T extends Instructions> = {
+/**
+ * A program's address and its instruction definitions, as its typegen module exports them:
+ * `import * as whirlpool from './abi/whirlpool/index.js'`. Another deployment of the same
+ * program replaces the address: `{ ...whirlpool, programId: '<address>' }`.
+ */
+export type SolanaProgram = {
+  programId: string
+  instructions: Instructions
+}
+
+type ProgramInstructionsArgs<P extends SolanaProgram, T extends Instructions> = {
+  readonly [K in keyof T]: T[K] extends P['instructions'][keyof P['instructions']] ? T[K] : never
+}
+
+type DecoderArgs = {
   range: PortalRange
-  programId: string | string[]
-  instructions: InstructionsArgs<T>
   profiler?: ProfilerOptions
   onError?: DecodeErrorHook
 }
 
-export function solanaInstructionDecoder<T extends Instructions>(opts: DecodedEventPipeArgs<T>) {
+type ProgramDecoderArgs<P extends SolanaProgram, T extends Instructions> = DecoderArgs & {
+  /**
+   * The program `instructions` belong to, usually its typegen module; the decoder reads the one
+   * address in `program.programId`. Every entry must be one of `program.instructions`: a
+   * discriminator does not name its program (by default, Anchor derives it from the instruction
+   * name alone), so this binding keeps another program's instruction out.
+   */
+  program: P
+  instructions: ProgramInstructionsArgs<P, T>
+}
+
+type AddressDecoderArgs<T extends Instructions> = DecoderArgs & {
+  programId: string | string[]
+  instructions: InstructionsArgs<T>
+}
+
+export type SolanaInstructionDecoder<T extends Instructions> = QueryAwareTransformer<
+  SolanaPortalData<SelectedFields>,
+  EventResponse<T>,
+  SolanaQueryBuilder<SelectedFields>
+>
+
+const UNBOUND_ADDRESSES_WARNING = formatWarning({
+  title: 'A solanaInstructionDecoder lists several addresses in `programId` without `program`',
+  content: [
+    'The decoder cannot tell which program an instruction belongs to. If the addresses run',
+    'different programs, an instruction of one decodes under the key of another whenever their',
+    'discriminators match, as they do by default for same-named Anchor instructions such as `swap`.',
+    'Pass the typegen module as `program`, one decoder for each program.',
+  ],
+})
+
+function programAddresses(opts: ProgramDecoderArgs<SolanaProgram, any> | AddressDecoderArgs<any>): string[] {
+  if (!('program' in opts)) {
+    return arrayify(opts.programId)
+  }
+
+  if (!opts.program.programId) {
+    throw new InstructionDecoderConfigurationError([
+      'The decoder has no program address: `program` has no `programId`.',
+      "Pass the program with its address: `program: { ...abi, programId: '<address>' }`.",
+    ])
+  }
+
+  return [opts.program.programId]
+}
+
+export function solanaInstructionDecoder<P extends SolanaProgram, T extends Instructions>(
+  opts: ProgramDecoderArgs<P, T>,
+): SolanaInstructionDecoder<T>
+/** @deprecated Pass `program`, one decoder for each program. */
+export function solanaInstructionDecoder<T extends Instructions>(
+  opts: AddressDecoderArgs<T>,
+): SolanaInstructionDecoder<T>
+export function solanaInstructionDecoder<T extends Instructions>(
+  opts: ProgramDecoderArgs<SolanaProgram, T> | AddressDecoderArgs<T>,
+): SolanaInstructionDecoder<T> {
+  const program = 'program' in opts ? opts.program : undefined
   const range = parsePortalRange(opts.range)
-  const programId = arrayify(opts.programId)
+  const programId = programAddresses(opts)
   const onError = opts.onError || defaultDecodeError
 
   const query = solanaQuery().addFields(decodedEventFields)
 
+  const programInstructions = program ? new Set<unknown>(Object.values(program.instructions)) : undefined
   const byWidth: Record<DiscriminatorWidth, string[]> = { d1: [], d2: [], d4: [], d8: [] }
   const seen = new Map<string, string>()
   const missing: string[] = []
   for (const name in opts.instructions) {
     const i = opts.instructions[name]
+    if (programInstructions && !programInstructions.has(i)) {
+      throw new InstructionDecoderConfigurationError([
+        `Instruction "${name}" is not one of the program's instructions.`,
+        'A discriminator does not name its program: by default, Anchor derives it from the instruction',
+        'name alone, so same-named instructions of two programs share one. An instruction taken from',
+        "another program would decode this program's data under its key. Take every entry from",
+        '`program.instructions`, and give another program its own decoder.',
+      ])
+    }
+
     const widths = DISCRIMINATOR_WIDTHS.filter((w) => i[w])
     if (widths.length === 0) {
       missing.push(name)
@@ -188,8 +271,21 @@ export function solanaInstructionDecoder<T extends Instructions>(opts: DecodedEv
     },
   })
 
+  const unboundAddresses = !program && programId.length > 1
+  // `start` runs again after every fork (GAP-22).
+  let warned = false
+
   return query.build().pipe({
     profiler: opts.profiler || { name: 'instruction decoder' },
+
+    start: ({ logger }) => {
+      if (!unboundAddresses || warned) {
+        return
+      }
+
+      warned = true
+      logger.warn(UNBOUND_ADDRESSES_WARNING)
+    },
 
     transform: async (data, ctx) => {
       const result = {} as EventResponse<T>

@@ -614,6 +614,42 @@ timestamps and is unaffected by that.
 
 ---
 
+## 20. Bind Solana instruction decoders to their program
+
+`solanaInstructionDecoder` takes the program's typegen module as `program`; `programId` is
+deprecated. A discriminator does not name its program — by default, Anchor derives it from the
+instruction name alone, so same-named instructions of two programs share one. With a bare address
+list the decoder could not tell which program an instruction came from, and an
+instruction of one listed program decoded under the key of another. With `program`, every entry of
+`instructions` must be one of `program.instructions`: TypeScript rejects an entry of another type, and
+the decoder refuses any other entry at start (E0003).
+
+```ts
+// before
+solanaInstructionDecoder({
+  range: { from: 'latest' },
+  programId: orcaWhirlpool.programId,
+  instructions: { swap: orcaWhirlpool.instructions.swap },
+})
+
+// after
+solanaInstructionDecoder({
+  range: { from: 'latest' },
+  program: orcaWhirlpool, // import * as orcaWhirlpool from './abi/orca_whirlpool/index.js'
+  instructions: { swap: orcaWhirlpool.instructions.swap },
+})
+```
+
+A decoder reads one address, `program.programId`. Several programs — Token and Token-2022 included —
+take one decoder each, with their own typegen modules. A second deployment of the same program
+replaces the address in a copy of the module: `program: { ...orcaWhirlpool, programId: ADDRESS }`.
+
+`programId` still works, and the editor shows the call as deprecated. When it lists several
+addresses, the pipe logs a warning at start, since that is the configuration where a foreign
+instruction can decode under the wrong key.
+
+---
+
 ## Quick checklist
 
 - [ ] `evmPortalSource` → `evmPortalStream`
@@ -633,6 +669,7 @@ timestamps and is unaffected by that.
 - [ ] `ResultOf` → `OutputOf`
 - [ ] `chunk` → `chunkForInsert`
 - [ ] `createSolanaInstructionDecoder` → `solanaInstructionDecoder`
+- [ ] `solanaInstructionDecoder`: `programId: abi.programId` → `program: abi`; one decoder per program address
 - [ ] Query builders: `addLog` / `addTransaction` / `addInstruction` / … → `addLogRequest` / `addTransactionRequest` / `addInstructionRequest` / …
 - [ ] Custom transformers: `data.blocks` → `data`; `fork` hook → `rollback`
 - [ ] Custom `.build({ transform })` → `.build().pipe()`

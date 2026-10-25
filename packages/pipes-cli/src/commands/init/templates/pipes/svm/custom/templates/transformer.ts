@@ -17,33 +17,33 @@ interface DecoderGroup {
   decoderId: string
   rangeFrom: string
   rangeTo?: string
+  /** The typegen import the decoder binds its instructions to. */
+  programAlias: string
+  /** `program:` as rendered: the typegen import, with `programId` set to the configured address. */
+  program: string
   programs: Program[]
   instructions: Array<{ contractName: string; name: string; uniqueKey: string }>
 }
 
 export const customContractTemplate = `import { solanaInstructionDecoder } from '@subsquid/pipes/solana'
 {{#imports}}
-import { instructions as {{{alias}}}Instructions } from "./contracts/{{{address}}}/index.js"
+import * as {{{alias}}}Program from "./contracts/{{{address}}}/index.js"
 {{/imports}}
 import { enrichEvents } from './utils/index.js'
 
 {{#decoderGroups}}
 const {{{decoderId}}} = solanaInstructionDecoder({
   range: { from: '{{{rangeFrom}}}'{{#rangeTo}}, to: '{{{rangeTo}}}'{{/rangeTo}} },
-  programId: [
-    {{#programs}}
-    "{{{contractAddress}}}",
-    {{/programs}}
-  ],
+  program: {{{program}}},
   /**
-   * Or optionally use pass all events object directly to listen to all contract events
+   * Or pass every instruction of the program:
    * \`\`\`ts
-   * events: myContractEvents,
+   * instructions: {{{programAlias}}}Program.instructions,
    * \`\`\`
    */
   instructions: {
     {{#instructions}}
-    {{uniqueKey}}: {{contractName}}Instructions.{{name}},
+    {{uniqueKey}}: {{contractName}}Program.instructions.{{name}},
     {{/instructions}}
   },
 }).pipe(enrichEvents)
@@ -66,18 +66,14 @@ export function buildDecoderGroups(params: CustomTemplateParams): DecoderGroup[]
     range: c.range ?? { from: 'latest' },
   }))
 
-  // One decoder per (program, range). Deployments of the same program share its IDL and
-  // discriminators, so they belong together in one decoder's programId array. Different
+  // One decoder per (deployment, range): a decoder reads one address, its `program`'s. Different
   // programs must never share a decoder: Solana discriminators are program-independent, so
   // two programs with a same-named instruction would decode each other's data (the decoder
-  // now rejects that config at runtime). Keyed by typegen address so name normalization can't
-  // merge distinct programs.
-  const groups = new Map<string, Program[]>()
+  // refuses instructions from outside its `program`). Keyed by typegen address so name
+  // normalization can't merge distinct programs.
+  const groups = new Map<string, Program>()
   for (const p of programs) {
-    const key = `${p.typegenAddress}|${p.range.from}|${p.range.to ?? ''}`
-    const list = groups.get(key) ?? []
-    list.push(p)
-    groups.set(key, list)
+    groups.set(`${p.typegenAddress}|${p.contractAddress}|${p.range.from}|${p.range.to ?? ''}`, p)
   }
 
   const groupList = [...groups.values()]
@@ -86,8 +82,8 @@ export function buildDecoderGroups(params: CustomTemplateParams): DecoderGroup[]
   }
 
   const usedIds = new Set<string>()
-  return groupList.map((deployments) => {
-    const name = deployments[0]!.contractName
+  return groupList.map((deployment) => {
+    const name = deployment.contractName
     const suffix = name.charAt(0).toUpperCase() + name.slice(1)
     let decoderId = `custom${suffix}`
     for (let n = 2; usedIds.has(decoderId); n++) {
@@ -95,32 +91,25 @@ export function buildDecoderGroups(params: CustomTemplateParams): DecoderGroup[]
     }
     usedIds.add(decoderId)
 
-    return makeGroup(decoderId, deployments)
+    return makeGroup(decoderId, deployment)
   })
 }
 
-function makeGroup(decoderId: string, programs: Program[]): DecoderGroup {
-  const range = programs[0]!.range
+function makeGroup(decoderId: string, deployment: Program): DecoderGroup {
+  const alias = deployment.contractName
 
-  // Instructions are program-level: deployments of the same program share its
-  // IDL, so only the first entry per program name contributes — otherwise a
-  // multi-deployment program would emit duplicate instruction keys.
-  const uniquePrograms = [...new Map(programs.map((p) => [p.contractName, p])).values()]
-  const instructions = uniquePrograms.flatMap((p) =>
-    p.contractEvents.map((e) => ({ contractName: p.contractName, name: e.name })),
-  )
-  const nameCounts = new Map<string, number>()
-  for (const i of instructions) nameCounts.set(i.name, (nameCounts.get(i.name) ?? 0) + 1)
-  const instructionsWithKeys = instructions.map((i) => ({
-    ...i,
-    uniqueKey: (nameCounts.get(i.name) ?? 0) > 1 ? `${i.contractName}${i.name}` : i.name,
-  }))
+  // Always the configured address: typegen takes `programId` from the address embedded in the IDL
+  // when it has one, and that can differ from the address the IDL was fetched from.
+  const program = `{ ...${alias}Program, programId: "${deployment.contractAddress}" }`
+
   return {
     decoderId,
-    rangeFrom: range.from,
-    rangeTo: range.to,
-    programs,
-    instructions: instructionsWithKeys,
+    rangeFrom: deployment.range.from,
+    rangeTo: deployment.range.to,
+    programAlias: alias,
+    program,
+    programs: [deployment],
+    instructions: deployment.contractEvents.map((e) => ({ contractName: alias, name: e.name, uniqueKey: e.name })),
   }
 }
 

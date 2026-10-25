@@ -49,7 +49,7 @@ describe('svm customTemplate', () => {
 
     const importLines = artifacts.transformer.split('\n').filter((l) => l.includes('from "./contracts/'))
     expect(importLines).toEqual([
-      'import { instructions as whirpoolInstructions } from "./contracts/0x0000000000000000000000000000000000000000/index.js"',
+      'import * as whirpoolProgram from "./contracts/0x0000000000000000000000000000000000000000/index.js"',
     ])
   })
 

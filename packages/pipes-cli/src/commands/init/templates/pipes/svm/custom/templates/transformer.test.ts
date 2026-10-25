@@ -75,9 +75,7 @@ describe('SVM custom transformer', () => {
     const code = renderTransformer(params([twoDeployments]))
 
     const importLines = code.split('\n').filter((l) => l.includes('from "./contracts/'))
-    expect(importLines).toEqual([
-      `import { instructions as jupiterInstructions } from "./contracts/${jupiterAddress}/index.js"`,
-    ])
+    expect(importLines).toEqual([`import * as jupiterProgram from "./contracts/${jupiterAddress}/index.js"`])
   })
 
   it('keeps same-named instructions in separate per-program decoders (no cross-decode)', () => {
@@ -125,33 +123,40 @@ describe('SVM custom transformer', () => {
 })
 
 describe('multi-deployment programs (Copilot round-2 regression)', () => {
-  it('does not duplicate instruction keys when one program has several same-range deployments', () => {
-    const params = {
-      contracts: [
-        {
-          contractName: 'jupiter',
-          contractEvents: [{ name: 'swap', type: 'event', inputs: [] }],
-          deployments: [
-            { address: 'Addr1111111111111111111111111111', range: { from: '10' } },
-            { address: 'Addr2222222222222222222222222222', range: { from: '10' } },
-          ],
-        },
-      ],
-    }
+  const params = {
+    contracts: [
+      {
+        contractName: 'jupiter',
+        contractEvents: [{ name: 'swap', type: 'event', inputs: [] }],
+        deployments: [
+          { address: 'Addr1111111111111111111111111111', range: { from: '10' } },
+          { address: 'Addr2222222222222222222222222222', range: { from: '10' } },
+        ],
+      },
+    ],
+  }
 
-    const groups = buildDecoderGroups(params)
-    expect(groups).toHaveLength(1)
-    // programId keeps every deployment address...
-    expect(groups[0]!.programs.map((p) => p.contractAddress)).toEqual([
-      'Addr1111111111111111111111111111',
-      'Addr2222222222222222222222222222',
+  it('gives each same-range deployment its own decoder, with each instruction key once', () => {
+    const decoders = buildDecoderGroups(params).map((g) => ({
+      id: g.decoderId,
+      addresses: g.programs.map((p) => p.contractAddress),
+      keys: g.instructions.map((i) => i.uniqueKey),
+    }))
+
+    expect(decoders).toEqual([
+      { id: 'customJupiter', addresses: ['Addr1111111111111111111111111111'], keys: ['swap'] },
+      { id: 'customJupiter2', addresses: ['Addr2222222222222222222222222222'], keys: ['swap'] },
     ])
-    // ...but each instruction key appears exactly once.
-    const keys = groups[0]!.instructions.map((i) => i.uniqueKey)
-    expect(keys).toEqual([...new Set(keys)])
-    expect(keys).toEqual(['swap'])
+  })
 
-    const rendered = renderTransformer(params)
-    expect(rendered.match(/swap: jupiterInstructions\.swap/g)).toHaveLength(1)
+  it('binds every deployment to its configured address, the reference one included', () => {
+    const programLines = renderTransformer(params)
+      .split('\n')
+      .filter((l) => l.startsWith('  program:'))
+
+    expect(programLines).toEqual([
+      '  program: { ...jupiterProgram, programId: "Addr1111111111111111111111111111" },',
+      '  program: { ...jupiterProgram, programId: "Addr2222222222222222222222222222" },',
+    ])
   })
 })

@@ -16,7 +16,7 @@ async function cli() {
     outputs: {
       orcaWhirlpool: solanaInstructionDecoder({
         range: { from },
-        programId: orcaWhirlpool.programId,
+        program: orcaWhirlpool,
         instructions: {
           swap: orcaWhirlpool.instructions.swap,
           swapV2: orcaWhirlpool.instructions.swapV2,
@@ -24,14 +24,14 @@ async function cli() {
       }),
       meteoraDamm: solanaInstructionDecoder({
         range: { from },
-        programId: meteoraDamm.programId,
+        program: meteoraDamm,
         instructions: {
           swap: meteoraDamm.instructions.swap,
         },
       }),
       meteoraDlmm: solanaInstructionDecoder({
         range: { from },
-        programId: meteoraDlmm.programId,
+        program: meteoraDlmm,
         instructions: {
           swaps: meteoraDlmm.instructions.swap,
           swapExactOut: meteoraDlmm.instructions.swapExactOut,
@@ -40,7 +40,7 @@ async function cli() {
       }),
       raydiumAmm: solanaInstructionDecoder({
         range: { from },
-        programId: raydiumAmm.programId,
+        program: raydiumAmm,
         instructions: {
           swapBaseIn: raydiumAmm.instructions.swapBaseIn,
           swapBaseOut: raydiumAmm.instructions.swapBaseOut,
@@ -48,7 +48,7 @@ async function cli() {
       }),
       raydiumClmm: solanaInstructionDecoder({
         range: { from },
-        programId: raydiumClmm.programId,
+        program: raydiumClmm,
         instructions: {
           swap: raydiumClmm.instructions.swap,
           swapV2: raydiumClmm.instructions.swapV2,
@@ -56,7 +56,7 @@ async function cli() {
       }),
       raydiumCpmm: solanaInstructionDecoder({
         range: { from },
-        programId: raydiumCpmm.programId,
+        program: raydiumCpmm,
         instructions: {
           swapBaseInput: raydiumCpmm.instructions.swapBaseInput,
           swapBaseOutput: raydiumCpmm.instructions.swapBaseOutput,

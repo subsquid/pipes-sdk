@@ -7,8 +7,10 @@ Status: Accepted
 A Solana instruction is identified by a discriminator — the leading bytes of its data.
 The width is a property of the program, not the instruction: Anchor programs use an
 8-byte discriminator derived as `sha256("global:<name>")`, native/SPL programs a single
-byte. Crucially the derivation is **program-independent** — every Anchor `swap` shares
-the same 8-byte discriminator regardless of which program emitted it.
+byte. Crucially the derivation is **program-independent**. By default, every Anchor
+`swap` has the same 8-byte discriminator, whatever program emitted it. A program can
+set a custom discriminator for an instruction, but the discriminator still does not
+contain the program address.
 
 The portal's instruction request carries the discriminator in a width-tagged field
 (`d1`/`d2`/`d4`/`d8`). Two constraints hold on the wire, both confirmed against a live
@@ -42,14 +44,32 @@ coded configuration error (E0003, per ADR-4) when:
 - two instructions share a discriminator (they would decode each other's data);
 - any instruction carries no discriminator (with none it matches every instruction of the
   program and decodes foreign data under its key), or more than one (an instruction is
-  identified by exactly one — several are a malformed ABI entry).
+  identified by exactly one — several are a malformed ABI entry);
+- an instruction is not one of `program.instructions` (a discriminator does not identify
+  its program, see the binding below);
+- the `programId` of `program` is empty.
 
-`programId` stays an array — for the multi-deployment case above, emitted as one
-instruction request of the single width over all addresses. The dead `d0` field is
-removed from the wire request type and the ABI-instruction type. The `sqd init`
-generator groups by program identity (the reference-deployment address, not the display
-name) and range, so it emits one decoder per (program, range) and never merges distinct
-programs — including two whose names normalise to the same identifier.
+The decoder gets its program as the typegen module, `program`, which holds `programId`
+and `instructions`. Each instruction of the decoder must be one of `program.instructions`.
+The types examine this when the instruction types are different. At construction, the
+decoder compares object identity, so the typegen and its generated code stay as they are.
+
+A decoder reads one address, `program.programId`, and sends one instruction request of the
+single width for it. Token and Token-2022 are two programs, so they get two decoders. A
+second deployment of the same program gets its own decoder, with a copy of the module that
+replaces the address (`{ ...module, programId }`).
+
+`programId` without `program` stays, so that old code continues to work, but it is
+deprecated. With it, the decoder examines only the discriminator set. When it lists more
+than one address, the pipe logs a warning at start.
+
+The dead `d0` field is removed from the wire request type and the ABI-instruction type.
+The `sqd init` generator groups by program identity (the reference-deployment address, not
+the display name) and range, so it emits one decoder per (program, range) and never merges
+distinct programs — including two whose names normalise to the same identifier. It emits
+one decoder for each deployment. Each decoder sets `program` with the configured address,
+because typegen takes the address from the IDL when the IDL has one, and that address can
+be different.
 
 ## Event decoders
 
@@ -80,20 +100,30 @@ sound unit is one decoder per program.
 *Keep `d0` for forward compatibility* — rejected. The portal returns `400` on it today;
 a field that cannot be sent is a trap, not a reserve.
 
+*Put `programId` on each instruction in the typegen* — rejected for now. The typegen is a
+different package, and the code that users generated before does not change. The
+`program` binding works with that code.
+
+*Keep a list of addresses beside `program`* — rejected. The list trusts the caller that
+each address uses the ABI of `program`, and the binding is there to remove this trust.
+Token-2022, the usual example, is a different program with its own ABI.
+
+*Let one decoder hold several programs* (`programs: [{ program, instructions }]`, with a
+match on the pair of address and discriminator) — rejected. It is a larger API change,
+and one decoder for each program gives the same result.
+
 ## Consequences
 
 The mixed-program decoders the generator itself could produce — previously a silent
-corruption — now fail loudly at startup (REQ-2, ADR-9's fail-at-startup posture). The
-Token / Token-2022 multi-deployment configuration remains a single decoder. IB-8 no
+corruption — now fail loudly at startup (REQ-2, ADR-9's fail-at-startup posture). IB-8 no
 longer lists `d0`, and IB-50 registers E0003 and E0004.
 
-INV-24 is **not** mechanically enforced by this decision. `programId` is decoder-level,
-so nothing binds an instruction definition to the program it was generated from; the
-guards reject only what is visible in the discriminator set, which is a proxy, not a
-proof. A decoder over `[JUP, RAY]` with `{ jupSwap: jupiter.swap, rayDeposit:
-raydium.deposit }` passes — one width, distinct discriminators — yet Raydium's on-chain
-`swap` matches `jupSwap`'s discriminator and decodes under Jupiter's codec. The
-collisions that *are* caught are the likely ones (two programs tracked for the same
-instruction name derive the same discriminator), so the guard covers the accident this
-ADR came from; the general case stays the caller's contract. Closing it means binding
-`programId` per instruction — an API change, tracked as GAP-36.
+With `program`, the decoder enforces INV-24 for instructions: it reads one address, and
+only the instructions of that program get into it. A copy of the module with a different
+`programId` is the only way to change the address, and the code shows it.
+
+With the deprecated `programId`, the guards examine only the discriminator set. A decoder
+over `[JUP, RAY]` with `{ jupSwap: jupiter.swap, rayDeposit: raydium.deposit }` has one
+width and distinct discriminators, so it starts. But on chain, the `swap` of Raydium has
+the discriminator of `jupSwap`, and the decoder decodes it with the codec of Jupiter. The
+start warning shows this risk when `programId` has more than one address.

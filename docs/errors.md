@@ -63,62 +63,60 @@ invalid date, or a timestamp that can't be resolved to a block. The message name
 **Fix** — ensure `from ≤ to` and use a resolvable bound: `'latest'`, a block number (`'12,000,000'`),
 an ISO date (`'2024-01-01'`), or a `Date`.
 
-### E0003 · Unusable instruction discriminator set
+### E0003 · Unusable instruction set
 
-A `solanaInstructionDecoder` was built with a discriminator set it can't use: an instruction with no
+A `solanaInstructionDecoder` was built with instructions it can't decode soundly: an instruction that
+is not one of its `program`'s instructions, a `program` with an empty address, an instruction with no
 discriminator or with more than one, discriminators of mixed widths across the decoder
-(`d1`/`d2`/`d4`/`d8`), or two instructions sharing a discriminator. A decoder covers a single
-program/ABI — one width, distinct discriminators — because Anchor discriminators are
-program-independent, so a shared one would decode the same raw instruction under both keys.
+(`d1`/`d2`/`d4`/`d8`), or two instructions sharing a discriminator. A decoder covers a single program
+— its address, its own instructions, one width, distinct discriminators — because Anchor
+discriminators are program-independent: a discriminator alone does not say which program an
+instruction came from.
 
-**Fix** — give each instruction exactly one discriminator, keep a single width per decoder, and split
-unrelated programs into separate `solanaInstructionDecoder()` calls. If the mixed widths really do
-belong to one program — an ABI whose extension instructions carry a wider discriminator than its base
-ones — split it by width instead: one decoder per width, the same `programId`.
+**Fix** — pass the program's typegen module as `program` and take every entry from
+`program.instructions`. Give each instruction exactly one discriminator, keep a single width per
+decoder, and give every other program its own `solanaInstructionDecoder()`. If the mixed widths really
+do belong to one program — an ABI whose extension instructions carry a wider discriminator than its
+base ones — split it by width instead: one decoder per width, the same `program`.
 
-**Wrong** — two different programs in one decoder. Their `swap` instructions are unrelated, but Anchor
-derives both discriminators from `sha256("global:swap")`, so they collide and each would decode the
-other's data:
+**Wrong** — an instruction of another program. TypeScript rejects it when the two instructions differ
+in type, and the decoder refuses it at start in any case:
 
 ```ts
 solanaInstructionDecoder({
   range: { from: 'latest' },
-  programId: [jupiter.programId, raydium.programId],
+  program: jupiter,
   instructions: {
     jupSwap: jupiter.instructions.swap,
-    raySwap: raydium.instructions.swap, // same discriminator as jupSwap → E0003
+    rayDeposit: raydium.instructions.deposit, // not one of jupiter.instructions → E0003
   },
 })
 ```
 
-**Right** — one decoder per program/ABI:
+With the deprecated `programId: [jupiter.programId, raydium.programId]` in place of `program`, the
+decoder checks only the discriminators: this example starts, and Raydium's on-chain `swap`, whose
+discriminator Anchor derives from `sha256("global:swap")` just as Jupiter's, decodes under `jupSwap`
+with Jupiter's codec and account layout.
+
+**Right** — one decoder per program:
 
 ```ts
 const jup = solanaInstructionDecoder({
   range: { from: 'latest' },
-  programId: jupiter.programId,
+  program: jupiter,
   instructions: { swap: jupiter.instructions.swap },
 })
 
 const ray = solanaInstructionDecoder({
   range: { from: 'latest' },
-  programId: raydium.programId,
+  program: raydium,
   instructions: { swap: raydium.instructions.swap },
 })
 ```
 
-**Also right** — one ABI covering several addresses. This is the legitimate array case: the
-instruction has the same discriminator, arguments and account layout at every address, so one
-definition decodes it across all of them. Token and Token-2022 are distinct programs, but Token-2022
-implements Token's instruction set — `transfer` is identical on both:
-
-```ts
-solanaInstructionDecoder({
-  range: { from: 'latest' },
-  programId: [TOKEN_PROGRAM, TOKEN_2022_PROGRAM],
-  instructions: { transfer: tokenProgram.instructions.transfer },
-})
-```
+Token and Token-2022 are two programs as well, each with its own typegen module and decoder. A second
+deployment of the same program replaces the address in a copy of the module:
+`program: { ...jupiter, programId: JUPITER_SECOND_DEPLOYMENT }`.
 
 ### E0004 · Two event entries can match the same log
 

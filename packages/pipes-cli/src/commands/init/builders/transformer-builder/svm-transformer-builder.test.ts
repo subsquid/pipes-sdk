@@ -40,7 +40,7 @@ describe('SVM Template Builder', () => {
       import { clickhouseTarget } from "@subsquid/pipes/targets/clickhouse";
       import { createClient } from "@clickhouse/client";
       import { enrichEvents, serializeJsonWithBigInt, toSnakeCaseKeysArray } from "./utils/index.js";
-      import { instructions as whirpoolInstructions } from "./contracts/0x0000000000000000000000000000000000000000/index.js";
+      import * as whirpoolProgram from "./contracts/0x0000000000000000000000000000000000000000/index.js";
 
       const env = z.object({
         CLICKHOUSE_USER: z.string(),
@@ -51,17 +51,15 @@ describe('SVM Template Builder', () => {
 
       const custom = solanaInstructionDecoder({
         range: { from: 'latest' },
-        programId: [
-          "0x0000000000000000000000000000000000000000",
-        ],
+        program: { ...whirpoolProgram, programId: "0x0000000000000000000000000000000000000000" },
         /**
-         * Or optionally use pass all events object directly to listen to all contract events
+         * Or pass every instruction of the program:
          * \`\`\`ts
-         * events: myContractEvents,
+         * instructions: whirpoolProgram.instructions,
          * \`\`\`
          */
         instructions: {
-          Swap: whirpoolInstructions.Swap,
+          Swap: whirpoolProgram.instructions.Swap,
         },
       }).pipe(enrichEvents)
 

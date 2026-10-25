@@ -48,7 +48,9 @@ export class BlockRangeConfigurationError extends PipeError {
 }
 
 /**
- * E0003: Thrown when an instruction decoder is built with an unusable discriminator set:
+ * E0003: Thrown when an instruction decoder is built with an unusable instruction set: an
+ * instruction that is not one of its `program`'s (a discriminator does not name its program, so
+ * another program's instruction would decode this one's data), a `program` with no address,
  * an instruction with no discriminator (it would match every instruction of the program) or
  * with more than one (a malformed ABI entry — an instruction has exactly one), discriminators
  * of mixed widths across the decoder (a decoder covers one ABI, which is single-width), or two
