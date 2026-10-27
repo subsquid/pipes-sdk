@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from 'node:timers/promises'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { resolveForkCursor } from '~/core/fork.js'
@@ -394,6 +396,36 @@ describe('mockPortal request log', () => {
     expect(served.head?.finalized?.number).toBe(5)
     expect(forked.answer?.kind).toBe('fork')
     expect(forked.head?.finalized?.number).toBe(6)
+  })
+})
+
+describe('mockPortal stall', () => {
+  withPortal('serves a stall as the first blocks of the answer, then no more bytes', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ stallAfter: 2 })
+
+    const res = await post(portal, 'stream', { fromBlock: 1, includeAllBlocks: true })
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+
+    let received = ''
+    while ((received.match(/\n/g) ?? []).length < 2) {
+      const { value } = await reader.read()
+      received += decoder.decode(value, { stream: true })
+    }
+
+    const next = await Promise.race([reader.read().then(() => 'data'), sleep(100).then(() => 'silence')])
+    await reader.cancel()
+
+    const numbers = received
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line).header.number)
+
+    expect(res.status).toBe(200)
+    expect(numbers).toEqual([1, 2])
+    expect(next).toBe('silence')
+    expect(portal.requests[0].answer?.kind).toBe('stalled')
   })
 })
 

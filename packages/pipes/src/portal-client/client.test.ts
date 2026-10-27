@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { HttpError } from '~/http-client/index.js'
+import { defaultLogger } from '~/core/logger.js'
+import { HttpClient, HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 import { isForkException } from '~/portal-client/fork-exception.js'
+import { streamBodyTimeout } from '~/portal-client/stream-timeout.js'
 import { MockPortal, MockResponse, mockPortal } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
@@ -358,6 +360,72 @@ describe('PortalClient request accounting', () => {
       200: 1,
       529: 1,
     })
+  })
+})
+
+describe('PortalClient stalled response', () => {
+  const range = { ...query, fromBlock: 1, toBlock: 5, includeAllBlocks: true }
+
+  async function readBlocks(stream: AsyncIterable<{ blocks: any[] }>) {
+    const blocks: { number: number; hash: string }[] = []
+    for await (const batch of stream) {
+      blocks.push(...batch.blocks.map((b) => b.header))
+    }
+
+    return blocks
+  }
+
+  // The blocks before the stall are delivered once, so the next request starts after them.
+  withPortal('requests a stalled response again from the next block', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ stallAfter: 2 })
+
+    const logger = defaultLogger({ level: 'silent' })
+    const warn = vi.spyOn(logger, 'warn')
+    const client = new PortalClient({ url: portal.url, logger })
+
+    const blocks = await readBlocks(client.getStream(range, { request: { bodyTimeout: 100 } }))
+    const resumed = portal.requests[1].query
+
+    expect(blocks.map((b) => b.number)).toEqual([1, 2, 3, 4, 5])
+    expect(portal.requests.map((r) => r.answer?.kind)).toEqual(['stalled', 'blocks'])
+    expect(resumed).toMatchObject({ fromBlock: 3, parentBlockHash: blocks[1].hash })
+    expect(warn).toHaveBeenCalledExactlyOnceWith({
+      message: expect.stringMatching(/^portal response stalled: no block for \d+s, requesting again from block 3$/),
+      url: client.getUrl(),
+      fromBlock: 3,
+      stalledMs: expect.any(Number),
+    })
+  })
+
+  // A pipe configures the portal through its HTTP options alone, so they must still set the timeout.
+  withPortal('applies the body timeout of the HTTP options to a stream', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ stallAfter: 0 })
+
+    const client = new PortalClient({ url: portal.url, http: { bodyTimeout: 100 } })
+
+    const blocks = await readBlocks(client.getStream(range))
+
+    expect(blocks.map((b) => b.number)).toEqual([1, 2, 3, 4, 5])
+    expect(portal.requests.map((r) => [r.query.fromBlock, r.answer?.kind])).toEqual([
+      [1, 'stalled'],
+      [1, 'blocks'],
+    ])
+  })
+
+  // The default takes 30 s to fire, so this checks the timeout the request carries instead.
+  withPortal('picks the body timeout from the response when none is configured', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    const http = new HttpClient()
+    const request = vi.spyOn(http, 'request')
+
+    await readBlocks(new PortalClient({ url: portal.url, http }).getStream(range))
+
+    expect(request).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ bodyTimeout: streamBodyTimeout }),
+    )
   })
 })
 

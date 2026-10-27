@@ -2,7 +2,9 @@ import { Readable } from 'stream'
 
 import { unexpectedCase, wait, withErrorContext } from '@subsquid/util-internal'
 
+import { formatDuration } from '~/core/formatters.js'
 import { PortalBlockOrderError } from '~/core/index.js'
+import { type Logger } from '~/core/logger.js'
 import {
   HttpBody,
   HttpClient,
@@ -17,6 +19,7 @@ import { ForkException } from './fork-exception.js'
 import { GetBlock, PortalQuery, Query } from './query/index.js'
 import { splitLines } from './split-lines.js'
 import { type BlockRef, type PortalHead, StreamBuffer, type StreamData } from './stream-buffer.js'
+import { isBodyTimeoutError, streamBodyTimeout } from './stream-timeout.js'
 
 export type { BlockRef, PortalHead, StreamData } from './stream-buffer.js'
 
@@ -55,6 +58,12 @@ export interface PortalClientOptions {
   http?: HttpClient | HttpClientOptions
 
   /**
+   * Gets a warning each time a stalled stream response is cut and requested again.
+   * Defaults to the logger of the `http` options.
+   */
+  logger?: Logger
+
+  /**
    * Maximum number of bytes to buffer before flushing.
    * @default 10_485_760 (10MB)
    */
@@ -85,6 +94,11 @@ export type PortalRequestOptions = Pick<
 >
 
 export interface PortalBlockStreamOptions {
+  /**
+   * `bodyTimeout` defaults to the one of the HTTP client. Without one, a response gets 30 s when
+   * the portal serves it from real-time data and 150 s otherwise. A stream requests a response that
+   * times out again from the block after the last one it delivered.
+   */
   request?: PortalRequestOptions
   maxBytes?: number
   maxIdleTimeMs?: number
@@ -113,6 +127,7 @@ function isForkHttpError(err: unknown): err is HttpError {
 export class PortalClient {
   readonly #client: HttpClient
   readonly #url: URL
+  readonly #logger?: Logger
   readonly #options: {
     finalized: boolean
     headPollInterval: number
@@ -123,6 +138,9 @@ export class PortalClient {
 
   constructor(options: PortalClientOptions) {
     this.#client = options.http instanceof HttpClient ? options.http : new HttpClient(options.http)
+
+    const httpOptions = options.http instanceof HttpClient ? undefined : options.http
+    this.#logger = options.logger ?? httpOptions?.logger ?? undefined
 
     this.#url = new URL(options.url)
     this.#options = {
@@ -181,12 +199,23 @@ export class PortalClient {
 
   getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
     const settings = {
-      request: options?.request ?? {},
+      request: {
+        ...options?.request,
+        bodyTimeout: options?.request?.bodyTimeout ?? this.#client.bodyTimeout ?? streamBodyTimeout,
+      },
       finalized: options?.finalized ?? this.#options.finalized,
       maxBytes: options?.maxBytes ?? this.#options.maxBytes,
       maxIdleTime: options?.maxIdleTimeMs ?? this.#options.maxIdleTime,
       maxWaitTime: options?.maxWaitTimeMs ?? this.#options.maxWaitTime,
       headPollInterval: options?.headPollIntervalMs ?? this.#options.headPollInterval,
+      onStall: ({ fromBlock, stalledMs }: Stall) => {
+        this.#logger?.warn({
+          message: `portal response stalled: no block for ${formatDuration(stalledMs)}, requesting again from block ${fromBlock}`,
+          url: withoutCredentials(this.#url),
+          fromBlock,
+          stalledMs,
+        })
+      },
     }
 
     return createPortalStream(query, settings, async (q, o) =>
@@ -237,6 +266,9 @@ export class PortalClient {
   }
 }
 
+/** A response that went silent: `fromBlock` is where the next request starts. */
+type Stall = { fromBlock: number; stalledMs: number }
+
 function createPortalStream<Q extends Query>(
   query: Q,
   options: {
@@ -246,6 +278,7 @@ function createPortalStream<Q extends Query>(
     maxIdleTime: number
     maxWaitTime: number
     headPollInterval: number
+    onStall: (stall: Stall) => void
   },
   requestStream: (
     query: Q,
@@ -256,7 +289,7 @@ function createPortalStream<Q extends Query>(
     stream?: AsyncIterable<string[]> | null | undefined
   }>,
 ): PortalBlockStream<GetBlock<Q>> {
-  const { headPollInterval, request, ...bufferOptions } = options
+  const { headPollInterval, request, onStall, ...bufferOptions } = options
   const buffer = new StreamBuffer<GetBlock<Q>>(bufferOptions)
 
   let { fromBlock = 0, toBlock, parentBlockHash } = query
@@ -306,9 +339,13 @@ function createPortalStream<Q extends Query>(
       // portal responds with 200 status and empty body
       if (res.stream == null) break
 
+      let lastDataAt = Date.now()
+
       try {
         for await (let data of res.stream) {
           const lastBlockReceivedAt = new Date()
+          lastDataAt = lastBlockReceivedAt.getTime()
+
           const blocks: { block: GetBlock<Q>; bytes: number }[] = []
           const requestedFromBlock = fromBlock
 
@@ -365,7 +402,11 @@ function createPortalStream<Q extends Query>(
         }
       } catch (err) {
         if (buffer.signal.aborted) break
-        if (!isStreamAbortedError(err)) {
+
+        // The loop requests again from `fromBlock`, which only a fully parsed block moves.
+        if (isBodyTimeoutError(err)) {
+          onStall({ fromBlock, stalledMs: Date.now() - lastDataAt })
+        } else if (!isStreamAbortedError(err)) {
           throw err
         }
       }
@@ -399,6 +440,14 @@ function getHeadFromHeaders(headers: HttpResponse['headers']) {
         }
       : undefined,
   }
+}
+
+function withoutCredentials(url: URL): string {
+  const copy = new URL(url)
+  copy.username = ''
+  copy.password = ''
+
+  return copy.toString()
 }
 
 function isStreamAbortedError(err: unknown) {

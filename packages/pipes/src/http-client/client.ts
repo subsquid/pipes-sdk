@@ -12,6 +12,9 @@ const USER_AGENT = 'subsquid-pipes/http-client (sqd.ai)'
 
 export type HeadersInit = string[][] | Record<string, string | readonly string[]> | Headers
 
+/** Milliseconds, or a function that picks them from the response headers. */
+export type BodyTimeout = number | ((res: Response) => number | undefined)
+
 export interface RequestHooks {
   /**
    * Called before the request is sent.
@@ -107,7 +110,7 @@ export interface RequestOptions {
   retryAttempts?: number
   retrySchedule?: number[]
   httpTimeout?: number
-  bodyTimeout?: number
+  bodyTimeout?: BodyTimeout
   abort?: AbortSignal
   stream?: boolean
   keepalive?: boolean
@@ -123,7 +126,7 @@ export interface FetchRequest extends RequestInit {
   url: string
   headers: Headers
   timeout?: number
-  bodyTimeout?: number
+  bodyTimeout?: BodyTimeout
   signal?: AbortSignal
   stream?: boolean
   hooks?: RequestHooks
@@ -157,7 +160,7 @@ export class HttpClient implements BaseHttpClient {
   private readonly retrySchedule: number[]
   private readonly retryAttempts: number
   private readonly httpTimeout: number
-  private readonly bodyTimeout?: number
+  readonly bodyTimeout?: number
   private readonly keepalive?: boolean
   private readonly hooks?: RequestHooks
 
@@ -449,8 +452,9 @@ export class HttpClient implements BaseHttpClient {
   protected async handleResponseBody(req: FetchRequest, res: Response): Promise<any> {
     let contentType = (res.headers.get('content-type') || '').split(';')[0]
 
-    if (req.bodyTimeout != null && res.body != null) {
-      let body = addStreamTimeout(res.body, req.bodyTimeout, () => new HttpBodyTimeoutError(req.bodyTimeout ?? 0))
+    const bodyTimeout = typeof req.bodyTimeout === 'function' ? req.bodyTimeout(res) : req.bodyTimeout
+    if (bodyTimeout != null && res.body != null) {
+      let body = addStreamTimeout(res.body, bodyTimeout, () => new HttpBodyTimeoutError(bodyTimeout))
       res = new Response(body, res)
     }
 

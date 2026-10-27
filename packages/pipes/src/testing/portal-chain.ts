@@ -29,22 +29,30 @@ export type ChainRequest = {
   head?: WireHead
 }
 
-export type ChainFault = {
-  status: number
-  /** How many stream requests in a row get this answer. Defaults to 1. */
-  times?: number
-  /** Sent as the `Retry-After` header. */
-  retryAfter?: number | string
-}
+export type ChainFault =
+  | {
+      status: number
+      /** How many stream requests in a row get this answer. Defaults to 1. */
+      times?: number
+      /** Sent as the `Retry-After` header. */
+      retryAfter?: number | string
+    }
+  | {
+      /** Answers 200 with this many blocks of the answer, then holds the response open and sends nothing more. */
+      stallAfter: number
+      /** How many stream requests in a row get this answer. Defaults to 1. */
+      times?: number
+    }
 
 export type ChainAnswer =
   | { kind: 'blocks'; blocks: ChainBlock[] }
+  | { kind: 'stalled'; blocks: ChainBlock[] }
   | { kind: 'at-head' }
   | { kind: 'refused'; message: string }
   | { kind: 'fork'; previousBlocks: { number: number; hash: string }[] }
   | { kind: 'fault'; status: number; retryAfter?: number | string }
 
-const STATUS = { blocks: 200, 'at-head': 204, refused: 400, fork: 409 } as const
+const STATUS = { blocks: 200, stalled: 200, 'at-head': 204, refused: 400, fork: 409 } as const
 
 export function statusOf(answer: ChainAnswer): number {
   return answer.kind === 'fault' ? answer.status : STATUS[answer.kind]
@@ -188,7 +196,7 @@ export class PortalChain {
   }
 
   fail(fault: ChainFault) {
-    this.#faults.push({ status: fault.status, times: fault.times ?? 1, retryAfter: fault.retryAfter })
+    this.#faults.push({ ...fault, times: fault.times ?? 1 })
   }
 
   /** Records a stream request on arrival, before `delay` can hold it back. */
@@ -217,9 +225,21 @@ export class PortalChain {
         this.#faults.shift()
       }
 
+      if ('stallAfter' in fault) {
+        const answer = this.#serve(endpoint, query)
+        const blocks = answer.kind === 'blocks' ? answer.blocks.slice(0, fault.stallAfter) : []
+
+        return { kind: 'stalled', blocks }
+      }
+
       return { kind: 'fault', status: fault.status, retryAfter: fault.retryAfter }
     }
 
+    return this.#serve(endpoint, query)
+  }
+
+  /** The answer of a healthy portal. */
+  #serve(endpoint: StreamEndpoint, query: StreamQuery): ChainAnswer {
     const addresses = countLogAddresses(query)
     if (this.#maxAddresses !== undefined && addresses > this.#maxAddresses) {
       return { kind: 'refused', message: `the query carries ${addresses} addresses, more than ${this.#maxAddresses}` }

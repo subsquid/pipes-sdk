@@ -80,10 +80,10 @@ export type MockPortalBlock = ChainBlock
 /** A stream request the mock portal received, with what it answered and the head it reported. */
 export type MockPortalRequest = ChainRequest
 
-/** What the mock portal answered a stream request: blocks, at-head, a fork, a refusal or a fault. */
+/** What the mock portal answered a stream request: blocks, at-head, a fork, a refusal, a fault or a stall. */
 export type MockPortalAnswer = ChainAnswer
 
-/** A transport failure the mock portal serves instead of the next answers. */
+/** A failure the mock portal serves instead of the next answers: an error status, or a response that stalls. */
 export type MockPortalFault = ChainFault
 
 export type MockPortalOptions = {
@@ -116,7 +116,10 @@ export type MockChainPortal = MockPortal & {
    */
   fork(at: number, branch?: MockPortalBlock[]): void
   setHead(head: { latest?: number; finalized?: number | null }): void
-  /** Answers the next stream requests with a failure instead of data. */
+  /**
+   * Answers the next stream requests with a failure instead of data. `{ stallAfter: n }` sends the
+   * headers and `n` blocks, then holds the response open until the client gives up on it.
+   */
   fail(fault: MockPortalFault): void
 }
 
@@ -235,6 +238,12 @@ function writeAnswer(res: ServerResponse, answer: ChainAnswer, head: WireHead) {
     case 'blocks':
       writeBlocks(res, answer.blocks, head)
       res.end()
+      break
+
+    case 'stalled':
+      writeBlocks(res, answer.blocks, head)
+      // With no block written, Node holds the headers back, and the client would wait for them instead.
+      res.flushHeaders()
       break
 
     case 'at-head':
