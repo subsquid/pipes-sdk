@@ -117,13 +117,16 @@ P-PG-UNFINALIZED-RETENTION blocks of snapshots. Legacy migration: single guarded
 (id-less form `_sqd_parquet_state.json` — written only when the target is configured
 without an id, unreachable through a source-connected pipe, WP-3): `{id?, cursor,
 finalized?, coverage: {<table>: next-window-start}}`, written temp-file → fsync →
-rename → dir-fsync. Data files `<table>/<from>-<to>.parquet`, names zero-padded to 12
-digits, window = coverage (DEF-14) not row min/max; publish refuses to overwrite
-(coded). Recovery deletes `*.tmp-*` always and any file with `to > cursor`; a file
-straddling the cursor is a coded refusal unless its `from` equals the table's recorded
-coverage start, which makes it the interrupted checkpoint's own file. A recorded coverage
-start ahead of what the cursor allows is clamped with a warning, not refused. Column types:
-INT64/INT32/UTF8/BYTE_ARRAY/BOOLEAN/DOUBLE/
+rename → dir-fsync. The output directory belongs to one cursor key (ADR-16): before it
+touches any file, startup refuses a directory that holds a state sidecar under another
+key, the id-less form included (coded). Two first runs started together on an empty
+directory both pass; the next start of either refuses. Data files
+`<table>/<from>-<to>.parquet`, names zero-padded to 12 digits, window = coverage (DEF-14)
+not row min/max; publish refuses to overwrite (coded). Recovery deletes `*.tmp-*` always
+and any file with `to > cursor`; a file straddling the cursor is a coded refusal unless
+its `from` equals the table's recorded coverage start, which makes it the interrupted
+checkpoint's own file. A recorded coverage start ahead of what the cursor allows is
+clamped with a warning, not refused. Column types: INT64/INT32/UTF8/BYTE_ARRAY/BOOLEAN/DOUBLE/
 TIMESTAMP(millis)/DATE/JSON/LIST/STRUCT; DECIMAL deliberately unsupported; block
 column INT64/INT32 required non-null. Compression: SNAPPY (default), GZIP, BROTLI,
 UNCOMPRESSED. The target declares IB-11 finalized-only delivery, appends every delivered
@@ -208,13 +211,14 @@ reader feature-detects by runtime instead — GAP-27)*.
 **IB-27 — Binding declarations.** Per-binding enforcement, indexed here; the cited
 entries remain authoritative for detail. *Exclusivity* = whether a binding's tracked
 tables are declared to belong to a single cursor key; it is the precondition that lets
-the orphan-data guard run at all (CN-44).
+the orphan-data guard run at all (CN-44). Over tables not declared exclusive, a removal
+is scoped to the cursor key by whoever makes it (ADR-16).
 
 | Binding | Class | Lock (IB-24) | Legacy migration (RP-31) | Tracked-table exclusivity |
 |---|---|---|---|---|
-| ClickHouse | A | none | yes | not declared — guard off |
+| ClickHouse | A | none | yes | not declared — guard off; the repair hook scopes its removal to the pipe's rows (RP-42) |
 | Postgres | T | advisory, per batch | yes | not declared — guard off |
-| Parquet | K | none | no | not declared — guard off *(yet refuses shared directories via filename collision: GAP-35)* |
+| Parquet | K | none | no | declared per output directory; startup refuses another key's state sidecar (IB-22) — guard on *(a directory with data and no state starts afresh: GAP-41)* |
 | BigQuery | W | none | no | assumed exclusive — guard on, probed table-wide *(GAP-20)* |
 | Pub/Sub | C | exclusive state-file lock, process-lifetime | no | n/a — the sink owns no tables; ids are namespaced per producer |
 
@@ -223,7 +227,7 @@ value governs whether CN-44 applies. Declaring exclusivity over tables that co-r
 pipes in fact share is an operator error the spec does not detect.
 
 *Decision index.* Applying to every binding: ADR-2 (cursor keyed by pipe id), ADR-4
-(coded error taxonomy), ADR-5 (durability classes), ADR-16 (exclusivity, proposed).
+(coded error taxonomy), ADR-5 (durability classes), ADR-16 (tracked-table exclusivity).
 Binding-specific, with the entry carrying each one's detail:
 
 - **ClickHouse** — IB-20, IB-24 · ADR-7 (sign-netting rollback), ADR-15 (class-A repair
@@ -290,7 +294,7 @@ consumers MUST NOT read it as a block number.
 | E20xx | ClickHouse binding | E2001–E2007 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler) |
 | E21xx | Postgres binding | E2101–E2107 (client, config, advisory lock, untracked table, missing PK, FK cycle, unresolved column name) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
-| E23xx | Parquet binding | E2301–E2317 and E2320 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused). E2318–E2319 retired, unassigned |
+| E23xx | Parquet binding | E2301–E2317, E2320 and E2321 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused; E2321 output directory claimed by another cursor key). E2318–E2319 retired, unassigned |
 | E24xx | Pub/Sub binding | E2401–E2429, with E2427 unassigned (topic/attribute/request guards E2401–E2404, checked pre-commit and again after recovery encoding; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, state write failure E2426, state identity/wire binding E2419/E2421, cold-start refusal E2420, and sequence exhaustion E2424; row-identity guards E2412–E2413, E2418, E2422; route configuration E2414–E2416, E2423, E2425; sequence barrier E2428 one topic per producer, E2429 forward block order) |
 
 **IB-51 — Transport errors.** Non-coded, typed: HTTP error (with response), request

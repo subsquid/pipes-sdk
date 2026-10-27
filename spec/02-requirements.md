@@ -151,4 +151,3 @@ Deliberately left open — conformance tests MUST NOT pin these:
 | OQ-4 | SLO targets for SLI-1…SLI-7 are unratified (⚠ in 15-parameters). | SDK team |
 | OQ-5 | Cache growth policy: unbounded append-only accepted, or add eviction/versioning? (HZ-6). | SDK team |
 | OQ-7 | Cursor timestamps are network-dependent (tron reports ms — GAP-24): normalize to one unit, or spec per network? | SDK team |
-| OQ-8 | Do tracked tables belong to one pipe (exclusive) or may co-resident pipes share them? Decides whether CN-44's orphan guard can run at all, whether file sinks namespace data by pipe id, and whether recovery may remove what a crash before the first cursor write left (GAP-20, GAP-35, GAP-41, GAP-44, ADR-16 proposed). | SDK team |

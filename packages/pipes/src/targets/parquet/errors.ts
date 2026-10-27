@@ -58,4 +58,6 @@ export const PARQUET_ERROR_CODES = {
   // exists either.)
   /** An engine's finished segment file failed the Parquet magic-bytes check at publication. */
   SEGMENT_NOT_PARQUET: 'E2320',
+  /** The output directory holds another cursor key's state file — a directory belongs to one pipe. */
+  DIRECTORY_SHARED: 'E2321',
 } as const

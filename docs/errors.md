@@ -593,6 +593,21 @@ file with wrong contents is beyond it.
 the footer) to the temp path it was given before resolving `finish()`. The built-in
 `parquetjsEngine` cannot produce this error.
 
+### E2321 · Output directory belongs to another pipe
+
+A Parquet output directory belongs to one pipe. Data files carry no pipe id, so crash recovery
+cannot tell another pipe's files from its own: it would delete that pipe's temp files and its
+published files above this pipe's cursor. At startup, before it touches any file, the target refuses
+a directory that holds a state file under a key other than its own — `_sqd_parquet_state.<other>.json`
+or the id-less `_sqd_parquet_state.json`. The message names the files it found and the one this pipe
+expects.
+
+**Fix** — give each pipe its own `dir`. To split a directory that two pipes already share, stop both
+and move one pipe's state file and its table directories to a new directory; if both wrote the same
+table, its files cannot be told apart, so re-index that pipe into its new directory instead. If the
+state file is this pipe's own under an old key — the source `id` or `settings.id` changed, or the
+state predates pipe ids — rename it to the name the message gives, and the pipe resumes from it.
+
 ---
 
 ## Google PubSub target

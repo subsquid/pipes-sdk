@@ -51,8 +51,9 @@ export type ParquetSettings = {
    */
   engine?: ParquetEngine
   /**
-   * Namespace for the state file, so multiple pipes can share one `dir`. Defaults to the
-   * pipe's source `id`; set explicitly only to pin the state file independent of the source id.
+   * Cursor key, which names the state file. Defaults to the pipe's source `id`; set explicitly
+   * only to pin the state file independent of the source id. It does not let pipes share a
+   * `dir`: a directory belongs to one key.
    */
   id?: string
 }
@@ -124,9 +125,10 @@ type ParquetTargetMetrics = {
  *   notion of finality: for a dataset that never finalizes anything, the files are **not**
  *   reorg-safe.
  *
- * @param options.dir - Output directory. It is the isolation unit — **one pipe per dir**. Holds a
- *   `<table>/` sub-directory per table plus a `_sqd_parquet_state.<pipe-id>.json` cursor file
- *   (namespaced by the pipe's source id, or by `settings.id` when set explicitly).
+ * @param options.dir - Output directory. It is the isolation unit — **one pipe per dir**: startup
+ *   refuses a directory that holds another pipe's state file (`E2321`). Holds a `<table>/`
+ *   sub-directory per table plus a `_sqd_parquet_state.<pipe-id>.json` cursor file (named by the
+ *   pipe's source id, or by `settings.id` when set explicitly).
  * @param options.tables - Declared tables with explicit schemas; the block-number column must be
  *   present and integer-typed. Writing to an undeclared table from `onData` throws.
  * @param options.onData - Per-batch handler; call `store.insert(table, rows)` to stage rows.
@@ -158,8 +160,6 @@ export function parquetTarget<T>(options: {
       // Lazy: registered on the first batch from `ctx.metrics`.
       let metrics: ParquetTargetMetrics | undefined
 
-      // Namespace the state file by the pipe's source id (an explicit settings.id wins), so
-      // several pipes can share one dir without clobbering each other's cursor.
       const state = new ParquetState({ dir, tables: tables.map((t) => t.table), id: settings.id ?? id, logger })
 
       // Tracks checkpoint progress; the closure below mutates it.

@@ -168,12 +168,13 @@ integrity error — before modifying anything.
 is absent but tracked tables contain data (state deleted, wrong key, half-migration),
 the sink refuses with a coded error rather than restarting from scratch and duplicating
 history. Applies only where the binding declares its tracked tables **exclusive** to one
-cursor key (IB-27). On tables shared with co-resident pipes the condition is
+cursor key (IB-27; ADR-16). On tables shared with co-resident pipes the condition is
 undecidable — "table non-empty" is not evidence of *orphan* data, the rows may belong to
 another key — and probing them would make one pipe's startup depend on another's data,
-contrary to INV-35; a sink over shared tables MUST NOT run the guard. *(The one
-implementation probes table-wide and so refuses a legitimate first run into a populated
-shared table — GAP-20; exclusivity model ADR-16/OQ-8.)*
+contrary to INV-35; a sink over shared tables MUST NOT run the guard. *(The write-ahead
+binding probes table-wide and so refuses a legitimate first run into a populated shared
+table — GAP-20; the file binding refuses another key's state but starts afresh over data
+with no state at all — GAP-41.)*
 
 **CN-45 — Cross-implementation recovery.** [MUST] Recovery reads state via the formats
 of IB-20…IB-28 only; any conforming implementation recovers state written by any other

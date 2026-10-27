@@ -13,6 +13,9 @@ const STATE_BASENAME = '_sqd_parquet_state'
 /** Published data files are named `<from>-<to>.parquet`; nothing else in a table dir is ours. */
 const DATA_FILE_RE = /^(\d+)-(\d+)\.parquet$/
 
+/** Any key's state file, the id-less form included. */
+const STATE_FILE_RE = new RegExp(`^${STATE_BASENAME}(\\..+)?\\.json$`)
+
 type PersistedState = {
   /** Optional pipe namespace, mirrored from `settings.id`. */
   id?: string
@@ -39,8 +42,8 @@ export type ParquetStateOptions = {
   /** Declared table names; their sub-directories are created on startup. */
   tables: string[]
   /**
-   * Namespace so multiple pipes can share a dir (separate state files). The target passes the
-   * pipe's source id unless an explicit `settings.id` pins it.
+   * Cursor key, which names the state file. The target passes the pipe's source id unless an
+   * explicit `settings.id` pins it.
    */
   id?: string
   logger: Logger
@@ -49,10 +52,9 @@ export type ParquetStateOptions = {
 /**
  * Durable cursor + crash recovery for the Parquet target.
  *
- * The output directory is the primary isolation unit — one pipe per dir — and the state file is
- * additionally namespaced by the pipe's id, so several pipes can share a dir with separate
- * cursors. The cursor is persisted to a single JSON file written atomically (temp + fsync +
- * rename + dir fsync).
+ * The output directory belongs to one pipe. Recovery treats every file in it as this pipe's own,
+ * so startup refuses a directory that holds another cursor key's state file (`E2321`). The cursor
+ * is persisted to a single JSON file written atomically (temp + fsync + rename + dir fsync).
  *
  * Recovery on startup reconciles the on-disk files with the committed cursor: any published file
  * holding blocks above the cursor is a remnant of a checkpoint that published files but crashed
@@ -91,14 +93,17 @@ export class ParquetState {
    * Prepares the output directory and returns the cursor to resume from (or `undefined` to start
    * from the stream beginning).
    *
-   * Always: `mkdir -p` the base dir + every table dir, and delete every `.tmp-*` file. When a
-   * committed cursor exists, additionally delete every published data file whose coverage end
-   * exceeds it (incomplete-checkpoint remnants) — refusing up front if one straddles the cursor
-   * without being explained by the persisted coverage, which would mean the state file and the
-   * data files came from different runs (`E2317`).
+   * Always: `mkdir -p` the base dir + every table dir, refuse a directory another key's state file
+   * claims (`E2321`) before touching anything, and delete every `.tmp-*` file. When a committed
+   * cursor exists, additionally delete every published data file whose coverage end exceeds it
+   * (incomplete-checkpoint remnants) — refusing up front if one straddles the cursor without being
+   * explained by the persisted coverage, which would mean the state file and the data files came
+   * from different runs (`E2317`).
    */
   async getCursor(): Promise<TargetState | undefined> {
     await mkdir(this.#baseDir, { recursive: true })
+    await this.#refuseForeignState()
+
     for (const table of this.#tables) {
       await mkdir(path.join(this.#baseDir, table), { recursive: true })
     }
@@ -166,6 +171,31 @@ export class ParquetState {
           `${error instanceof Error ? error.message : String(error)}. Inspect or remove it to recover.`,
       )
     }
+  }
+
+  /**
+   * Data and temp files carry no cursor key, so recovery cannot tell another pipe's files from its
+   * own: in a directory another key's state file claims, it would delete them (ADR-16). Two first
+   * runs started together on an empty directory both pass; the next start of either refuses.
+   */
+  async #refuseForeignState(): Promise<void> {
+    const own = path.basename(this.#statePath)
+    // No fallback to an empty listing: an unreadable directory may hold another key's state.
+    const entries = await readdir(this.#baseDir)
+    const foreign = entries.filter((name) => STATE_FILE_RE.test(name) && name !== own).sort()
+
+    if (foreign.length === 0) {
+      return
+    }
+
+    throw new ParquetTargetError(
+      PARQUET_ERROR_CODES.DIRECTORY_SHARED,
+      `Parquet output directory '${this.#baseDir}' holds another pipe's state (${foreign.join(', ')}), ` +
+        `but this pipe's state file is '${own}'. A directory belongs to one pipe: crash recovery ` +
+        `deletes files it cannot tell apart from another pipe's. Point this pipe at a directory of its ` +
+        `own. If the pipe was renamed, or its state predates pipe ids, rename the state file to '${own}' ` +
+        `to resume from it.`,
+    )
   }
 
   /** Deletes every `.tmp-*` file in the base dir and each table dir. */

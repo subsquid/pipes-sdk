@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type PortalRange, type SpanHooks, createTarget } from '~/core/index.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
 import { type MockPortal, type MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
 import { PARQUET_ERROR_CODES, ParquetTargetError } from './errors.js'
 import { ParquetState } from './parquet-state.js'
@@ -147,6 +148,15 @@ function spanTracker() {
     unended: () => started.filter((p) => p.startsWith('batch > parquet') && !ended.includes(p)),
   }
 }
+
+/** A test with a fresh output directory, removed after the test, beside the `portal` fixture. */
+const withDir = withPortal.extend<{ dir: string }>({
+  dir: async ({}, use) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'sqd-parquet-test-'))
+    await use(dir)
+    await rm(dir, { recursive: true, force: true })
+  },
+})
 
 /** Writes a Parquet file directly (used to seed stale/over-cursor files for recovery tests). */
 async function seedParquetFile(filePath: string, rows: BlockRow[]): Promise<void> {
@@ -1549,6 +1559,63 @@ describe('parquetTarget', () => {
         expect((e as ParquetTargetError).code).toBe(PARQUET_ERROR_CODES.RECOVERY_DELETE_FAILED)
       }
     })
+  })
+})
+
+describe('one pipe per directory', () => {
+  withDir('refuses a directory another pipe writes, before touching its files', async ({ portal: open, dir }) => {
+    const portal = await open({ latest: 3 })
+    const runPipe = (id: string) =>
+      evmPortalStream({ id, portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+        parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
+      )
+
+    await runPipe('b')
+    // b's segment in flight: a recovery that ran here would delete it.
+    await writeFile(path.join(dir, 'blocks', '.tmp-000000.parquet'), '')
+    const before = await listAll(dir, 'blocks')
+
+    await expect(runPipe('a')).rejects.toMatchObject({ code: PARQUET_ERROR_CODES.DIRECTORY_SHARED })
+    expect(await listAll(dir, 'blocks')).toEqual(before)
+  })
+
+  // Root lists any directory, so the listing cannot fail there.
+  withDir.skipIf(process.getuid?.() === 0)(
+    'stops before touching any file when it cannot list the directory',
+    async ({ dir }) => {
+      await writeFile(
+        path.join(dir, '_sqd_parquet_state.b.json'),
+        JSON.stringify({ cursor: { number: 5, hash: '0x5' } }),
+      )
+      await mkdir(path.join(dir, 'blocks'))
+      await writeFile(path.join(dir, 'blocks', '.tmp-000000.parquet'), '')
+      const state = new ParquetState({ dir, tables: ['blocks'], id: 'a', logger: testLogger() })
+
+      // Write and search, no read: the state files cannot be listed, the table dir still can.
+      await chmod(dir, 0o300)
+      const outcome = await state.getCursor().then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      await chmod(dir, 0o700)
+
+      expect(outcome).toMatchObject({ code: 'EACCES' })
+      expect(await listAll(dir, 'blocks')).toEqual(['.tmp-000000.parquet'])
+    },
+  )
+
+  withDir('resumes a pipe whose state predates its key once the state file is renamed', async ({ dir }) => {
+    await writeFile(path.join(dir, '_sqd_parquet_state.json'), JSON.stringify({ cursor: { number: 5, hash: '0x5' } }))
+    const state = () => new ParquetState({ dir, tables: ['blocks'], id: 'a', logger: testLogger() })
+
+    await expect(state().getCursor()).rejects.toMatchObject({
+      code: PARQUET_ERROR_CODES.DIRECTORY_SHARED,
+      message: expect.stringContaining(`rename the state file to '_sqd_parquet_state.a.json'`),
+    })
+
+    await rename(path.join(dir, '_sqd_parquet_state.json'), path.join(dir, '_sqd_parquet_state.a.json'))
+
+    expect(await state().getCursor()).toEqual({ latest: { number: 5, hash: '0x5' }, finalized: null })
   })
 })
 

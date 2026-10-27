@@ -58,6 +58,8 @@ export function clickhouseTarget<T>({
    * previous run wrote past the saved cursor. `reason: 'fork'` fires on chain forks.
    * The typical implementation calls `store.removeAllRows` with
    * `where: 'block_number > {latest:UInt32}'` and `params: { latest: safeCursor.number }`.
+   * That `where` matches every pipe's rows: on a table several pipes write, also filter on a
+   * column that tells this pipe's rows apart.
    *
    * On CollapsingMergeTree / VersionedCollapsingMergeTree tables (or their Replicated
    * variants) with a `sign` column, `store.removeAllRows` removes rows by inserting

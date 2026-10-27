@@ -28,5 +28,5 @@ CN-12, IB-22.
 Landed for parquet in PR #123 (issue #122): coverage map persisted beside the cursor,
 straddle refusal E2317, invalid-range refusal E2316, empty units at stream end. Existing
 datasets keep their row-min/max names — the scheme is not retroactive, and recovery
-parses both. Files stay un-namespaced by pipe id, so two pipes sharing a directory still
-collide (GAP-35).
+parses both. Files stay un-namespaced by pipe id, so a directory belongs to one pipe
+(ADR-16).
