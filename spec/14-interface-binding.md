@@ -91,7 +91,8 @@ absent), rollback_chain String (JSON array), timestamp DateTime(3), sign Int8`,
 `sign=+1`; retention cancels with `sign=-1`; newest row per id = resume state
 *(wall-clock ordering: GAP-10)*. Rollback mechanism by engine family:
 Collapsing-family engines → net-cancel rows computed via `sum(sign)` grouping (with
-insert-dedup and pre-merge-collapse disabled on those inserts); other engines →
+insert-dedup and pre-merge-collapse disabled on those inserts; with the table catalog
+unreadable, and in retention, a `FINAL` read-back instead — GAP-45); other engines →
 lightweight DELETE (materialized views keep rolled-back rows — warned);
 `Distributed` engines → refused (coded). A minmax skip index on the block-number
 column is auto-created for rollback pruning. Repair (recovery + fork) is delegated to
