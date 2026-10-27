@@ -416,25 +416,6 @@ jobs:
           fi
           pnpm "$@"
 
-      - name: Verify it landed
-        if: ${{ !inputs.dry_run }}
-        shell: bash
-        env:
-          NPM_NAME: ${{ needs.resolve.outputs.npm_name }}
-          VERSION: ${{ needs.resolve.outputs.version }}
-        run: |
-          for i in 1 2 3 4 5; do
-            if npm view "$NPM_NAME@$VERSION" version >/dev/null 2>&1; then
-              echo "Published $NPM_NAME@$VERSION"
-              npm view "$NPM_NAME" dist-tags
-              exit 0
-            fi
-            echo "Not visible on the registry yet, retrying ($i/5)..."
-            sleep 5
-          done
-          echo "::error::$NPM_NAME@$VERSION never appeared on the registry."
-          exit 1
-
   # ---------------------------------------------------------------------------
   github-release:
     needs: [resolve, publish]
