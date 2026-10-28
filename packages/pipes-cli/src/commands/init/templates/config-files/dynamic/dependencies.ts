@@ -1,7 +1,7 @@
 import type { NetworkType, Target } from '~/types/init.js'
 
 const baseDependencies: Record<string, string> = {
-  '@subsquid/pipes': '^1.0.0',
+  '@subsquid/pipes': '^1.0.0-beta.10',
   dotenv: '^16.4.5',
   zod: '^4.3.4',
 }
