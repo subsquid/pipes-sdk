@@ -54,7 +54,9 @@ operations, not rows. Per batch, in **one local transaction**: assign each opera
 next producer sequence, enqueue it in a publish outbox, record it in a rollback manifest
 (operation, row id, partition, filter attributes, and — for revisable rows — its encoded
 value), append the block ledger, advance the cursor, fold newly-finalized revisable rows
-into their baselines, and prune what finality has put out of a fork's reach. Only then
+into their baselines, and prune what finality has put out of a fork's reach. After this
+transaction, the producer does not read a pruned row again. It can delete the pruned rows
+later, in small transactions between batches. Only then
 does the outbox go to the wire; confirmed rows leave the outbox in a second transaction.
 Crash window: between the commit and the confirmation — recovery republishes the outbox
 byte- and sequence-identically. The cursor can therefore never run ahead of the wire: a

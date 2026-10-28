@@ -1,46 +1,23 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import { BlockCursor } from '~/core/index.js'
 import { SqliteOptions, SqliteSync, loadSqlite } from '~/drivers/sqlite/sqlite.js'
 import { testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
-import { CommitInput, INTERNAL_DRIVER, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
+import {
+  COMPACTION_CHUNK_ROWS,
+  CommitInput,
+  INTERNAL_DRIVER,
+  PendingOperation,
+  SqlitePubsubState,
+} from './pubsub-state.js'
 import { downgradeToSchemaV3, inspectStateFile, withStatePath } from './test-support.js'
 
 const encoder = new TextEncoder()
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
-
-let dirs: string[] = []
-const opened: SqlitePubsubState[] = []
-
-afterEach(async () => {
-  for (const state of opened.splice(0)) {
-    await state.close()
-  }
-  for (const dir of dirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-function statePath(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'pubsub-state-'))
-  dirs.push(dir)
-
-  return join(dir, 'state.sqlite')
-}
-
-async function openState(path: string, driver?: SqlitePubsubStateDriver) {
-  const state = new SqlitePubsubState({ path, [INTERNAL_DRIVER]: driver })
-  const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
-  opened.push(state)
-
-  return { state, coldStart }
-}
 
 type SqlitePubsubStateDriver = (options: SqliteOptions) => Promise<SqliteSync>
 
@@ -84,6 +61,44 @@ class FaultyDriver {
   }
 }
 
+type OpenOptions = {
+  driver?: SqlitePubsubStateDriver
+  /** Default `test-pipe`. */
+  cursorKey?: string
+  allowColdStart?: boolean
+  /** Another state file in the same test directory. Default: the test's one state file. */
+  file?: string
+}
+
+type OpenState = (options?: OpenOptions) => Promise<{ state: SqlitePubsubState; coldStart: boolean }>
+
+/**
+ * A test with an `openState` fixture. Every call opens the test's state file (`statePath`) again,
+ * or `file` next to it, and every state it opens is closed when the test ends. `withStatePath`
+ * then removes the directory.
+ */
+const withStateFile = withStatePath.extend<{ openState: OpenState }>({
+  openState: async ({ statePath }, use) => {
+    const opened: SqlitePubsubState[] = []
+
+    await use(async ({ driver, cursorKey = 'test-pipe', allowColdStart, file } = {}) => {
+      const path = file ? join(dirname(statePath), `${file}.sqlite`) : statePath
+      const state = new SqlitePubsubState({ path, [INTERNAL_DRIVER]: driver })
+      const { coldStart } = await state.open({ cursorKey, logger: testLogger(), allowColdStart })
+      opened.push(state)
+
+      return { state, coldStart }
+    })
+
+    for (const state of opened) {
+      await state.close()
+    }
+  },
+})
+
+/** Lets every task queued with setImmediate so far run, including one compaction chunk. */
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve))
+
 function sqliteError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code })
 }
@@ -114,54 +129,29 @@ function operation(overrides: Partial<PendingOperation> & { id?: string } = {}):
   }
 }
 
-/** Opens states on the test's own path and closes every one of them when the test ends. */
-const withState = withStatePath.extend<{ open: () => Promise<{ state: SqlitePubsubState; coldStart: boolean }> }>({
-  open: async ({ statePath }, use) => {
-    const states: SqlitePubsubState[] = []
-
-    await use(async () => {
-      const state = new SqlitePubsubState({ path: statePath })
-      states.push(state)
-      const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
-
-      return { state, coldStart }
-    })
-
-    for (const state of states) {
-      await state.close()
-    }
-  },
-})
-
 describe('SqlitePubsubState', () => {
-  it('reports a cold start once and resumes warm afterwards', async () => {
-    const path = statePath()
-
-    const first = await openState(path)
+  withStateFile('reports a cold start once and resumes warm afterwards', async ({ openState }) => {
+    const first = await openState()
     expect(first.coldStart).toBe(true)
     await first.state.close()
 
-    const second = await openState(path)
+    const second = await openState()
     expect(second.coldStart).toBe(false)
   })
 
   // Stamping the schema version is what makes the next open read as warm, so a caller that
   // refuses a cold start must not have it written behind its back.
-  it('writes no bootstrap markers when the caller forbids a cold start', async () => {
-    const path = statePath()
-
-    const state = new SqlitePubsubState({ path })
-    opened.push(state)
-    const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger(), allowColdStart: false })
+  withStateFile('writes no bootstrap markers when the caller forbids a cold start', async ({ openState }) => {
+    const { state, coldStart } = await openState({ allowColdStart: false })
     expect(coldStart).toBe(true)
     expect(await state.getMeta('schema_version')).toBeUndefined()
     await state.close()
 
-    expect((await openState(path)).coldStart).toBe(true)
+    expect((await openState()).coldStart).toBe(true)
   })
 
-  it('round-trips the cursor with an explicit finalized floor', async () => {
-    const { state } = await openState(statePath())
+  withStateFile('round-trips the cursor with an explicit finalized floor', async ({ openState }) => {
+    const { state } = await openState()
 
     expect(await state.getCursor()).toBeUndefined()
 
@@ -170,8 +160,8 @@ describe('SqlitePubsubState', () => {
     expect(await state.getCursor()).toEqual({ latest: block(100), finalized: block(90) })
   })
 
-  it('states the absence of a finalized head as null, never as a missing key', async () => {
-    const { state } = await openState(statePath())
+  withStateFile('states the absence of a finalized head as null, never as a missing key', async ({ openState }) => {
+    const { state } = await openState()
 
     await commit(state, { operations: [], ledger: [], cursor: block(100), finalized: null })
 
@@ -179,8 +169,8 @@ describe('SqlitePubsubState', () => {
     expect(cursor).toHaveProperty('finalized', null)
   })
 
-  it('assigns one producer-wide sequence across topics and ordering keys', async () => {
-    const { state } = await openState(statePath())
+  withStateFile('assigns one producer-wide sequence across topics and ordering keys', async ({ openState }) => {
+    const { state } = await openState()
 
     await commit(state, {
       operations: [
@@ -200,15 +190,13 @@ describe('SqlitePubsubState', () => {
     ])
   })
 
-  it('continues the sequence after a producer restart on the same state', async () => {
-    const path = statePath()
-
-    const first = await openState(path)
+  withStateFile('continues the sequence after a producer restart on the same state', async ({ openState }) => {
+    const first = await openState()
     await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
     await first.state.confirm((await first.state.pending()).map((row) => row.rowId))
     await first.state.close()
 
-    const second = await openState(path)
+    const second = await openState()
     await commit(second.state, {
       operations: [operation({ id: 'row-2' })],
       ledger: [],
@@ -219,8 +207,8 @@ describe('SqlitePubsubState', () => {
     expect((await second.state.pending()).map((row) => row.seq)).toEqual([2])
   })
 
-  it('refuses to repeat the sequence after Number.MAX_SAFE_INTEGER', async () => {
-    const { state } = await openState(statePath())
+  withStateFile('refuses to repeat the sequence after Number.MAX_SAFE_INTEGER', async ({ openState }) => {
+    const { state } = await openState()
     await state.setMeta('sequence', String(Number.MAX_SAFE_INTEGER))
 
     await expect(
@@ -231,8 +219,8 @@ describe('SqlitePubsubState', () => {
     expect(await state.getMeta('sequence')).toBe(String(Number.MAX_SAFE_INTEGER))
   })
 
-  it('keeps one id source for every materialized route', async () => {
-    const { state } = await openState(statePath())
+  withStateFile('keeps one id source for every materialized route', async ({ openState }) => {
+    const { state } = await openState()
 
     await commit(state, {
       operations: [operation({ id: 'row-1', idSource: 'row', mode: 'materialized' })],
@@ -251,14 +239,12 @@ describe('SqlitePubsubState', () => {
     ).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED })
   })
 
-  it('keeps unconfirmed outbox rows for the restart drain', async () => {
-    const path = statePath()
-
-    const first = await openState(path)
+  withStateFile('keeps unconfirmed outbox rows for the restart drain', async ({ openState }) => {
+    const first = await openState()
     await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
     await first.state.close()
 
-    const second = await openState(path)
+    const second = await openState()
     const pending = await second.state.pending()
 
     expect(pending).toHaveLength(1)
@@ -269,66 +255,49 @@ describe('SqlitePubsubState', () => {
     expect(await second.state.pending()).toHaveLength(0)
   })
 
-  it('refuses a second producer on the same state file', async () => {
-    const path = statePath()
-    await openState(path)
+  withStateFile('refuses a second producer on the same state file', async ({ openState }) => {
+    await openState()
 
-    await expect(openState(path)).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_LOCKED })
+    await expect(openState()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_LOCKED })
   })
 
-  it('refuses a state file that belongs to another producer', async () => {
-    const path = statePath()
-
-    const first = new SqlitePubsubState({ path })
-    await first.open({ cursorKey: 'pipe-a', logger: testLogger() })
-    await first.commit({
-      operations: [operation()],
-      ledger: [],
-      cursor: block(100),
-      finalized: null,
-      forkCapable: true,
-    })
-    await first.close()
+  withStateFile('refuses a state file that belongs to another producer', async ({ openState }) => {
+    const first = await openState({ cursorKey: 'pipe-a' })
+    await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
+    await first.state.close()
 
     // The outbox, the manifest and the counters are producer-wide — only the cursor row is
     // keyed — so adopting this file would publish pipe-a's pending operations as pipe-b.
-    const second = new SqlitePubsubState({ path })
-    await expect(second.open({ cursorKey: 'pipe-b', logger: testLogger() })).rejects.toMatchObject({
+    await expect(openState({ cursorKey: 'pipe-b' })).rejects.toMatchObject({
       code: PUBSUB_ERROR_CODES.STATE_IDENTITY_MISMATCH,
     })
   })
 
-  it('releases the lock when open refuses, so a corrected retry can proceed', async () => {
-    const path = statePath()
+  withStateFile('releases the lock when open refuses, so a corrected retry can proceed', async ({ openState }) => {
+    const first = await openState({ cursorKey: 'pipe-a' })
+    await first.state.close()
 
-    const first = new SqlitePubsubState({ path })
-    await first.open({ cursorKey: 'pipe-a', logger: testLogger() })
-    await first.close()
-
-    const wrong = new SqlitePubsubState({ path })
-    await expect(wrong.open({ cursorKey: 'pipe-b', logger: testLogger() })).rejects.toMatchObject({
+    await expect(openState({ cursorKey: 'pipe-b' })).rejects.toMatchObject({
       code: PUBSUB_ERROR_CODES.STATE_IDENTITY_MISMATCH,
     })
 
     // A refusal must not leave the file locked — the retry is a first producer, not a second.
-    const retry = new SqlitePubsubState({ path })
-    const result = await retry.open({ cursorKey: 'pipe-a', logger: testLogger() })
-    opened.push(retry)
-    expect(result.coldStart).toBe(false)
+    const retry = await openState({ cursorKey: 'pipe-a' })
+    expect(retry.coldStart).toBe(false)
   })
 
   // Only schema 3 migrates in place; anything older is refused rather than guessed at.
-  withState('refuses a state file written by a schema it cannot migrate', async ({ open }) => {
-    const first = await open()
+  withStateFile('refuses a state file written by a schema it cannot migrate', async ({ openState }) => {
+    const first = await openState()
     await first.state.setMeta('schema_version', '2')
     await first.state.close()
 
-    await expect(open()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
+    await expect(openState()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
   })
 
   describe('schema 3 migration', () => {
-    withState('keeps the change sequence and the unconfirmed outbox', async ({ statePath, open }) => {
-      const first = await open()
+    withStateFile('keeps the change sequence and the unconfirmed outbox', async ({ statePath, openState }) => {
+      const first = await openState()
       await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
       await first.state.confirm((await first.state.pending()).map((row) => row.rowId))
       await commit(first.state, {
@@ -340,7 +309,7 @@ describe('SqlitePubsubState', () => {
       await first.state.close()
       await downgradeToSchemaV3(statePath)
 
-      const migrated = await open()
+      const migrated = await openState()
       expect(migrated.coldStart).toBe(false)
       expect(await migrated.state.getCursor()).toMatchObject({ latest: { number: 101 } })
 
@@ -357,12 +326,12 @@ describe('SqlitePubsubState', () => {
       ])
     })
 
-    withState('leaves the file in the shape schema 4 creates', async ({ statePath, open }) => {
-      const first = await open()
+    withStateFile('leaves the file in the shape schema 4 creates', async ({ statePath, openState }) => {
+      const first = await openState()
       await first.state.close()
       await downgradeToSchemaV3(statePath)
 
-      const migrated = await open()
+      const migrated = await openState()
       await migrated.state.close()
 
       const file = await inspectStateFile(statePath)
@@ -370,44 +339,41 @@ describe('SqlitePubsubState', () => {
       expect(file.outboxColumns).not.toContain('kind')
     })
 
-    withState('rewrites the wire config the way schema 4 stores it', async ({ statePath, open }) => {
+    withStateFile('rewrites the wire config the way schema 4 stores it', async ({ statePath, openState }) => {
       const wireConfig = JSON.stringify(['test-pipe', true, false, '{}', [['transfers', 'canonical']]])
 
-      const first = await open()
+      const first = await openState()
       await first.state.setMeta('wire_config', wireConfig)
       await first.state.close()
       await downgradeToSchemaV3(statePath, { signalRoutes: ['events'] })
 
-      const { state } = await open()
+      const { state } = await openState()
 
       expect(await state.getMeta('wire_config')).toBe(wireConfig)
     })
 
     // Schema 4 has no signal routes, so nothing could ever publish those rows.
-    withState('refuses unpublished signal operations and leaves the file as it was', async ({ statePath, open }) => {
-      const first = await open()
-      await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
-      const [signal] = await first.state.pending()
-      await first.state.close()
-      await downgradeToSchemaV3(statePath, { signalRowIds: [signal.rowId] })
+    withStateFile(
+      'refuses unpublished signal operations and leaves the file as it was',
+      async ({ statePath, openState }) => {
+        const first = await openState()
+        await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
+        const [signal] = await first.state.pending()
+        await first.state.close()
+        await downgradeToSchemaV3(statePath, { signalRowIds: [signal.rowId] })
 
-      await expect(open()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
+        await expect(openState()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
 
-      const file = await inspectStateFile(statePath)
-      expect(file).toMatchObject({ schemaVersion: '3', forkEpoch: '0' })
-      expect(file.outboxColumns).toContain('kind')
-    })
+        const file = await inspectStateFile(statePath)
+        expect(file).toMatchObject({ schemaVersion: '3', forkEpoch: '0' })
+        expect(file.outboxColumns).toContain('kind')
+      },
+    )
   })
 
   describe('fork compensation', () => {
-    async function seed() {
-      const { state } = await openState(statePath())
-
-      return state
-    }
-
-    it('deletes an orphaned write-once event, inheriting its attributes', async () => {
-      const state = await seed()
+    withStateFile('deletes an orphaned write-once event, inheriting its attributes', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', blockNumber: 101 })],
@@ -426,8 +392,8 @@ describe('SqlitePubsubState', () => {
       expect(text(pending[0].payload)).toBe('{"a":1}')
     })
 
-    it('leaves an event alone when it also exists below the fork point', async () => {
-      const state = await seed()
+    withStateFile('leaves an event alone when it also exists below the fork point', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', blockNumber: 100 })],
@@ -449,8 +415,8 @@ describe('SqlitePubsubState', () => {
       expect(await state.pending()).toHaveLength(0)
     })
 
-    it('folds several orphaned revisions of a materialized id into ONE restore', async () => {
-      const state = await seed()
+    withStateFile('folds several orphaned revisions of a materialized id into ONE restore', async ({ openState }) => {
+      const { state } = await openState()
 
       const window = (revision: string, blockNumber: number) =>
         operation({
@@ -482,8 +448,8 @@ describe('SqlitePubsubState', () => {
       expect(text(pending[0].payload)).toBe('A')
     })
 
-    it('restores the finalized baseline once the surviving revisions are pruned', async () => {
-      const state = await seed()
+    withStateFile('restores the finalized baseline once the surviving revisions are pruned', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [
@@ -512,8 +478,8 @@ describe('SqlitePubsubState', () => {
       expect(text(pending[0].payload)).toBe('A')
     })
 
-    it('rolls back an orphaned delete by restoring the revision it removed', async () => {
-      const state = await seed()
+    withStateFile('rolls back an orphaned delete by restoring the revision it removed', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [
@@ -547,8 +513,8 @@ describe('SqlitePubsubState', () => {
       expect(text(pending[0].payload)).toBe('A')
     })
 
-    it('emits the route’s stored inverse when every revision is orphaned', async () => {
-      const state = await seed()
+    withStateFile('emits the route’s stored inverse when every revision is orphaned', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [
@@ -574,10 +540,8 @@ describe('SqlitePubsubState', () => {
       expect(text(pending[0].payload)).toBe('EMPTY')
     })
 
-    it('keeps the inverse across a restart between first publish and fork', async () => {
-      const path = statePath()
-
-      const first = await openState(path)
+    withStateFile('keeps the inverse across a restart between first publish and fork', async ({ openState }) => {
+      const first = await openState()
       await commit(first.state, {
         operations: [
           operation({
@@ -594,14 +558,14 @@ describe('SqlitePubsubState', () => {
       await first.state.confirm((await first.state.pending()).map((row) => row.rowId))
       await first.state.close()
 
-      const second = await openState(path)
+      const second = await openState()
       await second.state.fork([block(100), block(101, 'b')])
 
       expect(text((await second.state.pending())[0].payload)).toBe('EMPTY')
     })
 
-    it('keeps ids whose separator-joined identity would collide apart', async () => {
-      const state = await seed()
+    withStateFile('keeps ids whose separator-joined identity would collide apart', async ({ openState }) => {
+      const { state } = await openState()
 
       // ("pool a", "b") and ("pool", "a b") join to the same string under a space separator;
       // grouped together, the fork would publish one compensation where two are owed.
@@ -627,8 +591,8 @@ describe('SqlitePubsubState', () => {
       ])
     })
 
-    it('never rewinds the sequence across a fork', async () => {
-      const state = await seed()
+    withStateFile('never rewinds the sequence across a fork', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', orderingKey: 'k', blockNumber: 101 })],
@@ -652,8 +616,8 @@ describe('SqlitePubsubState', () => {
       expect((await state.pending())[0].seq).toBe(3)
     })
 
-    it('lands a compensation on the same partition as the operation it repairs', async () => {
-      const state = await seed()
+    withStateFile('lands a compensation on the same partition as the operation it repairs', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', orderingKey: 'pool-a', blockNumber: 101 })],
@@ -668,8 +632,8 @@ describe('SqlitePubsubState', () => {
       expect((await state.pending())[0].orderingKey).toBe('pool-a')
     })
 
-    it('prunes the orphaned manifest and rewinds the cursor', async () => {
-      const state = await seed()
+    withStateFile('prunes the orphaned manifest and rewinds the cursor', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', blockNumber: 101 })],
@@ -684,8 +648,8 @@ describe('SqlitePubsubState', () => {
       expect((await state.getCursor())?.latest).toEqual(block(100))
     })
 
-    it('compensates the whole manifest and returns null on a dead-end fork', async () => {
-      const state = await seed()
+    withStateFile('compensates the whole manifest and returns null on a dead-end fork', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt-1', blockNumber: 101 }), operation({ id: 'evt-2', blockNumber: 102 })],
@@ -716,8 +680,8 @@ describe('SqlitePubsubState', () => {
       })
     }
 
-    it('refuses a revision that changes the row’s filter attributes', async () => {
-      const { state } = await openState(statePath())
+    withStateFile('refuses a revision that changes the row’s filter attributes', async ({ openState }) => {
+      const { state } = await openState()
       await revise(state, { attributes: { token: 'A' } })
 
       // A fork restores the row under the attributes it was FIRST published with, so a
@@ -727,85 +691,90 @@ describe('SqlitePubsubState', () => {
       })
     })
 
-    it('refuses filter attribute changes across a restart when the source cannot fork', async () => {
-      const path = statePath()
-      let { state } = await openState(path)
+    withStateFile(
+      'refuses filter attribute changes across a restart when the source cannot fork',
+      async ({ openState }) => {
+        let { state } = await openState()
 
-      async function commitFinalizedRevision(blockNumber: number, token: string) {
-        await state.commit({
-          operations: [
-            operation({
-              id: 'candle-1',
-              mode: 'materialized',
-              blockNumber,
-              attributes: { token },
-              rollbackable: false,
-            }),
-          ],
-          ledger: [],
-          cursor: block(blockNumber),
-          finalized: block(blockNumber),
-          forkCapable: false,
+        async function commitFinalizedRevision(blockNumber: number, token: string) {
+          await state.commit({
+            operations: [
+              operation({
+                id: 'candle-1',
+                mode: 'materialized',
+                blockNumber,
+                attributes: { token },
+                rollbackable: false,
+              }),
+            ],
+            ledger: [],
+            cursor: block(blockNumber),
+            finalized: block(blockNumber),
+            forkCapable: false,
+          })
+        }
+
+        await commitFinalizedRevision(101, 'A')
+        await state.close()
+        state = (await openState()).state
+
+        // No fork is required for corruption: a subscription filtered on A never receives the
+        // revision carrying B, so it keeps the old materialized value indefinitely.
+        await expect(commitFinalizedRevision(102, 'B')).rejects.toMatchObject({
+          code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
         })
-      }
+      },
+    )
 
-      await commitFinalizedRevision(101, 'A')
-      await state.close()
-      state = (await openState(path)).state
-
-      // No fork is required for corruption: a subscription filtered on A never receives the
-      // revision carrying B, so it keeps the old materialized value indefinitely.
-      await expect(commitFinalizedRevision(102, 'B')).rejects.toMatchObject({
-        code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
-      })
-    })
-
-    it('refuses a revision that moves the row to another partition or topic', async () => {
-      const first = await openState(statePath())
+    withStateFile('refuses a revision that moves the row to another partition or topic', async ({ openState }) => {
+      const first = await openState()
       await revise(first.state, { orderingKey: 'pool-a' })
       await expect(revise(first.state, { orderingKey: 'pool-b' })).rejects.toMatchObject({
         code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
       })
 
-      const second = await openState(statePath())
+      const second = await openState({ file: 'second' })
       await revise(second.state, { topic: 'one' })
       await expect(revise(second.state, { topic: 'two' })).rejects.toMatchObject({
         code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
       })
     })
 
-    it('accepts the same attributes written in a different order', async () => {
-      const { state } = await openState(statePath())
+    withStateFile('accepts the same attributes written in a different order', async ({ openState }) => {
+      const { state } = await openState()
 
       await revise(state, { attributes: { token: 'A', pool: 'P' } })
       await expect(revise(state, { attributes: { pool: 'P', token: 'A' } })).resolves.toBeUndefined()
     })
 
-    it('holds the invariant against a row that only exists as a finalized baseline', async () => {
-      const { state } = await openState(statePath())
+    withStateFile(
+      'holds the invariant against a row that only exists as a finalized baseline',
+      async ({ openState }) => {
+        const { state } = await openState()
 
-      await commit(state, {
-        operations: [
-          operation({
-            id: 'candle-1',
-            mode: 'materialized',
-            blockNumber: 100,
-            attributes: { token: 'A' },
-            rollbackable: false,
-          }),
-        ],
-        ledger: [block(100)],
-        cursor: block(100),
-        finalized: block(100),
-      })
+        await commit(state, {
+          operations: [
+            operation({
+              id: 'candle-1',
+              mode: 'materialized',
+              blockNumber: 100,
+              attributes: { token: 'A' },
+              rollbackable: false,
+            }),
+          ],
+          ledger: [block(100)],
+          cursor: block(100),
+          finalized: block(100),
+        })
 
-      await expect(revise(state, { attributes: { token: 'B' } })).rejects.toMatchObject({
-        code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
-      })
-    })
+        await expect(revise(state, { attributes: { token: 'B' } })).rejects.toMatchObject({
+          code: PUBSUB_ERROR_CODES.MATERIALIZED_ID_MOVED,
+        })
+      },
+    )
 
-    it('leaves event routes alone — a write-once id is never revised', async () => {
-      const { state } = await openState(statePath())
+    withStateFile('leaves event routes alone — a write-once id is never revised', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [operation({ id: 'evt', attributes: { token: 'A' }, blockNumber: 101 })],
@@ -825,8 +794,8 @@ describe('SqlitePubsubState', () => {
   })
 
   describe('finalization advance', () => {
-    it('baselines a materialized row that arrives already finalized', async () => {
-      const state = await openState(statePath()).then((s) => s.state)
+    withStateFile('baselines a materialized row that arrives already finalized', async ({ openState }) => {
+      const { state } = await openState()
 
       // Never rollbackable, so it never enters the manifest — but a fork rewinding to it still
       // has to restore its value, which is exactly what the baseline is for.
@@ -862,8 +831,56 @@ describe('SqlitePubsubState', () => {
       expect(text(pending[0].payload)).toBe('A')
     })
 
-    it('prunes finalized manifest, ledger and inverse rows', async () => {
-      const { state } = await openState(statePath())
+    withStateFile(
+      'drops the baseline of a materialized id whose last finalized revision was a delete',
+      async ({ openState }) => {
+        const { state } = await openState()
+
+        await commit(state, {
+          operations: [
+            operation({ id: 'candle-1', mode: 'materialized', blockNumber: 100, payload: encoder.encode('A') }),
+          ],
+          ledger: [block(100)],
+          cursor: block(100),
+          finalized: block(100),
+        })
+        await commit(state, {
+          operations: [
+            operation({
+              id: 'candle-1',
+              mode: 'materialized',
+              op: 'delete',
+              blockNumber: 101,
+              payload: new Uint8Array(),
+            }),
+          ],
+          ledger: [block(101)],
+          cursor: block(101),
+          finalized: block(101),
+        })
+        await commit(state, {
+          operations: [
+            operation({ id: 'candle-1', mode: 'materialized', blockNumber: 102, payload: encoder.encode('C') }),
+          ],
+          ledger: [block(102)],
+          cursor: block(102),
+          finalized: block(101),
+        })
+        await state.confirm((await state.pending()).map((row) => row.rowId))
+
+        await state.fork([block(101), block(102, 'b')])
+
+        const pending = await state.pending()
+        expect(pending).toHaveLength(1)
+        expect(pending[0].op).toBe('delete')
+      },
+    )
+  })
+
+  describe('compaction', () => {
+    withStateFile('hides finalized rows at once and deletes them later', async ({ openState }) => {
+      const driver = new FaultyDriver()
+      const { state } = await openState({ driver: driver.load })
 
       await commit(state, {
         operations: [
@@ -878,14 +895,164 @@ describe('SqlitePubsubState', () => {
       await commit(state, { operations: [], ledger: [], cursor: block(101), finalized: block(101) })
 
       expect((await state.stats()).manifest).toBe(0)
+      expect(driver.count('manifest')).toBe(1)
+
+      await state.compact()
+
+      expect(driver.count('manifest')).toBe(0)
+      expect(driver.count('ledger_blocks')).toBe(0)
+      expect(driver.count('rollback_inverse')).toBe(0)
     })
 
-    it('drops the baseline of a materialized id whose last finalized revision was a delete', async () => {
-      const { state } = await openState(statePath())
+    withStateFile('deletes one chunk per event loop turn, so commits run in between', async ({ openState }) => {
+      const driver = new FaultyDriver()
+      const { state } = await openState({ driver: driver.load })
+      const rows = COMPACTION_CHUNK_ROWS * 2 + 1
+
+      await commit(state, {
+        operations: Array.from({ length: rows }, (_, i) => operation({ id: `evt-${i}`, blockNumber: 100 })),
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: block(90),
+      })
+      await commit(state, { operations: [], ledger: [], cursor: block(101), finalized: block(101) })
+
+      await nextTurn()
+      expect(driver.count('manifest')).toBe(rows - COMPACTION_CHUNK_ROWS)
+
+      await commit(state, {
+        operations: [operation({ id: 'evt-live', blockNumber: 102 })],
+        ledger: [block(102)],
+        cursor: block(102),
+        finalized: block(101),
+      })
+
+      await nextTurn()
+      await nextTurn()
+      expect(driver.count('manifest')).toBe(1)
+      expect((await state.stats()).manifest).toBe(1)
+    })
+
+    withStateFile('finishes on the next open what the previous run left', async ({ openState }) => {
+      const { state: first } = await openState()
+
+      await commit(first, {
+        operations: [operation({ id: 'evt-1', blockNumber: 100 })],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: block(90),
+      })
+      await commit(first, { operations: [], ledger: [], cursor: block(101), finalized: block(101) })
+      await first.close()
+
+      const driver = new FaultyDriver()
+      await openState({ driver: driver.load })
+      expect(driver.count('manifest')).toBe(1)
+
+      await nextTurn()
+      expect(driver.count('manifest')).toBe(0)
+    })
+
+    withStateFile('keeps the rows after a failed chunk and deletes them on a retry', async ({ openState }) => {
+      const driver = new FaultyDriver()
+      const { state } = await openState({ driver: driver.load })
+
+      await commit(state, {
+        operations: [operation({ id: 'evt-1', blockNumber: 100 })],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: block(90),
+      })
+
+      driver.faultOn = (sql) =>
+        sql.startsWith('DELETE FROM manifest WHERE rowid')
+          ? { error: sqliteError('SQLITE_FULL', 'database or disk is full'), selfRollback: true }
+          : undefined
+      await commit(state, { operations: [], ledger: [], cursor: block(101), finalized: block(101) })
+      await nextTurn()
+
+      expect(driver.count('manifest')).toBe(1)
+      expect((await state.stats()).manifest).toBe(0)
+
+      driver.faultOn = undefined
+      await commit(state, { operations: [], ledger: [], cursor: block(102), finalized: block(102) })
+      await nextTurn()
+
+      expect(driver.count('manifest')).toBe(0)
+    })
+
+    withStateFile('lets a materialized id change identity after its finalized delete', async ({ openState }) => {
+      const { state } = await openState()
+
+      await commit(state, {
+        operations: [operation({ id: 'candle-1', mode: 'materialized', blockNumber: 100, attributes: { token: 'A' } })],
+        ledger: [block(100)],
+        cursor: block(100),
+        finalized: block(90),
+      })
+      await commit(state, {
+        operations: [
+          operation({
+            id: 'candle-1',
+            mode: 'materialized',
+            op: 'delete',
+            blockNumber: 101,
+            attributes: { token: 'A' },
+            payload: new Uint8Array(),
+          }),
+        ],
+        ledger: [block(101)],
+        cursor: block(101),
+        finalized: block(101),
+      })
+
+      // The finalized rows are not compacted yet, but the deleted id is free all the same.
+      await expect(
+        commit(state, {
+          operations: [
+            operation({ id: 'candle-1', mode: 'materialized', blockNumber: 102, attributes: { token: 'B' } }),
+          ],
+          ledger: [block(102)],
+          cursor: block(102),
+          finalized: block(101),
+        }),
+      ).resolves.toBeUndefined()
+    })
+
+    withStateFile('resolves a fork without the finalized ledger blocks', async ({ openState }) => {
+      const { state } = await openState()
+
+      await commit(state, {
+        operations: [operation({ id: 'evt-1', blockNumber: 101 })],
+        ledger: [block(100), block(101)],
+        cursor: block(101),
+        finalized: block(90),
+      })
+      await commit(state, {
+        operations: [operation({ id: 'evt-2', blockNumber: 102 })],
+        ledger: [block(102)],
+        cursor: block(102),
+        finalized: block(101),
+      })
+
+      // Block 101 is the finalized floor and is not compacted yet. The search must not reach it
+      // and take it as the common ancestor.
+      expect(await state.fork([block(102, 'b')])).toBeNull()
+    })
+
+    withStateFile('replaces the inverse of an id whose rows are all finalized', async ({ openState }) => {
+      const { state } = await openState()
 
       await commit(state, {
         operations: [
-          operation({ id: 'candle-1', mode: 'materialized', blockNumber: 100, payload: encoder.encode('A') }),
+          operation({
+            id: 'candle-1',
+            mode: 'materialized',
+            op: 'delete',
+            blockNumber: 100,
+            payload: new Uint8Array(),
+            inverse: { op: 'upsert', payload: encoder.encode('old') },
+          }),
         ],
         ledger: [block(100)],
         cursor: block(100),
@@ -896,37 +1063,30 @@ describe('SqlitePubsubState', () => {
           operation({
             id: 'candle-1',
             mode: 'materialized',
-            op: 'delete',
             blockNumber: 101,
-            payload: new Uint8Array(),
+            payload: encoder.encode('C'),
+            inverse: { op: 'upsert', payload: encoder.encode('new') },
           }),
         ],
         ledger: [block(101)],
         cursor: block(101),
-        finalized: block(101),
-      })
-      await commit(state, {
-        operations: [
-          operation({ id: 'candle-1', mode: 'materialized', blockNumber: 102, payload: encoder.encode('C') }),
-        ],
-        ledger: [block(102)],
-        cursor: block(102),
-        finalized: block(101),
+        finalized: block(100),
       })
       await state.confirm((await state.pending()).map((row) => row.rowId))
 
-      await state.fork([block(101), block(102, 'b')])
+      await state.fork([block(100), block(101, 'b')])
 
       const pending = await state.pending()
       expect(pending).toHaveLength(1)
-      expect(pending[0].op).toBe('delete')
+      expect(pending[0].op).toBe('upsert')
+      expect(text(pending[0].payload)).toBe('new')
     })
   })
 
   describe('storage faults', () => {
-    it('reports the disk failure, not the rollback that SQLite already performed', async () => {
+    withStateFile('reports the disk failure, not the rollback that SQLite already performed', async ({ openState }) => {
       const driver = new FaultyDriver()
-      const { state } = await openState(statePath(), driver.load)
+      const { state } = await openState({ driver: driver.load })
 
       driver.faultOn = (sql) =>
         sql.startsWith('INSERT INTO manifest')
@@ -948,9 +1108,9 @@ describe('SqlitePubsubState', () => {
       expect(failure.cause).toMatchObject({ code: 'SQLITE_FULL' })
     })
 
-    it('leaves nothing of the failed batch behind', async () => {
+    withStateFile('leaves nothing of the failed batch behind', async ({ openState }) => {
       const driver = new FaultyDriver()
-      const { state } = await openState(statePath(), driver.load)
+      const { state } = await openState({ driver: driver.load })
 
       driver.faultOn = (sql) =>
         sql.startsWith('INSERT INTO ledger_blocks')
@@ -967,9 +1127,9 @@ describe('SqlitePubsubState', () => {
       expect(await state.getCursor()).toBeUndefined()
     })
 
-    it('still rolls back a failure that leaves the transaction open', async () => {
+    withStateFile('still rolls back a failure that leaves the transaction open', async ({ openState }) => {
       const driver = new FaultyDriver()
-      const { state } = await openState(statePath(), driver.load)
+      const { state } = await openState({ driver: driver.load })
 
       driver.faultOn = (sql) =>
         sql.startsWith('INSERT INTO manifest')
@@ -991,9 +1151,9 @@ describe('SqlitePubsubState', () => {
       expect(driver.count('outbox')).toBe(0)
     })
 
-    it('reports a disk failure while draining the outbox', async () => {
+    withStateFile('reports a disk failure while draining the outbox', async ({ openState }) => {
       const driver = new FaultyDriver()
-      const { state } = await openState(statePath(), driver.load)
+      const { state } = await openState({ driver: driver.load })
 
       await commit(state, { operations: [operation()], ledger: [block(100)], cursor: block(100), finalized: null })
       const [row] = await state.pending()
@@ -1018,9 +1178,9 @@ describe('SqlitePubsubState', () => {
       expect(await state.pending()).toHaveLength(1)
     })
 
-    it('reports a volume remounted read-only under the producer', async () => {
+    withStateFile('reports a volume remounted read-only under the producer', async ({ openState }) => {
       const driver = new FaultyDriver()
-      const { state } = await openState(statePath(), driver.load)
+      const { state } = await openState({ driver: driver.load })
 
       driver.faultOn = (sql) =>
         sql.startsWith('INSERT INTO outbox')
@@ -1038,9 +1198,9 @@ describe('SqlitePubsubState', () => {
       expect(failure.message).toContain('attempt to write a readonly database')
     })
 
-    it('clears a transaction left open by a rollback that could not run', async () => {
+    withStateFile('clears a transaction left open by a rollback that could not run', async ({ openState }) => {
       const driver = new FaultyDriver()
-      const { state } = await openState(statePath(), driver.load)
+      const { state } = await openState({ driver: driver.load })
 
       // Neither the write nor the rollback after it gets through, so the transaction that the
       // failed batch opened is still there when the next one starts.

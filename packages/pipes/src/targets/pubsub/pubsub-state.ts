@@ -92,7 +92,10 @@ export interface PubsubState {
   getCursor(): Promise<TargetState | undefined>
   getMeta(key: string): Promise<string | undefined>
   setMeta(key: string, value: string): Promise<void>
-  /** The per-batch transaction of 7.3 step 2: sequence, enqueue, record, advance, prune. */
+  /**
+   * The per-batch transaction of 7.3 step 2: sequence, enqueue, record, advance, prune. Pruning
+   * may finish after it returns, but pruned rows are invisible from the moment it commits.
+   */
   commit(input: CommitInput): Promise<void>
   /** Everything enqueued but not yet confirmed published, in publish order. */
   pending(): Promise<OutboxRow[]>
@@ -138,6 +141,18 @@ const META_CURSOR_KEY = 'cursor_key'
 const META_MATERIALIZED_ID_SOURCE = 'materialized_id_source:'
 /** The target owns this value; it is declared here so a schema migration can rewrite it. */
 export const META_WIRE_CONFIG = 'wire_config'
+/**
+ * The highest finalized block whose manifest rows are already folded into baselines. Rows at or
+ * below it are dead: every read skips them, and compaction deletes them in small chunks.
+ */
+const META_FOLDED_THROUGH = 'folded_through'
+
+/**
+ * Rows one compaction transaction deletes. A bigger chunk makes compaction finish sooner in
+ * total, because each commit has a fixed cost. But a batch or a health check that waits behind
+ * one chunk then waits longer.
+ */
+export const COMPACTION_CHUNK_ROWS = 1000
 
 /**
  * An unambiguous key for a composite identity. A separator-joined string is not one:
@@ -214,6 +229,8 @@ const ROLLED_BACK = {
     'The batch was already published — only its outbox acknowledgement was rolled back, so those ' +
     'rows stay queued and will be delivered again.',
   fork: 'The fork compensation was rolled back, so the state still describes the pre-fork chain.',
+  compact:
+    'Only the cleanup of already finalized rows was rolled back; it runs again when the finalized head next moves.',
 } as const
 
 /**
@@ -243,6 +260,9 @@ export class SqlitePubsubState implements PubsubState {
   #logger?: Logger
   /** False once a rollback could not run: the connection may still hold an open transaction. */
   #unwound = true
+  /** In-memory copy of META_FOLDED_THROUGH; -1 until the first fold. */
+  #foldedThrough = -1
+  #compaction?: NodeJS.Immediate
 
   constructor(options: SqlitePubsubStateOptions) {
     this.#options = options
@@ -325,6 +345,10 @@ export class SqlitePubsubState implements PubsubState {
         this.setMetaSync(META_CURSOR_KEY, this.#key.value)
       } else {
         this.#assertSameProducer()
+
+        // A previous run may have stopped before compaction caught up.
+        this.#foldedThrough = Number(this.getMetaSync(META_FOLDED_THROUGH) ?? '-1')
+        this.#scheduleCompaction()
       }
 
       return { coldStart }
@@ -611,6 +635,9 @@ export class SqlitePubsubState implements PubsubState {
   async commit({ operations, ledger, cursor, finalized, forkCapable }: CommitInput): Promise<void> {
     const db = this.#db!
 
+    // Only a finalized head that moved forward has anything new to fold.
+    const foldTo = finalized && finalized.number > this.#foldedThrough ? finalized.number : undefined
+
     this.#transaction('BEGIN IMMEDIATE', ROLLED_BACK.commit, () => {
       for (const operation of operations) {
         const seq = this.#nextSeq(operation)
@@ -642,6 +669,10 @@ export class SqlitePubsubState implements PubsubState {
           continue
         }
 
+        if (operation.inverse) {
+          this.#saveInverse(operation, operation.inverse)
+        }
+
         db.exec(
           `INSERT INTO manifest (route, topic, ordering_key, seq, block_number, mode, op, id, attributes, payload)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -659,23 +690,6 @@ export class SqlitePubsubState implements PubsubState {
             asBlob(operation.payload),
           ],
         )
-
-        if (operation.inverse) {
-          // First writer wins: the inverse is pure, so a later revision would only rewrite the
-          // same bytes, and the id must keep the identity it was first published under.
-          db.exec(
-            `INSERT OR IGNORE INTO rollback_inverse (route, topic, ordering_key, id, op, payload)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              operation.route,
-              operation.topic,
-              operation.orderingKey,
-              operation.id,
-              operation.inverse.op,
-              asBlob(operation.inverse.payload),
-            ],
-          )
-        }
       }
 
       for (const block of ledger) {
@@ -688,10 +702,55 @@ export class SqlitePubsubState implements PubsubState {
 
       this.#saveCursor(cursor, finalized)
 
-      if (finalized) {
-        this.#foldFinalized(finalized.number)
+      if (foldTo !== undefined) {
+        this.#foldFinalized(foldTo)
       }
     })
+
+    if (foldTo !== undefined) {
+      this.#foldedThrough = foldTo
+      this.#scheduleCompaction()
+    }
+  }
+
+  /**
+   * Stores the inverse of an id: the message a fork sends when it removes every message ever
+   * published for that id.
+   *
+   * While the id still has a manifest row above `#foldedThrough`, the first stored inverse is
+   * kept: the inverse is pure, so a later revision would only rewrite the same bytes, and the id
+   * must keep the identity it was first published under.
+   *
+   * When the id has no such row, no fork can use the stored inverse any more. It is dead and
+   * only waits for compaction to delete it. A new publish of the id starts again, so its inverse
+   * replaces the dead one, as if compaction had already run.
+   *
+   * Call this before writing the operation's own manifest row. Otherwise the check above always
+   * finds that new row and never replaces a dead inverse.
+   */
+  #saveInverse(operation: PendingOperation, inverse: NonNullable<PendingOperation['inverse']>): void {
+    this.#db!.exec(
+      `INSERT INTO rollback_inverse (route, topic, ordering_key, id, op, payload)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (topic, ordering_key, id) DO UPDATE SET
+         route = excluded.route, op = excluded.op, payload = excluded.payload
+       WHERE NOT EXISTS (
+         SELECT 1 FROM manifest m
+         WHERE m.topic = excluded.topic
+           AND m.ordering_key = excluded.ordering_key
+           AND m.id = excluded.id
+           AND m.block_number > ?
+       )`,
+      [
+        operation.route,
+        operation.topic,
+        operation.orderingKey,
+        operation.id,
+        inverse.op,
+        asBlob(inverse.payload),
+        this.#foldedThrough,
+      ],
+    )
   }
 
   /**
@@ -733,8 +792,8 @@ export class SqlitePubsubState implements PubsubState {
         [id],
       ) ??
       db.get<{ route: string; topic: string; ordering_key: string; attributes: string }>(
-        'SELECT route, topic, ordering_key, attributes FROM manifest WHERE id = ? ORDER BY seq DESC LIMIT 1',
-        [id],
+        'SELECT route, topic, ordering_key, attributes FROM manifest WHERE id = ? AND block_number > ? ORDER BY seq DESC LIMIT 1',
+        [id, this.#foldedThrough],
       ) ??
       db.get<{ route: string; topic: string; ordering_key: string; attributes: string }>(
         'SELECT route, topic, ordering_key, attributes FROM materialized_baseline WHERE id = ? LIMIT 1',
@@ -791,37 +850,112 @@ export class SqlitePubsubState implements PubsubState {
   }
 
   /**
-   * Finality advance: collapse newly-finalized materialized revisions into their baselines,
-   * then drop everything a fork can no longer reach. Bounds the rollbackable log by the
-   * chain's finality depth times the operation rate.
+   * Finality advance: collapse newly-finalized materialized revisions into their baselines and
+   * move META_FOLDED_THROUGH up. From then on the rows at or below it are dead to every read, and
+   * so is the inverse of an id with no row above it. Deleting them is the expensive part, so
+   * compaction does it later in small chunks instead of in this batch's transaction.
+   *
+   * Only rows above the previous mark are scanned: the target marks an operation rollbackable
+   * only above the finalized head, and that head never moves back, so no live row is below it.
    */
   #foldFinalized(finalizedNumber: number): void {
     const db = this.#db!
+    const previous = this.#foldedThrough
 
     const latest = db.all<ManifestDbRow>(
       `SELECT m.* FROM manifest m
-       WHERE m.mode = 'materialized' AND m.block_number <= ?
+       WHERE m.mode = 'materialized' AND m.block_number > ? AND m.block_number <= ?
          AND m.seq = (
            SELECT MAX(seq) FROM manifest x
            WHERE x.topic = m.topic AND x.ordering_key = m.ordering_key AND x.id = m.id AND x.block_number <= ?
          )`,
-      [finalizedNumber, finalizedNumber],
+      [previous, finalizedNumber, finalizedNumber],
     )
 
     for (const row of latest) {
       this.#saveBaseline(row)
     }
 
-    db.exec('DELETE FROM manifest WHERE block_number <= ?', [finalizedNumber])
-    db.exec('DELETE FROM ledger_blocks WHERE number <= ?', [finalizedNumber])
-    db.exec(`
-      DELETE FROM rollback_inverse
-      WHERE NOT EXISTS (
-        SELECT 1 FROM manifest m
-        WHERE m.topic = rollback_inverse.topic
-          AND m.ordering_key = rollback_inverse.ordering_key
-          AND m.id = rollback_inverse.id
-      )`)
+    this.setMetaSync(META_FOLDED_THROUGH, String(finalizedNumber))
+  }
+
+  // ─── compaction ─────────────────────────────────────────────────────────────
+
+  /**
+   * Runs compaction one chunk per event loop turn, so batches and health checks get the
+   * process between chunks. Every transaction here runs to its end without yielding, so a chunk
+   * never lands inside another write.
+   */
+  #scheduleCompaction(): void {
+    if (this.#compaction || !this.#db) return
+
+    this.#compaction = setImmediate(() => {
+      this.#compaction = undefined
+      if (!this.#db) return
+
+      try {
+        if (this.#compactChunk()) this.#scheduleCompaction()
+      } catch (error) {
+        // The dead rows are invisible, so leaving them for the next fold to retry is safe.
+        this.#logger?.warn({ error }, 'Failed to delete finalized rows from the PubSub state; will retry')
+      }
+    })
+    // Leftover rows are also removed on the next open, so they must not keep the process alive.
+    this.#compaction.unref()
+  }
+
+  /** Deletes up to one chunk of dead rows. Returns true when more may remain. */
+  #compactChunk(): boolean {
+    const db = this.#db!
+    const through = this.#foldedThrough
+    let deleted = 0
+
+    this.#transaction('BEGIN IMMEDIATE', ROLLED_BACK.compact, () => {
+      const rows = db.all<{ row_id: number; topic: string; ordering_key: string; id: string }>(
+        'SELECT rowid AS row_id, topic, ordering_key, id FROM manifest WHERE block_number <= ? LIMIT ?',
+        [through, COMPACTION_CHUNK_ROWS],
+      )
+      deleted = rows.length
+
+      db.exec('DELETE FROM manifest WHERE rowid IN (SELECT value FROM json_each(?))', [
+        JSON.stringify(rows.map((row) => row.row_id)),
+      ])
+
+      // Delete the inverses that no fork can use any more: those whose id has no manifest row
+      // above `through`. An inverse is always written together with a manifest row of the same
+      // id, so a dead inverse always has dead manifest rows. Checking the ids of the rows this
+      // chunk deletes therefore finds every dead inverse by the time compaction ends.
+      db.exec(
+        `DELETE FROM rollback_inverse
+         WHERE (topic, ordering_key, id) IN (
+           SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]')
+           FROM json_each(?)
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM manifest m
+           WHERE m.topic = rollback_inverse.topic
+             AND m.ordering_key = rollback_inverse.ordering_key
+             AND m.id = rollback_inverse.id
+             AND m.block_number > ?
+         )`,
+        [JSON.stringify(rows.map((row) => [row.topic, row.ordering_key, row.id])), through],
+      )
+
+      db.exec('DELETE FROM ledger_blocks WHERE number <= ?', [through])
+    })
+
+    return deleted === COMPACTION_CHUNK_ROWS
+  }
+
+  /**
+   * Deletes every dead row now instead of chunk by chunk in the background.
+   *
+   * @internal
+   */
+  async compact(): Promise<void> {
+    while (this.#db && this.#compactChunk()) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
   }
 
   /** The last finalized value of a materialized id — what a fork restores when no revision survives. */
@@ -893,9 +1027,13 @@ export class SqlitePubsubState implements PubsubState {
   async stats(): Promise<{ outbox: number; manifest: number }> {
     const db = this.#db!
 
+    const manifest = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM manifest WHERE block_number > ?', [
+      this.#foldedThrough,
+    ])
+
     return {
       outbox: db.get<{ n: number }>('SELECT COUNT(*) AS n FROM outbox')?.n ?? 0,
-      manifest: db.get<{ n: number }>('SELECT COUNT(*) AS n FROM manifest')?.n ?? 0,
+      manifest: manifest?.n ?? 0,
     }
   }
 
@@ -922,14 +1060,17 @@ export class SqlitePubsubState implements PubsubState {
 
       db.exec('DELETE FROM manifest WHERE block_number > ?', [floor])
       db.exec('DELETE FROM ledger_blocks WHERE number > ?', [floor])
-      db.exec(`
-        DELETE FROM rollback_inverse
-        WHERE NOT EXISTS (
-          SELECT 1 FROM manifest m
-          WHERE m.topic = rollback_inverse.topic
-            AND m.ordering_key = rollback_inverse.ordering_key
-            AND m.id = rollback_inverse.id
-        )`)
+      db.exec(
+        `DELETE FROM rollback_inverse
+         WHERE NOT EXISTS (
+           SELECT 1 FROM manifest m
+           WHERE m.topic = rollback_inverse.topic
+             AND m.ordering_key = rollback_inverse.ordering_key
+             AND m.id = rollback_inverse.id
+             AND m.block_number > ?
+         )`,
+        [this.#foldedThrough],
+      )
 
       if (rollbackTo) {
         this.#saveCursor(rollbackTo, finalized ?? null)
@@ -946,10 +1087,12 @@ export class SqlitePubsubState implements PubsubState {
    */
   #compensate(floor: number): number {
     const db = this.#db!
+    // Rows at or below this mark are already folded and wait for compaction: none is read here.
+    const folded = this.#foldedThrough
 
     const orphaned = db.all<ManifestDbRow>(
       `SELECT * FROM manifest WHERE block_number > ? ORDER BY topic, ordering_key, id, seq ASC`,
-      [floor],
+      [Math.max(floor, folded)],
     )
     if (!orphaned.length) return 0
 
@@ -971,9 +1114,9 @@ export class SqlitePubsubState implements PubsubState {
 
       const surviving = db.get<ManifestDbRow>(
         `SELECT * FROM manifest
-         WHERE topic = ? AND ordering_key = ? AND id = ? AND block_number <= ?
+         WHERE topic = ? AND ordering_key = ? AND id = ? AND block_number <= ? AND block_number > ?
          ORDER BY seq DESC LIMIT 1`,
-        [newest.topic, newest.ordering_key, newest.id, floor],
+        [newest.topic, newest.ordering_key, newest.id, floor, folded],
       )
 
       if (surviving) {
@@ -1081,7 +1224,8 @@ export class SqlitePubsubState implements PubsubState {
    */
   async *#records(finalized?: BlockCursor): AsyncIterable<RollbackRecord> {
     const blocks = this.#db!.all<{ number: number; hash: string | null; timestamp: number | null }>(
-      'SELECT number, hash, timestamp FROM ledger_blocks ORDER BY number DESC',
+      'SELECT number, hash, timestamp FROM ledger_blocks WHERE number > ? ORDER BY number DESC',
+      [this.#foldedThrough],
     )
 
     yield {
@@ -1095,6 +1239,9 @@ export class SqlitePubsubState implements PubsubState {
   }
 
   async close(): Promise<void> {
+    clearImmediate(this.#compaction)
+    this.#compaction = undefined
+
     // Releases the exclusive lock — a restart in the same process must be able to reopen it.
     this.#db?.close()
     this.#db = undefined
