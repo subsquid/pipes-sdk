@@ -22,7 +22,7 @@ filename.
 The underlying obstacle: absent per-row key attribution, "are these rows mine?" is
 unanswerable. Rows generally carry no pipe key. The same question blocks recovery from a
 crash before the first cursor write: what that crash leaves may be removed only if the
-sink can tell it from another pipe's data (GAP-41, GAP-44).
+sink can tell it from another pipe's data (GAP-41; for class A, ADR-15).
 
 ## Decision
 
@@ -80,10 +80,12 @@ state at all still starts afresh (GAP-41). A crash before the first state write 
 the same shape, so to repair that crash rather than refuse it as orphan data, the
 binding must tell the two apart, which takes a state write before the first publish.
 
-The class-A repair hook may be called over the range start (GAP-44), since the removal it
-makes is the author's to scope. The binding's documented hook removes every row above
-the cursor; over a shared table that removes other pipes' rows as well, and the
-documentation says so. The write-ahead binding's guard must either become key-scoped or
-declare the exclusivity it already assumes (GAP-20). Operators gain a knob they can set
+The class-A repair hook is called over the range start after a crash in the first batch
+(ADR-15), since the removal it makes is the author's to scope. The binding's documented
+removal bounds that call to the first batch's blocks; a hook that writes its own condition
+removes every row from the range start on, over a shared table other pipes' rows as well, and
+the documentation says so. The write-ahead
+binding's guard must either become key-scoped or declare the exclusivity it already
+assumes (GAP-20). Operators gain a knob they can set
 wrongly where a binding exposes one — declaring exclusivity over a shared table is
 undetectable, and the spec says so rather than pretending otherwise.

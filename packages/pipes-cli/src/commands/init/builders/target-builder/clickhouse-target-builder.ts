@@ -45,14 +45,12 @@ clickhouseTarget({
     {{/inserts}}
     },
     onRollback: async ({ safeCursor, store }) => {
-      await store.removeAllRows({
+      await store.removeRowsAfter(safeCursor, {
         tables: [
         {{#tables}}
           '{{.}}',
         {{/tables}}
         ],
-        where: 'block_number > {latest:UInt32}',
-        params: { latest: safeCursor.number },
       });
     },
   })`

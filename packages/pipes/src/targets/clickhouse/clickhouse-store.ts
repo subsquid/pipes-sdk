@@ -10,7 +10,7 @@ import type {
   QueryResult,
 } from '@clickhouse/client'
 
-import type { Logger } from '~/core/index.js'
+import type { BlockCursor, Logger } from '~/core/index.js'
 
 import { CLICKHOUSE_ERROR_CODES, ClickhouseTargetError } from './errors.js'
 import { loadSqlFiles } from './fs.js'
@@ -59,6 +59,15 @@ type TableMeta = {
 }
 
 class TableNotFoundError extends Error {}
+
+const PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * A safe cursor as `onRollback` gets it. `upTo`, when set, is the highest block whose rows may be
+ * stored above it: after a crash in the first batch, that batch's last block; on a fork, the
+ * cursor the fork rolls back from.
+ */
+export type RollbackCursor = BlockCursor & { upTo?: number }
 
 export class ClickhouseStore {
   #logger?: Logger
@@ -231,11 +240,11 @@ export class ClickhouseStore {
    * files, so it is safe on large tables. The materialization runs as an async mutation:
    * a rollback issued immediately after the index is first added may still scan old parts
    * until the mutation completes, which is why calling this eagerly from `onStart` is
-   * preferable to relying on the lazy auto-creation in `removeAllRows`.
+   * preferable to relying on the lazy auto-creation in `removeRowsAfter`.
    */
   async ensureRollbackIndex({ table, column = 'block_number' }: { table: string; column?: string }) {
     // The column is interpolated into DDL below; restrict it to a plain identifier
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) {
+    if (!PLAIN_IDENTIFIER.test(column)) {
       throw new ClickhouseTargetError(
         CLICKHOUSE_ERROR_CODES.INVALID_ROLLBACK_INDEX_COLUMN,
         `Invalid rollback index column "${column}": expected a plain identifier`,
@@ -268,7 +277,14 @@ export class ClickhouseStore {
   }
 
   /**
-   * Removes all rows matching `where`, picking the mechanism by table engine:
+   * Removes the rows of the blocks above `cursor` from `tables`: what `onRollback` is for. The
+   * store writes the block condition, so `where` is only needed on a table several pipes write, to
+   * pick this pipe's rows. `column` names the block column of every table.
+   *
+   * Given `upTo`, it removes the blocks up to it only: no row of this pipe lies past it, so the
+   * bound keeps a removal without `where` from reaching other pipes' rows there.
+   *
+   * The mechanism follows each table's engine:
    *
    * - CollapsingMergeTree family: inserts cancel rows (sign = -1), so the removal
    *   propagates through materialized views. Rows are netted with a
@@ -282,7 +298,56 @@ export class ClickhouseStore {
    * - If table metadata cannot be read (e.g. no access to `system.tables` on a
    *   locked-down server), falls back to the legacy `FINAL` read-back with cancel rows.
    */
-  async removeAllRows({
+  async removeRowsAfter(
+    cursor: RollbackCursor,
+    {
+      tables,
+      where,
+      params,
+      column = 'block_number',
+    }: {
+      tables: string | string[]
+      where?: string
+      params?: Record<string, unknown>
+      column?: string
+    },
+  ) {
+    // The column is interpolated into the condition below; restrict it to a plain identifier
+    if (!PLAIN_IDENTIFIER.test(column)) {
+      throw new ClickhouseTargetError(
+        CLICKHOUSE_ERROR_CODES.INVALID_ROLLBACK_INDEX_COLUMN,
+        `Invalid rollback column "${column}": expected a plain identifier`,
+      )
+    }
+
+    // `>=` one past the cursor, so a start cursor at -1 needs no negative bound
+    const from = cursor.number + 1
+    const bound =
+      cursor.upTo === undefined
+        ? { where: `${column} >= {_sqd_from:UInt64}`, params: { _sqd_from: from } }
+        : {
+            where: `${column} BETWEEN {_sqd_from:UInt64} AND {_sqd_to:UInt64}`,
+            params: { _sqd_from: from, _sqd_to: cursor.upTo },
+          }
+
+    return this.#removeRows({
+      tables,
+      where: where === undefined ? bound.where : `(${bound.where}) AND (${where})`,
+      params: { ...params, ...bound.params },
+    })
+  }
+
+  /**
+   * Removes all rows matching `where`, by the mechanism `removeRowsAfter` describes.
+   *
+   * @deprecated Use `removeRowsAfter`. It writes the block condition itself, and limits the
+   * removal after a run that stopped inside its first batch to that batch's blocks.
+   */
+  removeAllRows(options: { tables: string | string[]; where: string; params?: Record<string, unknown> }) {
+    return this.#removeRows(options)
+  }
+
+  async #removeRows({
     tables,
     params,
     where,
@@ -468,7 +533,7 @@ export class ClickhouseStore {
 
   /**
    * Cancels every row returned by the caller-supplied `query` by re-inserting it with
-   * sign = -1. Lower-level than `removeAllRows` (which should be preferred for rollbacks):
+   * sign = -1. Lower-level than `removeRowsAfter` (which should be preferred for rollbacks):
    * the caller owns the query semantics and no engine check is performed, but the cancel
    * rows only take effect on a CollapsingMergeTree family table with a `sign` column.
    */

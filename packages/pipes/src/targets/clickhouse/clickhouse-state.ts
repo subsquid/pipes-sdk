@@ -11,7 +11,7 @@ import {
   resolveForkCursor,
 } from '~/core/index.js'
 
-import { ClickhouseStore } from './clickhouse-store.js'
+import { ClickhouseStore, RollbackCursor } from './clickhouse-store.js'
 import { CLICKHOUSE_ERROR_CODES, ClickhouseTargetError } from './errors.js'
 
 // FIXME: we need refactor it to make order more deterministic and predictable - WHY?
@@ -28,6 +28,33 @@ CREATE TABLE IF NOT EXISTS ${table}
 ) ENGINE = CollapsingMergeTree(sign)
   ORDER BY (timestamp, id)
 `
+
+type SyncRow = { current: string; finalized: string } & Record<string, unknown>
+
+/** The blocks a first batch covers: from the range start up to the batch's last block. */
+export type FirstBatchBlocks = { from: number; to: number }
+
+/**
+ * The cursor row written before a pipe's first batch, one block below the range start, with that
+ * batch's last block: see `saveStartCursor`.
+ */
+export type StartCursor = { kind: 'start'; number: number; batchEnd: number }
+
+/** A cursor as the sync table stores it. */
+export type StoredCursor = BlockCursor | StartCursor
+
+export function isStartCursor(cursor: StoredCursor): cursor is StartCursor {
+  return 'kind' in cursor && cursor.kind === 'start'
+}
+
+/** The safe cursor the repair hook gets for a stored one: a start cursor bounds the removal at its batch end. */
+export function rollbackCursorOf(cursor: StoredCursor): RollbackCursor {
+  if (!isStartCursor(cursor)) {
+    return cursor
+  }
+
+  return { number: cursor.number, upTo: cursor.batchEnd }
+}
 
 /**
  * Configuration options for ClickhouseState.
@@ -64,6 +91,9 @@ export class ClickhouseState {
 
   readonly #qualifiedName: string
   #saves = 0
+  #lastTimestamp = 0
+  // The start cursor this run resumed from, as stored, so the run's own start cursor can cancel it
+  #resumedStart?: Record<string, unknown>
 
   // The id every cursor row is keyed by: an explicit `settings.id`, else the pipe's source id
   // once `bindCursorKey` runs, else the legacy default (e.g. when bind never runs in unit tests).
@@ -111,7 +141,7 @@ export class ClickhouseState {
     return this.#key.value
   }
 
-  encodeCursor(cursor: BlockCursor | { number: number }): string {
+  encodeCursor(cursor: StoredCursor): string {
     return JSON.stringify(cursor)
   }
   decodeCursor(cursor: string): BlockCursor {
@@ -128,7 +158,7 @@ export class ClickhouseState {
     }: BatchContext,
     parentSpan: Profiler = profiler,
   ) {
-    const timestamp = Date.now()
+    const timestamp = this.#nextTimestamp()
 
     await parentSpan.measure({ name: 'insert cursor', labels: 'db' }, async () => {
       await this.store.insert({
@@ -179,8 +209,13 @@ export class ClickhouseState {
 
   async getCursor(): Promise<TargetState | undefined> {
     try {
-      const primary = await this.#readLatest(this.#key.value)
-      if (primary) return primary
+      const row = await this.#readLatestRow(this.#key.value)
+      if (row) {
+        const primary = this.#stateOf(row)
+        this.#resumedStart = isStartCursor(primary.latest) ? row : undefined
+
+        return primary
+      }
 
       return await this.#migrateLegacyCursor()
     } catch (e: unknown) {
@@ -192,6 +227,45 @@ export class ClickhouseState {
 
       throw e
     }
+  }
+
+  /**
+   * Writes the start cursor before the first batch's data goes in: a cursor row one block below the
+   * range start, with the batch's last block. The batch's own cursor row supersedes it by being
+   * newer. Until then a restart resumes from it, and the repair hook removes up to that block.
+   *
+   * A run that resumed from a start cursor writes one of its own, since its first batch may end
+   * later, and cancels the old one in the same insert, so a crash loop does not pile them up.
+   */
+  async saveStartCursor({ from, to }: FirstBatchBlocks) {
+    const cursor: StartCursor = { kind: 'start', number: from - 1, batchEnd: to }
+    const superseded = this.#resumedStart ? [{ ...this.#resumedStart, sign: -1 }] : []
+    this.#resumedStart = undefined
+
+    await this.store.insert({
+      table: this.#qualifiedName,
+      values: [
+        ...superseded,
+        {
+          id: this.#key.value,
+          current: this.encodeCursor(cursor),
+          finalized: '',
+          rollback_chain: '[]',
+          sign: 1,
+          timestamp: this.#nextTimestamp(),
+        },
+      ],
+      format: 'JSONEachRow',
+      clickhouse_settings: { date_time_input_format: 'best_effort' },
+    })
+  }
+
+  // The newest row is the cursor, so two rows in one millisecond would leave it undecided; the start
+  // cursor and the first batch's cursor can be that close
+  #nextTimestamp(): number {
+    this.#lastTimestamp = Math.max(Date.now(), this.#lastTimestamp + 1)
+
+    return this.#lastTimestamp
   }
 
   /**
@@ -274,15 +348,25 @@ export class ClickhouseState {
   }
 
   async #readLatest(id: string): Promise<TargetState | undefined> {
+    const row = await this.#readLatestRow(id)
+
+    return row && this.#stateOf(row)
+  }
+
+  // As stored, timestamps in ISO, so a row can be written back as its own cancel row
+  async #readLatestRow(id: string): Promise<SyncRow | undefined> {
     const res = await this.store.query({
       query: `SELECT * FROM ${this.#qualifiedName} WHERE id = {id:String} ORDER BY timestamp DESC LIMIT 1`,
       format: 'JSONEachRow',
       query_params: { id },
+      clickhouse_settings: { date_time_output_format: 'iso' },
     })
+    const [row] = await res.json<SyncRow>()
 
-    const [row] = await res.json<{ current: string; finalized: string }>()
-    if (!row) return
+    return row
+  }
 
+  #stateOf(row: SyncRow): TargetState {
     // Hand the persisted finalized head back as resume state so the source can seed its monotonic
     // watermark (survives an unclean restart mid-fork). It is the newest row's floor — a higher
     // finalized left by a pre-fix regression in an older row is not recovered; a defensive

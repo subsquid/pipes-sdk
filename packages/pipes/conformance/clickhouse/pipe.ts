@@ -9,8 +9,12 @@ import { type Erc20Row, type Observation, TABLE_NAMES, type TableName, erc20Stre
 /** Where the ClickHouse server is, and who signs in. */
 export type ClickhouseServer = { url: string; username: string; password: string }
 
-/** Whether the author supplies the repair hook RP-42 delegates to them. Without it, ADR-15 applies. */
-export type Repair = 'hook' | 'none'
+/**
+ * The repair hook RP-42 delegates to the author: the documented one, through `removeRowsAfter`; one
+ * that writes its own block condition through `removeAllRows`, which the binding cannot bound to an
+ * interrupted first batch; or none, where ADR-15 applies.
+ */
+export type Repair = 'hook' | 'predicate' | 'none'
 
 /**
  * The DDL of the ERC-20 scenarios' tables as class A stores them: collapsing tables, so a rollback
@@ -43,13 +47,26 @@ export function clickhouseClient({
   return createClient({ ...server, database, application, clickhouse_settings: { optimize_on_insert: 0 } })
 }
 
+type RepairContext = { store: ClickhouseStore; safeCursor: BlockCursor }
+
 /** The repair hook RP-42 asks of the author: remove every row above the safe cursor. */
-async function removeAbove({ store, safeCursor }: { store: ClickhouseStore; safeCursor: BlockCursor }) {
+async function removeAbove({ store, safeCursor }: RepairContext) {
+  await store.removeRowsAfter(safeCursor, { tables: [...TABLE_NAMES], column: 'blockNumber' })
+}
+
+/** The same hook with the block condition written by hand. */
+async function removeAboveByPredicate({ store, safeCursor }: RepairContext) {
   await store.removeAllRows({
     tables: [...TABLE_NAMES],
     where: '"blockNumber" > {latest:UInt64}',
     params: { latest: safeCursor.number },
   })
+}
+
+const REPAIRS: Record<Repair, ((ctx: RepairContext) => Promise<void>) | undefined> = {
+  hook: removeAbove,
+  predicate: removeAboveByPredicate,
+  none: undefined,
 }
 
 /**
@@ -85,7 +102,7 @@ export function streamClickhouse({
         }
       }
     },
-    onRollback: repair === 'hook' ? removeAbove : undefined,
+    onRollback: REPAIRS[repair],
   })
   const resolveFork = target.resolveFork as NonNullable<typeof target.resolveFork>
 

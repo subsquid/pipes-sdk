@@ -1,10 +1,14 @@
-import { createClient } from '@clickhouse/client'
+import { randomBytes } from 'node:crypto'
+
+import { type ClickHouseClient, createClient } from '@clickhouse/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { BlockCursor } from '~/core/index.js'
 import { evmPortalStream } from '~/evm/index.js'
-import { MockPortal, MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
+import { MockChainPortal, MockPortal, MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
-import { ClickhouseStore } from './clickhouse-store.js'
+import { ClickhouseStore, type RollbackCursor } from './clickhouse-store.js'
 import { clickhouseTarget } from './clickouse-target.js'
 
 const client = createClient({
@@ -74,6 +78,13 @@ describe('Clickhouse state', () => {
       expect(data).toMatchInlineSnapshot(`
         [
           {
+            "current": "{"kind":"start","number":-1,"batchEnd":5}",
+            "finalized": "",
+            "id": "test",
+            "rollback_chain": "[]",
+            "sign": 1,
+          },
+          {
             "current": "{"number":5,"hash":"0x5","timestamp":5000}",
             "finalized": "{"hash":"0x2","number":2}",
             "id": "test",
@@ -126,6 +137,13 @@ describe('Clickhouse state', () => {
       const data = await getAllFromSyncTable()
       expect(data).toMatchInlineSnapshot(`
         [
+          {
+            "current": "{"kind":"start","number":-1,"batchEnd":1}",
+            "finalized": "",
+            "id": "test",
+            "rollback_chain": "[]",
+            "sign": 1,
+          },
           {
             "current": "{"number":1,"hash":"0x1","timestamp":1000}",
             "finalized": "{"hash":"0x1000","number":1000}",
@@ -257,6 +275,13 @@ describe('Clickhouse state', () => {
       const data = await getAllFromSyncTable()
       expect(data).toMatchInlineSnapshot(`
         [
+          {
+            "current": "{"kind":"start","number":-1,"batchEnd":1}",
+            "finalized": "",
+            "id": "test",
+            "rollback_chain": "[]",
+            "sign": 1,
+          },
           {
             "current": "{"number":1,"hash":"0x1","timestamp":1000}",
             "finalized": "",
@@ -885,6 +910,13 @@ describe('Clickhouse state', () => {
       expect(data).toMatchInlineSnapshot(`
         [
           {
+            "current": "{"kind":"start","number":-1,"batchEnd":5}",
+            "finalized": "",
+            "id": "test",
+            "rollback_chain": "[]",
+            "sign": 1,
+          },
+          {
             "current": "{"number":5,"hash":"0x5","timestamp":5000}",
             "finalized": "{"hash":"0x1","number":1}",
             "id": "test",
@@ -1161,6 +1193,32 @@ describe('clickhouseTarget missing-rollback diagnostic', () => {
     })
   })
 
+  it('passes the fork ancestor with no upper bound when the run has saved no cursor', async () => {
+    // Rollback records that resolve the fork to block 5, read without write() ever running
+    const row = {
+      rollback_chain: JSON.stringify([5, 6].map((n) => ({ number: n, hash: `0x${n}` }))),
+      finalized: '{"number":4,"hash":"0x4"}',
+    }
+    const recordsClient = {
+      connectionParams: { database: 'default' },
+      query: vi.fn().mockResolvedValue({
+        stream: async function* () {
+          yield [{ json: () => row }]
+        },
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as any
+    const onRollback = vi.fn()
+
+    const target = clickhouseTarget<unknown>({ client: recordsClient, onData: async () => {}, onRollback })
+    await target.resolveFork?.([
+      { number: 5, hash: '0x5' },
+      { number: 6, hash: '0x6a' },
+    ])
+
+    expect(onRollback).toHaveBeenCalledWith(expect.objectContaining({ safeCursor: { number: 5, hash: '0x5' } }))
+  })
+
   it('does not preempt a fork with the coded error when a handler is present', async () => {
     const onRollback = vi.fn()
     // A handler is present, so resolveFork proceeds to resolve the fork cursor. With no stored
@@ -1183,4 +1241,228 @@ describe('clickhouseTarget missing-rollback diagnostic', () => {
     await expect(target.resolveFork?.([{ number: 10, hash: '0xa' }])).resolves.toBeNull()
     expect(onRollback).not.toHaveBeenCalled()
   })
+})
+
+describe('clickhouseTarget onRollback bounds', () => {
+  const server = {
+    url: process.env['TEST_CLICKHOUSE_URL'] || 'http://localhost:10123',
+    username: process.env['TEST_CLICKHOUSE_USERNAME'] || 'default',
+    password: process.env['TEST_CLICKHOUSE_PASSWORD'] || 'default',
+  }
+
+  type Database = { name: string; admin: ClickHouseClient }
+  type Block = { number: number }
+  type OnData = (ctx: { store: ClickhouseStore; data: Block[] }) => Promise<void>
+  type OnRollback = (ctx: {
+    reason: 'recovery' | 'fork'
+    store: ClickhouseStore
+    safeCursor: RollbackCursor
+  }) => Promise<void>
+
+  /**
+   * A database of the test's own, with the one table the pipe writes: a row per block. Merges are
+   * stopped on it, so a block stored twice reads as twice.
+   */
+  const withDatabase = withPortal.extend<{ database: Database }>({
+    database: async ({}, use) => {
+      const admin = createClient(server)
+      const name = `first_batch_${randomBytes(6).toString('hex')}`
+      await admin.command({ query: `CREATE DATABASE ${name}` })
+      await admin.command({
+        query: `CREATE TABLE ${name}.blocks (block_number UInt64, sign Int8) ENGINE = CollapsingMergeTree(sign) ORDER BY block_number`,
+      })
+      await admin.command({ query: `SYSTEM STOP MERGES ${name}.blocks` })
+
+      await use({ name, admin })
+
+      await admin.command({ query: `DROP DATABASE ${name} SYNC` })
+      await admin.close()
+    },
+  })
+
+  const insertBlocks: OnData = async ({ store, data }) => {
+    const values = data.map((block) => ({ block_number: block.number, sign: 1 }))
+
+    await store.insert({ table: 'blocks', values, format: 'JSONEachRow' })
+  }
+
+  const removeAbove: OnRollback = async ({ store, safeCursor }) => {
+    await store.removeRowsAfter(safeCursor, { tables: ['blocks'] })
+  }
+
+  const removeAboveByPredicate: OnRollback = async ({ store, safeCursor }) => {
+    await store.removeAllRows({
+      tables: ['blocks'],
+      where: 'block_number > {latest:UInt32}',
+      params: { latest: safeCursor.number },
+    })
+  }
+
+  /**
+   * Streams blocks 0 to `to`, a portal response of up to four blocks per batch. A response carries
+   * the first and last block it covers, and the pipe stores a row for each: 0 and 3, 4 and 7, 8 and 9.
+   */
+  async function runPipe({
+    portal,
+    database,
+    to,
+    onData = insertBlocks,
+    onRollback,
+  }: {
+    portal: MockChainPortal
+    database: Database
+    to: number
+    onData?: OnData
+    onRollback?: OnRollback
+  }) {
+    const client = createClient({ ...server, database: database.name })
+
+    try {
+      await evmPortalStream({
+        id: 'first-batch',
+        portal: { url: portal.url, maxBytes: 1 },
+        outputs: blockDecoder({ from: 0, to }),
+      }).pipeTo(clickhouseTarget({ client, onData, onRollback }))
+    } finally {
+      await client.close()
+    }
+  }
+
+  /** Stores the first batch's rows, then stops before its cursor. */
+  async function stopInFirstBatch(portal: MockChainPortal, database: Database, onRollback?: OnRollback) {
+    const stopped = new Error('stopped after the first batch stored its rows')
+    const storeThenStop: OnData = async (ctx) => {
+      await insertBlocks(ctx)
+      throw stopped
+    }
+
+    await expect(runPipe({ portal, database, to: 7, onData: storeThenStop, onRollback })).rejects.toBe(stopped)
+  }
+
+  /** The start cursors the sync table holds net of their cancel rows. */
+  async function startCursors({ name, admin }: Database): Promise<string[]> {
+    const result = await admin.query({
+      query: `SELECT current FROM ${name}.sync WHERE id = 'first-batch'
+        GROUP BY current, finalized, rollback_chain, timestamp HAVING sum(sign) > 0 ORDER BY timestamp`,
+      format: 'JSONEachRow',
+    })
+    const rows = await result.json<{ current: string }>()
+
+    return rows.map((row) => row.current)
+  }
+
+  /** The stored blocks, each as many times as it is stored net of its cancel rows. */
+  async function storedBlocks({ name, admin }: Database): Promise<number[]> {
+    const result = await admin.query({
+      query: `SELECT block_number, sum(sign) AS net FROM ${name}.blocks GROUP BY block_number HAVING net != 0 ORDER BY block_number`,
+      format: 'JSONEachRow',
+    })
+    const rows = await result.json<{ block_number: string; net: string }>()
+
+    return rows.flatMap((row) => Array<number>(Number(row.net)).fill(Number(row.block_number)))
+  }
+
+  withDatabase(
+    'calls the hook with the start cursor, and removeRowsAfter removes the batch blocks only',
+    async ({ portal, database }) => {
+      const chain = await portal({ latest: 9, blocksPerResponse: 4 })
+      // Another pipe's row past the first batch, which a removal without a pipe filter must not reach
+      await database.admin.insert({
+        table: `${database.name}.blocks`,
+        values: [{ block_number: 100, sign: 1 }],
+        format: 'JSONEachRow',
+      })
+
+      await stopInFirstBatch(chain, database)
+      const onRollback = vi.fn(removeAbove)
+      await runPipe({ portal: chain, database, to: 7, onRollback })
+      const safeCursors = onRollback.mock.calls.map(([ctx]) => ctx.safeCursor)
+
+      expect(safeCursors).toEqual([{ number: -1, upTo: 3 }])
+      expect(await storedBlocks(database)).toEqual([0, 3, 4, 7, 100])
+    },
+  )
+
+  withDatabase(
+    'replaces the start cursor when the replayed first batch stops again, ending later',
+    async ({ portal, database }) => {
+      const short = await portal({ latest: 9, blocksPerResponse: 4 })
+      const long = await portal({ latest: 9, blocksPerResponse: 8 })
+
+      // The first run stores 0 and 3; the second removes them, then stores 0 and 7
+      await stopInFirstBatch(short, database)
+      await stopInFirstBatch(long, database, removeAbove)
+      const left = await startCursors(database)
+      const onRollback = vi.fn(removeAbove)
+      await runPipe({ portal: short, database, to: 7, onRollback })
+      const safeCursors = onRollback.mock.calls.map(([ctx]) => ctx.safeCursor)
+
+      expect(left).toEqual(['{"kind":"start","number":-1,"batchEnd":7}'])
+      expect(safeCursors).toEqual([{ number: -1, upTo: 7 }])
+      expect(await storedBlocks(database)).toEqual([0, 3, 4, 7])
+    },
+  )
+
+  withDatabase(
+    'fails the restart at a range start of 0 when the hook binds the cursor as unsigned, removing nothing',
+    async ({ portal, database }) => {
+      const chain = await portal({ latest: 9, blocksPerResponse: 4 })
+
+      await stopInFirstBatch(chain, database)
+      const restart = runPipe({ portal: chain, database, to: 7, onRollback: removeAboveByPredicate })
+
+      await expect(restart).rejects.toThrow("Value -1 cannot be parsed as UInt32 for query parameter 'latest'")
+      expect(await storedBlocks(database)).toEqual([0, 3])
+    },
+  )
+
+  withDatabase(
+    'on a fork, removeRowsAfter stops at the cursor the fork rolls back from',
+    async ({ portal, database }) => {
+      let forked = false
+      const chain: MockChainPortal = await portal({
+        latest: 12,
+        finalized: 2,
+        blocksPerResponse: 4,
+        // Once the pipe asks past 7, every block above 5 is replaced
+        delay: ({ query }) => {
+          if (query.fromBlock === 8 && !forked) {
+            forked = true
+            chain.fork(5)
+          }
+        },
+      })
+      // Another pipe's row past every block this pipe stores, which a removal without a pipe filter must not reach
+      await database.admin.insert({
+        table: `${database.name}.blocks`,
+        values: [{ block_number: 100, sign: 1 }],
+        format: 'JSONEachRow',
+      })
+      const onRollback = vi.fn(removeAbove)
+
+      // Stores 0 and 3, 4 and 7 before the fork; 4 is the last block of the old branch in its
+      // rollback chain. The stream then resumes from 4 and covers 5 to 8 and 9 to 12.
+      await runPipe({ portal: chain, database, to: 12, onRollback })
+      const safeCursors = onRollback.mock.calls.map(([ctx]) => ({ reason: ctx.reason, ...ctx.safeCursor }))
+
+      expect(safeCursors).toEqual([expect.objectContaining({ reason: 'fork', number: 4, upTo: 7 })])
+      expect(await storedBlocks(database)).toEqual([0, 3, 4, 5, 8, 9, 12, 100])
+    },
+  )
+
+  withDatabase(
+    'resumes over the cursor of a first batch that completed, calling the hook at it',
+    async ({ portal, database }) => {
+      const chain = await portal({ latest: 9, blocksPerResponse: 4 })
+      const onRollback = vi.fn(removeAbove)
+
+      await runPipe({ portal: chain, database, to: 5, onRollback })
+      await runPipe({ portal: chain, database, to: 9, onRollback })
+      const safeCursors = onRollback.mock.calls.map(([ctx]) => ctx.safeCursor.number)
+
+      // The first run's responses cover 0 to 3 and 4 to 5, the second's 6 to 9
+      expect(safeCursors).toEqual([5])
+      expect(await storedBlocks(database)).toEqual([0, 3, 4, 5, 6, 9])
+    },
+  )
 })

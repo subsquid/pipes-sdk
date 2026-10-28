@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { BatchContext } from '~/core/index.js'
+import { BatchContext, BlockCursor } from '~/core/index.js'
 import { testLogger } from '~/testing/index.js'
 
-import { ClickhouseState } from './clickhouse-state.js'
+import { ClickhouseState, isStartCursor, rollbackCursorOf } from './clickhouse-state.js'
 
 /**
  * Unit tests for the finalized-head wiring in ClickhouseState, using a mocked store (no live
@@ -267,5 +267,94 @@ describe('ClickhouseState — cursor key binding & legacy migration', () => {
 
     await expect(state.getCursor()).resolves.toBeUndefined()
     expect(removals).toHaveLength(0)
+  })
+})
+
+describe('ClickhouseState — start cursor', () => {
+  /** A clock stopped at one millisecond, so every row a test writes would share its timestamp. */
+  const withStoppedClock = it.extend<{ now: number }>({
+    now: async ({}, use) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+
+      await use(1_000)
+
+      clock.mockRestore()
+    },
+  })
+
+  it('writes one block below the range start, marked with the first batch end', async () => {
+    const { store, inserts } = makeStore(block(100))
+    const state = new ClickhouseState(store as any, { id: 'pipe' })
+
+    await state.saveStartCursor({ from: 0, to: 5 })
+
+    expect(inserts[0].values[0]).toMatchObject({
+      id: 'pipe',
+      current: '{"kind":"start","number":-1,"batchEnd":5}',
+      finalized: '',
+      rollback_chain: '[]',
+      sign: 1,
+    })
+  })
+
+  it('tells a start cursor by its kind, not by a missing hash or a bound', () => {
+    const { store } = makeStore(block(100))
+    const state = new ClickhouseState(store as any, {})
+    const start = state.decodeCursor('{"kind":"start","number":-1,"batchEnd":5}')
+
+    expect(isStartCursor(start)).toBe(true)
+    expect(isStartCursor(block(5))).toBe(false)
+    expect(isStartCursor({ number: 5 })).toBe(false)
+    expect(isStartCursor({ number: -1, upTo: 5 } as BlockCursor)).toBe(false)
+  })
+
+  it('hands the hook a start cursor as its number with the batch end as upTo, and a batch cursor as is', () => {
+    const batch = block(5)
+
+    expect(rollbackCursorOf({ kind: 'start', number: -1, batchEnd: 5 })).toStrictEqual({ number: -1, upTo: 5 })
+    expect(rollbackCursorOf(batch)).toBe(batch)
+  })
+
+  it('resuming from a start cursor, cancels it in the insert of its own', async () => {
+    const stored = {
+      id: 'pipe',
+      current: '{"kind":"start","number":-1,"batchEnd":3}',
+      finalized: '',
+      rollback_chain: '[]',
+      timestamp: '2026-10-28T10:00:00.000Z',
+      sign: 1,
+    }
+    const inserts: any[] = []
+    const store = {
+      client: { connectionParams: { database: 'default' } },
+      query: async () => ({ json: async () => [stored] }),
+      insert: async (args: any) => {
+        inserts.push(args)
+      },
+    }
+    const state = new ClickhouseState(store as any, { id: 'pipe' })
+
+    await state.getCursor()
+    await state.saveStartCursor({ from: 0, to: 7 })
+    await state.saveStartCursor({ from: 0, to: 9 })
+    const [replaced, next] = inserts.map((insert) => insert.values)
+
+    expect(replaced).toMatchObject([
+      { ...stored, sign: -1 },
+      { current: '{"kind":"start","number":-1,"batchEnd":7}', sign: 1 },
+    ])
+    expect(next).toHaveLength(1)
+  })
+
+  withStoppedClock('stamps each row later than the one before, within one millisecond too', async ({ now }) => {
+    const { store, inserts } = makeStore(block(100))
+    const state = new ClickhouseState(store as any, {})
+
+    await state.saveStartCursor({ from: 0, to: 5 })
+    await state.saveCursor(ctxFor(block(5), block(2), []))
+    await state.saveCursor(ctxFor(block(9), block(2), []))
+    const stamps = inserts.map((insert) => insert.values[0].timestamp)
+
+    expect(stamps).toEqual([now, now + 1, now + 2])
   })
 })

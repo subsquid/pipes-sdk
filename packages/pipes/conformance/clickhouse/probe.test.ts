@@ -7,6 +7,7 @@ const PIPE_ID = 'probe'
 const BEYOND_DOUBLE = '9007199254740993'
 
 const cursor = (number: number, branch = '') => ({ number, hash: `0x${branch}${number}` })
+const start = (number: number, batchEnd: unknown) => ({ kind: 'start', number, batchEnd })
 
 type SyncRow = {
   id?: string
@@ -70,6 +71,7 @@ describe('readClickhouseSnapshot', () => {
 
     expect(snapshot).toStrictEqual({
       sync: [],
+      start: undefined,
       state: undefined,
       tables: { transfers: { rows: [] }, approvals: { rows: [] } },
     })
@@ -206,5 +208,64 @@ describe('readClickhouseSnapshot', () => {
     ])
 
     await expect(read(database)).rejects.toThrow('sync row 0 is not an IB-20 sync row: it is in the table 2 times')
+  })
+
+  it('reads a start cursor that is the only row as the first batch it began, with no commit', async ({ database }) => {
+    await writeSync(database, [{ current: json(start(-1, 6)), written: 1_000 }])
+
+    const snapshot = await read(database)
+
+    expect(snapshot.start).toStrictEqual({ from: 0, to: 6 })
+    expect(snapshot.sync).toStrictEqual([])
+    expect(snapshot.state).toBeUndefined()
+  })
+
+  it('leaves out a start cursor the first commit superseded', async ({ database }) => {
+    await writeSync(database, [
+      { current: json(start(-1, 6)), written: 1_000 },
+      { current: json(cursor(6)), written: 2_000 },
+    ])
+
+    const snapshot = await read(database)
+
+    expect(snapshot.start).toBeUndefined()
+    expect(snapshot.sync).toStrictEqual([{ current: cursor(6), finalized: undefined, rollbackChain: [] }])
+  })
+
+  it('refuses a start cursor above a commit: the binding writes one only with no row', async ({ database }) => {
+    await writeSync(database, [
+      { current: json(cursor(6)), written: 1_000 },
+      { current: json(start(6, 13)), written: 2_000 },
+    ])
+
+    await expect(read(database)).rejects.toThrow('sync row 1 is a start cursor above 1 other rows')
+  })
+
+  it.for([
+    [
+      'a batch end that is no block',
+      { current: json(start(-1, 'x')) },
+      'current {"kind":"start","number":-1,"batchEnd":"x"} names no blocks',
+    ],
+    [
+      'a batch end below its start',
+      { current: json(start(6, 3)) },
+      'current {"kind":"start","number":6,"batchEnd":3} names no blocks',
+    ],
+    ['a floor', { current: json(start(-1, 6)), finalized: json(cursor(0)) }, 'it carries a floor'],
+    ['a chain', { current: json(start(-1, 6)), chain: json([cursor(0)]) }, 'it carries a floor "" or a chain'],
+  ] as const)('refuses a start cursor with %s', async ([, row, reason], { database }) => {
+    await writeSync(database, [{ ...row, written: 1_000 }])
+
+    await expect(read(database)).rejects.toThrow(`sync row 0 is not an IB-20 start cursor: ${reason}`)
+  })
+
+  it('refuses a start cursor that is in the table twice', async ({ database }) => {
+    await writeSync(database, [
+      { current: json(start(-1, 6)), written: 1_000 },
+      { current: json(start(-1, 6)), written: 1_000 },
+    ])
+
+    await expect(read(database)).rejects.toThrow('sync row 0 is not an IB-20 start cursor: it is in the table 2 times')
   })
 })

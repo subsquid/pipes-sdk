@@ -53,12 +53,10 @@ describe('clickhouse target template builder', () => {
             });
           },
           onRollback: async ({ safeCursor, store }) => {
-            await store.removeAllRows({
+            await store.removeRowsAfter(safeCursor, {
               tables: [
                 'erc20_transfers',
               ],
-              where: 'block_number > {latest:UInt32}',
-              params: { latest: safeCursor.number },
             });
           },
         })"
@@ -117,13 +115,11 @@ describe('clickhouse target template builder', () => {
             });
           },
           onRollback: async ({ safeCursor, store }) => {
-            await store.removeAllRows({
+            await store.removeRowsAfter(safeCursor, {
               tables: [
                 'weth_9_approval',
                 'weth_9_transfer',
               ],
-              where: 'block_number > {latest:UInt32}',
-              params: { latest: safeCursor.number },
             });
           },
         })"

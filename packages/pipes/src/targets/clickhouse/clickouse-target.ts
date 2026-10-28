@@ -2,8 +2,8 @@ import type { ClickHouseClient } from '@clickhouse/client'
 
 import { BlockCursor, HookContext, Logger, createTarget } from '~/core/index.js'
 
-import { ClickhouseState } from './clickhouse-state.js'
-import { ClickhouseStore } from './clickhouse-store.js'
+import { ClickhouseState, isStartCursor, rollbackCursorOf } from './clickhouse-state.js'
+import { ClickhouseStore, RollbackCursor } from './clickhouse-store.js'
 import { CLICKHOUSE_ERROR_CODES, ClickhouseTargetError } from './errors.js'
 
 /**
@@ -56,13 +56,19 @@ export function clickhouseTarget<T>({
    * Called when previously written blocks must be removed. `reason: 'recovery'` fires on
    * every restart with a persisted cursor — it cleans up rows a possibly-interrupted
    * previous run wrote past the saved cursor. `reason: 'fork'` fires on chain forks.
-   * The typical implementation calls `store.removeAllRows` with
-   * `where: 'block_number > {latest:UInt32}'` and `params: { latest: safeCursor.number }`.
-   * That `where` matches every pipe's rows: on a table several pipes write, also filter on a
-   * column that tells this pipe's rows apart.
+   * The typical implementation is `store.removeRowsAfter(safeCursor, { tables })`, which
+   * removes every row above the cursor: on a table several pipes write, also pass a `where`
+   * that picks this pipe's rows.
+   *
+   * Where the target knows the highest block this pipe may have stored above the cursor, it
+   * passes it as `safeCursor.upTo`, and `removeRowsAfter` stops there: on a fork, the cursor the
+   * fork rolls back from; after a run that stopped inside its first batch, that batch's last
+   * block. In the second case the cursor is one block below the range start, saved before the
+   * batch's data, so a handler that writes its own condition removes every row from the range
+   * start on, and at a range start of 0 gets `number: -1`.
    *
    * On CollapsingMergeTree / VersionedCollapsingMergeTree tables (or their Replicated
-   * variants) with a `sign` column, `store.removeAllRows` removes rows by inserting
+   * variants) with a `sign` column, `store.removeRowsAfter` removes rows by inserting
    * cancel rows (sign = -1) — the only removal mechanism that propagates through
    * materialized views. On any other engine it falls back to a lightweight `DELETE` with
    * a warning: the table itself is cleaned, but materialized views built on it keep the
@@ -73,13 +79,16 @@ export function clickhouseTarget<T>({
   onRollback?: (ctx: {
     reason: 'recovery' | 'fork'
     store: ClickhouseStore
-    safeCursor: BlockCursor
+    safeCursor: RollbackCursor
   }) => unknown | Promise<unknown>
 }) {
   // TODO Can we generate row ID based on query?
 
   const store = new ClickhouseStore(client)
   const state = new ClickhouseState(store, settings)
+
+  // The cursor of the last batch saved: no row of this pipe lies above it once recovery has run
+  let lastCommit: BlockCursor | undefined
 
   return createTarget<T>({
     write: async ({ read, logger, id, finalized }) => {
@@ -108,14 +117,27 @@ export function clickhouseTarget<T>({
         await onRollback?.({
           reason: 'recovery',
           store,
-          safeCursor: cursor.latest,
+          safeCursor: rollbackCursorOf(cursor.latest),
         })
       }
+
+      // A start cursor makes a crash in the first batch recoverable like any other. Resuming from
+      // one, the replayed batch may end later, so it gets a start cursor of its own.
+      const resumedFromStart = cursor !== undefined && isStartCursor(cursor.latest)
+      let firstBatch = !cursor || resumedFromStart
+      lastCommit = resumedFromStart ? undefined : cursor?.latest
 
       for await (const { data, ctx } of read(cursor)) {
         const target = ctx.profiler.start({ name: 'clickhouse', labels: 'db' })
 
         try {
+          if (firstBatch) {
+            const blocks = { from: ctx.stream.state.initial, to: ctx.stream.state.current.number }
+
+            await target.measure({ name: 'insert start cursor', labels: 'db' }, () => state.saveStartCursor(blocks))
+            firstBatch = false
+          }
+
           await target.measure('data handler', async (profiler) => {
             await onData({
               store,
@@ -128,6 +150,7 @@ export function clickhouseTarget<T>({
           })
 
           await state.saveCursor(ctx, target)
+          lastCommit = ctx.stream.state.current
         } finally {
           target.end()
         }
@@ -154,7 +177,7 @@ export function clickhouseTarget<T>({
       await onRollback({
         reason: 'fork',
         store,
-        safeCursor: cursor,
+        safeCursor: lastCommit ? { ...cursor, upTo: lastCommit.number } : cursor,
       })
       return cursor
     },

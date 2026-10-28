@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '@clickhouse/client'
 
 import type { Cursor, OracleRow, OracleState } from '../oracle/reference-model.js'
-import { type ClickhouseSnapshot, type SyncRecord, isHeight } from '../oracle/validators.js'
+import { type ClickhouseSnapshot, type FirstBatch, type SyncRecord, isHeight } from '../oracle/validators.js'
 
 const quote = (name: string) => `"${name.replaceAll('"', '""')}"`
 
@@ -83,7 +83,7 @@ export async function readClickhouseSnapshot<Table extends string>({
     : []
   requireOrdered(raw, sync)
 
-  const records = raw.map((row, index) => parseSync(row, `${sync} row ${index}`))
+  const { records, start } = splitStart(raw, sync)
   const snapshots = {} as ClickhouseSnapshot<Table>['tables']
 
   for (const table of tables) {
@@ -97,7 +97,7 @@ export async function readClickhouseSnapshot<Table extends string>({
     snapshots[table] = { rows: rows.flatMap((row) => netted(row, table, blockColumn)) }
   }
 
-  return { sync: records, state: stateOf(records), tables: snapshots }
+  return { sync: records, start, state: stateOf(records), tables: snapshots }
 }
 
 /** Every row the snapshot holds: table by table in declaration order, each in block order. */
@@ -158,6 +158,72 @@ function netted(row: Record<string, unknown>, table: string, blockColumn: string
   const value = { ...columns, [blockColumn]: BigInt(block) }
 
   return Array.from({ length: count }, () => ({ table, block, value }))
+}
+
+/**
+ * The commits apart from the start cursor (IB-20): the row the binding writes before its first
+ * batch's data, when the pipe has no row at all, and which the batch's own cursor row supersedes. It
+ * is the resume state only while it is the only row. A start cursor below another row of the pipe is
+ * not a state the binding writes, so it fails the read.
+ */
+function splitStart(raw: RawSync[], sync: string): { records: SyncRecord[]; start: FirstBatch | undefined } {
+  const records: SyncRecord[] = []
+  let start: FirstBatch | undefined
+
+  raw.forEach((row, index) => {
+    const label = `${sync} row ${index}`
+    const first = parseStart(row, label)
+
+    if (first === undefined) {
+      records.push(parseSync(row, label))
+      start = undefined
+
+      return
+    }
+
+    if (index > 0) {
+      throw new Error(`${label} is a start cursor above ${index} other rows: the binding writes one only with none`)
+    }
+
+    start = first
+  })
+
+  return { records, start }
+}
+
+/** The blocks a start cursor stands for, or `undefined` for a row that is no start cursor. */
+function parseStart(row: RawSync, label: string): FirstBatch | undefined {
+  const fail = (reason: string): never => {
+    throw new Error(`${label} is not an IB-20 start cursor: ${reason}`)
+  }
+
+  // A row whose current is not JSON is no start cursor; parseSync names what is wrong with it
+  let current: { kind?: unknown; number?: unknown; batchEnd?: unknown } | null
+  try {
+    current = JSON.parse(row.current)
+  } catch {
+    return
+  }
+
+  if (typeof current !== 'object' || current === null || current.kind !== 'start') {
+    return
+  }
+
+  if (row[NET] !== '1') {
+    fail(`it is in the table ${row[NET]} times`)
+  }
+
+  const from = typeof current.number === 'number' ? current.number + 1 : undefined
+  const to = current.batchEnd
+  if (!isHeight(from) || !isHeight(to) || to < from) {
+    fail(`current ${row.current} names no blocks from one past its number to its batchEnd`)
+  }
+
+  if (row.finalized !== '' || row.rollback_chain !== '[]') {
+    fail(`it carries a floor ${JSON.stringify(row.finalized)} or a chain ${row.rollback_chain}`)
+  }
+
+  return { from: from as number, to: to as number }
 }
 
 /** The IB-20 shape of a sync row. Whether its cursors are sound is for the validators to judge. */

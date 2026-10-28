@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 import { createClient } from '@clickhouse/client'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -703,5 +705,77 @@ describe('Clickhouse store', () => {
       expect(await indexCount(store, 'idx_auto')).toBe(1)
       expect(await selectFinal(store, 'idx_auto')).toHaveLength(0)
     })
+  })
+})
+
+describe('ClickhouseStore.removeRowsAfter', () => {
+  type Events = { store: ClickhouseStore; blocks: (pipe: string) => Promise<number[]> }
+
+  /** A database of the test's own, with an `events` table two pipes write: a row per block each. */
+  const withEvents = it.extend<{ events: Events }>({
+    events: async ({}, use) => {
+      const name = `store_rows_after_${randomBytes(6).toString('hex')}`
+      await admin.command({ query: `CREATE DATABASE ${name}` })
+      await admin.command({
+        query: `CREATE TABLE ${name}.events (block_number UInt32, pipe String, sign Int8)
+          ENGINE = CollapsingMergeTree(sign) ORDER BY (pipe, block_number)`,
+      })
+      const scoped = createClient({ ...connection, database: name })
+      const store = new ClickhouseStore(scoped)
+      const rows = ['a', 'b'].flatMap((pipe) => range(0, 9).map((block) => ({ block_number: block, pipe, sign: 1 })))
+      await store.insert({ table: 'events', values: rows, format: 'JSONEachRow' })
+
+      const blocks = async (pipe: string) => {
+        const result = await store.query({
+          query: `SELECT block_number FROM events WHERE pipe = {pipe:String}
+            GROUP BY block_number HAVING sum(sign) > 0 ORDER BY block_number`,
+          query_params: { pipe },
+          format: 'JSONEachRow',
+        })
+        const stored = await result.json<{ block_number: number }>()
+
+        return stored.map((row) => row.block_number)
+      }
+
+      await use({ store, blocks })
+
+      await scoped.close()
+      await admin.command({ query: `DROP DATABASE ${name} SYNC` })
+    },
+  })
+
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i)
+
+  withEvents('removes the rows above the cursor that `where` picks', async ({ events }) => {
+    await events.store.removeRowsAfter({ number: 2 }, { tables: 'events', where: "pipe = 'a'" })
+
+    expect(await events.blocks('a')).toEqual([0, 1, 2])
+    expect(await events.blocks('b')).toEqual(range(0, 9))
+  })
+
+  withEvents('takes a cursor of -1 as one before every block', async ({ events }) => {
+    await events.store.removeRowsAfter({ number: -1 }, { tables: 'events', where: "pipe = 'a'" })
+
+    expect(await events.blocks('a')).toEqual([])
+  })
+
+  withEvents('refuses a block column that is not a plain identifier (E2006)', async ({ events }) => {
+    const removal = events.store.removeRowsAfter({ number: 2 }, { tables: 'events', column: 'block_number OR 1' })
+
+    await expect(removal).rejects.toMatchObject({ code: 'E2006' })
+    expect(await events.blocks('a')).toEqual(range(0, 9))
+  })
+
+  withEvents('given `upTo`, removes the blocks up to it only, with no `where` too', async ({ events }) => {
+    await events.store.removeRowsAfter({ number: 1, upTo: 4 }, { tables: 'events' })
+
+    expect(await events.blocks('a')).toEqual([0, 1, 5, 6, 7, 8, 9])
+    expect(await events.blocks('b')).toEqual([0, 1, 5, 6, 7, 8, 9])
+  })
+
+  withEvents('given `upTo` over a cursor at -1, removes from block 0', async ({ events }) => {
+    await events.store.removeRowsAfter({ number: -1, upTo: 3 }, { tables: 'events', where: "pipe = 'a'" })
+
+    expect(await events.blocks('a')).toEqual([4, 5, 6, 7, 8, 9])
   })
 })

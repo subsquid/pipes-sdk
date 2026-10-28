@@ -655,13 +655,18 @@ export type ClickhouseTableSnapshot<Row extends Attributed = OracleRow> = {
   rows: Row[]
 }
 
+/** The blocks of a first batch that a class-A start cursor stands for (IB-20). */
+export type FirstBatch = { from: number; to: number }
+
 /**
  * One read of a class-A store: the pipe's sync rows, the state they hold, and every declared
  * table. Every field is required, so no check can be skipped by leaving its input out.
  */
 export type ClickhouseSnapshot<Table extends string = string, Row extends Attributed = OracleRow> = {
-  /** The pipe's sync rows, oldest first. */
+  /** The pipe's sync rows, oldest first: its commits, without the start cursor. */
   sync: SyncRecord[]
+  /** The first batch the pipe began with no commit yet, when its start cursor is its only row. */
+  start: FirstBatch | undefined
   /** ⟨C, F⟩ from the newest row, RC from the newest fragment of each block; `undefined` only with no row. */
   state: OracleState | undefined
   /** Every declared table, by name, in declaration order. */

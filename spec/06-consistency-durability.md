@@ -40,8 +40,9 @@ cursor. Recovery: on every resume the sink invokes the repair hook (`recovery`, 
 cursor) which MUST remove rows above the cursor before streaming resumes. Delivery:
 at-least-once at the storage layer, effectively exactly-once **iff** the repair
 obligation (RP-42) is met. *(Hook optional by design — the binding is schema-blind; its
-absence is warned, not repaired: an accepted deviation, ADR-15. With no cursor persisted
-yet, the hook is never called, so a crash in the first batch is not repaired — GAP-44.)*
+absence is warned, not repaired: an accepted deviation, ADR-15. So that a crash in the first
+batch leaves a cursor for the hook to start above, the binding appends a start cursor, one block
+below the range start, before the batch's data; the same ADR.)*
 
 **CN-14 — Class ∅ (ephemeral).** No persistence; every run is a cold start; only
 rows delivered by the finalized-only route are emitted to author code, immediately.
@@ -120,7 +121,8 @@ units are never touched. A fork response on that route is a portal-contract viol
 and halts safely before further publication (WP-45, FM-13).
 
 **CN-33 — A.** Fork resolves the ancestor from own-key rollback records, then delegates
-deletion to the repair hook (`fork`, ancestor). The storage-level mechanism MUST be
+deletion to the repair hook (`fork`, ancestor), bounded above by the cursor it rolls back from:
+the pipe's rows lie at or below it. The storage-level mechanism MUST be
 idempotent under duplicated application and MUST NOT corrupt tables that share the
 store (engine-capability guards at startup).
 

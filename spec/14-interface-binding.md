@@ -88,8 +88,18 @@ network-dependent unit (DEF-1; GAP-24).
 `id String, current String (cursor JSON), finalized String (cursor JSON | '' when
 absent), rollback_chain String (JSON array), timestamp DateTime(3), sign Int8`,
 `ENGINE = CollapsingMergeTree(sign) ORDER BY (timestamp, id)`. Cursor rows append with
-`sign=+1`; retention cancels with `sign=-1`; newest row per id = resume state
-*(wall-clock ordering: GAP-10)*. Rollback mechanism by engine family:
+`sign=+1`, each stamped at least a millisecond after the process's previous row; retention
+cancels with `sign=-1`; newest row per id = resume state *(wall-clock ordering across restarts:
+GAP-10)*. A pipe with no row appends a **start cursor** before its first batch's data:
+`current` = `{"kind": "start", "number": <range start − 1>, "batchEnd": <the batch's last
+block>}`, `finalized` '', `rollback_chain` `[]`; `kind` tells it from a batch cursor. The batch's
+own cursor row supersedes it by being newer; until then a restart resumes from it like from any
+cursor, calling the repair hook with `{ number, upTo: batchEnd }` (ADR-15). The replayed first
+batch may end later, so that run appends a start cursor of its own, in the same insert as the
+cancel row of the one it resumed from. On a fork the hook gets the ancestor with `upTo` set to
+the cursor the fork rolls back from. The documented removal, `store.removeRowsAfter`, writes the
+block condition itself and, given `upTo`, removes no block past it. Rollback mechanism by engine
+family:
 Collapsing-family engines → net-cancel rows computed via `sum(sign)` grouping (with
 insert-dedup and pre-merge-collapse disabled on those inserts; with the table catalog
 unreadable, and in retention, a `FINAL` read-back instead — GAP-45); other engines →

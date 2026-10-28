@@ -7,6 +7,7 @@ import {
   crashAt,
   cursorOf,
   it,
+  readClickhouseStore,
   resumeToEnd,
   rowsBetween,
   runUnwatched,
@@ -18,7 +19,8 @@ import { rowsOfClickhouse } from './probe.js'
 /**
  * The class-A commit protocol (CN-13) request by request. Each batch inserts its rows table by
  * table (transfers first, a table with no rows in the batch skipped), then appends its cursor row;
- * the first batch also runs the sync table's retention read. A restart first calls the repair hook,
+ * the first batch appends a start cursor before its rows, and runs the sync table's retention read
+ * after its cursor row. A restart first calls the repair hook,
  * which cancels the rows above the cursor table by table, both tables at once. A point names its
  * batch by its last block: S1's first batch ends at 6, its second at 13.
  */
@@ -46,12 +48,26 @@ const POINTS = {
   },
   cursorSent: { name: 'cursor write sent, unanswered', request: '^insert sync$', inBatch: 13, at: 1, when: 'sent' },
   afterCursor: { name: 'after the cursor write', request: '^insert sync$', inBatch: 13, at: 1, when: 'after' },
+  firstBatchStarted: {
+    name: 'the first batch, after its start cursor, before its data',
+    request: '^insert transfers$',
+    inBatch: 6,
+    at: 1,
+    when: 'before',
+  },
   firstBatch: {
     name: 'the first batch, after its data, before the first cursor write',
     request: '^insert sync$',
     inBatch: 6,
-    at: 1,
+    at: 2,
     when: 'before',
+  },
+  firstCursor: {
+    name: 'the first batch, after the first cursor write',
+    request: '^insert sync$',
+    inBatch: 6,
+    at: 2,
+    when: 'after',
   },
   setUp: { name: 'the first run, after the sync table is made', request: '^create sync$', at: 1, when: 'after' },
   recovery: { name: 'recovery, after the cancel rows of one table', request: '^cancel ', at: 1, when: 'after' },
@@ -298,7 +314,7 @@ describe('ClickHouse (class A) · S1 backfill · killed at each commit step (CT-
     expect(rowsOfClickhouse(end)).toEqual(twice)
   })
 
-  it('GAP-44 (open): a crash before the first cursor write leaves rows no recovery removes, and the restart stores them again', async ({
+  it('the first batch, after its data: the restart removes it from the start cursor, and converges', async ({
     simulateS1,
     database,
   }) => {
@@ -313,15 +329,138 @@ describe('ClickHouse (class A) · S1 backfill · killed at each commit step (CT-
       point: POINTS.firstBatch,
     })
 
-    expect(killed).toEqual({ request: 'insert sync', sent: DATA_WRITES })
+    expect(killed).toEqual({ request: 'insert sync', sent: ['insert sync', ...DATA_WRITES] })
     expect(store.state).toBeUndefined()
+    expect(store.start).toEqual({ from: scenario.range.from, to: batches[0].current.number })
     expect(window).toEqual(rowsBetween(scenario, undefined, batches[0].current))
 
-    // The binding calls the repair hook only over a persisted cursor, so the rows of the first
-    // batch stay and the restart writes them again. Flip to `resumeToEnd` when GAP-44 closes.
-    const end = await runUnwatched({ scenario, simulator, database })
+    await resumeToEnd({ scenario, simulator, database, model, store })
+  })
 
+  it('the first batch, after its start cursor, before its data: the restart removes nothing, and converges', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const { store, batches, killed, window } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.firstBatchStarted,
+    })
+
+    expect(killed).toEqual({ request: 'insert transfers', sent: ['insert sync'] })
+    expect(store.start).toEqual({ from: scenario.range.from, to: batches[0].current.number })
+    expect(window).toEqual([])
+
+    await resumeToEnd({ scenario, simulator, database, model, store })
+  })
+
+  it('the first batch, after the first cursor write: the cursor supersedes the start cursor, and the restart resumes after it', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const { store, batches, killed, window } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.firstCursor,
+    })
+
+    expect(killed).toEqual({ request: 'insert sync', sent: ['insert sync', ...DATA_WRITES, 'insert sync'] })
+    expect(store.start).toBeUndefined()
+    expect(cursorOf(store)).toStrictEqual(batches[0].current)
+    expect(window).toEqual([])
+
+    await resumeToEnd({ scenario, simulator, database, model, store })
+  })
+
+  it('a crash in the recovery of the first batch, after the cancel rows of one table: recovery runs again and converges (CN-41)', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.firstBatch })
+    const second = await crashAt({ scenario, simulator, database, model, point: POINTS.recovery })
+    const cancelled = second.killed.request.replace('cancel ', '')
+    const left = first.window.filter((row) => row.table !== cancelled)
+
+    // Whether the other table's cancel went out first is free, as in any recovery
+    expect(second.batches).toEqual([])
+    expect(second.store.start).toEqual(first.store.start)
+    expect([[], left]).toContainEqual(second.window)
+
+    await resumeToEnd({ scenario, simulator, database, model, store: second.store })
+  })
+
+  it('a second crash in the replayed first batch: its own start cursor replaces the first, and the restart converges (CN-42)', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.firstBatch })
+    const second = await crashAt({ scenario, simulator, database, model, point: POINTS.firstBatch })
+
+    expect(second.store.start).toEqual(first.store.start)
+    expect(second.window).toEqual(first.window)
+
+    await resumeToEnd({ scenario, simulator, database, model, store: second.store })
+  })
+
+  it('the first batch without a repair hook: the restart warns, and stores the batch a second time (ADR-15)', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const { window } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.firstBatch,
+      repair: 'none',
+    })
+    const { logger, warnings } = warningsLogger()
+    const end = await runUnwatched({ scenario, simulator, database, repair: 'none', logger })
+
+    expect(warnings).toEqual([expect.stringContaining('No onRollback handler is configured')])
     expect(end.state).toStrictEqual(scenario.end(simulator).state)
     expect(rowsOfClickhouse(end)).toEqual(inStoreOrder([...S1_ROWS, ...window]))
+  })
+
+  it('the first batch, with a hook that binds the cursor as unsigned: the restart fails at block -1 and removes nothing', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const { store } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.firstBatch,
+      repair: 'predicate',
+    })
+    const requests = simulator.chain.requests.length
+    const restart = runUnwatched({ scenario, simulator, database, repair: 'predicate' })
+
+    await expect(restart).rejects.toThrow('Value -1 cannot be parsed as UInt64')
+    expect(simulator.chain.requests, 'the requests of the failed restart').toHaveLength(requests)
+    expect(await readClickhouseStore(database), 'the store after the failed restart').toStrictEqual(store)
   })
 })

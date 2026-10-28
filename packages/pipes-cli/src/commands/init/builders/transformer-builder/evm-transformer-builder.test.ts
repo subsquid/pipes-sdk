@@ -108,12 +108,10 @@ describe('EVM Template Builder', () => {
             });
           },
           onRollback: async ({ safeCursor, store }) => {
-            await store.removeAllRows({
+            await store.removeRowsAfter(safeCursor, {
               tables: [
                 'erc20_transfers',
               ],
-              where: 'block_number > {latest:UInt32}',
-              params: { latest: safeCursor.number },
             });
           },
         }))
@@ -248,13 +246,11 @@ describe('EVM Template Builder', () => {
             });
           },
           onRollback: async ({ safeCursor, store }) => {
-            await store.removeAllRows({
+            await store.removeRowsAfter(safeCursor, {
               tables: [
                 'erc20_transfers',
                 'uniswap_v3_swaps',
               ],
-              where: 'block_number > {latest:UInt32}',
-              params: { latest: safeCursor.number },
             });
           },
         }))

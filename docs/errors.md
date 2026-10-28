@@ -267,7 +267,7 @@ The table has no `sign` column, so cancel-row rollback cannot work.
 
 ### E2006 · Invalid rollback index column
 
-The column passed to `ensureRollbackIndex` is not a plain identifier.
+The column passed to `ensureRollbackIndex` or `removeRowsAfter` is not a plain identifier.
 
 **Fix** — pass a plain identifier (letters, digits, underscores; no spaces or expressions).
 
@@ -278,10 +278,9 @@ written above the fork point cannot be removed. Returning a rewound cursor witho
 would leave diverged data, so the target refuses instead. On the hot stream a startup warning
 announces this risk before a fork ever arrives.
 
-**Fix** — configure `onRollback` on the ClickHouse target. The typical implementation calls
-`store.removeAllRows` with `where: 'block_number > {latest:UInt32}'` and
-`params: { latest: safeCursor.number }`. A pipe reading `/finalized-stream` never forks and does
-not need one.
+**Fix** — configure `onRollback` on the ClickHouse target. The typical implementation is
+`store.removeRowsAfter(safeCursor, { tables })`. A pipe reading `/finalized-stream` never forks
+and does not need one.
 
 ---
 

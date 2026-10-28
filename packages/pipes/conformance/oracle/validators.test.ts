@@ -530,7 +530,7 @@ describe('structural validators', () => {
       records: SyncRecord[],
       tables: ClickhouseSnapshot['tables'],
       state: OracleState | undefined = records.at(-1) && { ...records.at(-1), rollbackChain: [] },
-    ): ClickhouseSnapshot => ({ sync: records, state, tables })
+    ): ClickhouseSnapshot => ({ sync: records, start: undefined, state, tables })
 
     it('passes a store whose rows and sync rows all sit at or below the cursor', () => {
       const snapshot = snapshotOf([sync(4, 2, [3, 4]), sync(9, 4, [9])], {

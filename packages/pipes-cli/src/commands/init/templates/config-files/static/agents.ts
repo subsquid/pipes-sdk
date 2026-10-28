@@ -48,7 +48,7 @@ Keep the pipeline linear and declarative. Combine multiple decoders by passing a
 When persisting:
 - Use \`onStart\` to ensure tables exist
 - Use \`onData\` to batch inserts
-- Use \`onRollback\` with the provided \`safeCursor\` to delete rows above the safe point
+- Use \`onRollback\` with \`store.removeRowsAfter(safeCursor, { tables })\` to delete rows above the safe point
 
 ## Stateful indexing
 For long-running jobs, guard against forks:
@@ -220,11 +220,7 @@ async function main() {
           })
         },
         onRollback: async ({ safeCursor, store }) => {
-          await store.removeAllRows({
-            tables: ['erc20_transfers'],
-            where: \`block_number > {latest:UInt32}\`,
-            params: { latest: safeCursor.number },
-          })
+          await store.removeRowsAfter(safeCursor, { tables: ['erc20_transfers'] })
         },
       }),
     )
