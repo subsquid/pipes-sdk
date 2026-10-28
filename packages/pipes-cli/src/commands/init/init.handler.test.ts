@@ -261,7 +261,7 @@ describeIntegration('InitHandler', () => {
             dockerfile: Dockerfile
           environment:
             DB_CONNECTION_STR: postgresql://postgres:password@postgres:5432/pipes
-          command: ["sh", "-lc", "pnpm db:generate && pnpm db:migrate && node dist/index.js"]
+          command: ["sh", "-lc", "pnpm run db:generate && pnpm run db:migrate && node dist/index.js"]
           depends_on:
             postgres:
               condition: service_healthy
