@@ -39,6 +39,7 @@ import {
   resolvePubsubClient,
 } from './publisher.js'
 import {
+  META_WIRE_CONFIG,
   OutboxRow,
   PendingOperation,
   PubsubState,
@@ -210,7 +211,6 @@ export type PubsubTargetOptions<T> = {
 
 const CAP_BYTES_PER_SECOND = 1024 * 1024
 const META_GO_LIVE = 'go_live_block'
-const META_WIRE_CONFIG = 'wire_config'
 const STATS_EVERY_BATCHES = 25
 
 /** Chain-scale: block production and chain-to-portal propagation dominate. */

@@ -10,10 +10,12 @@ import { pubsubTarget } from './pubsub-target.js'
 import {
   FakePublisher,
   cleanupTempState,
+  downgradeToSchemaV3,
   keyedBlockDecoder,
   makeBatchContext,
   portalBlocks,
   tempStatePath,
+  withStatePath,
 } from './test-support.js'
 import { windowTopic } from './window-topic.js'
 
@@ -1258,6 +1260,34 @@ describe('pubsubTarget', () => {
       })
 
       expect(restarted.operations()).toHaveLength(1)
+    })
+  })
+
+  describe('upgrade from a schema 3 state', () => {
+    // The outbox still holds a row when the producer stops, so recovery has to encode it under
+    // the migrated wire config before the first new batch.
+    withStatePath('drains the unconfirmed rows, then continues the change sequence', async ({ statePath }) => {
+      await driveBatches({ statePath, publisher: new FakePublisher(), blocks: [1], finalized: 1 })
+
+      const failing = new FakePublisher()
+      failing.failOn = () => new Error('network down')
+      await expect(driveBatches({ statePath, publisher: failing, blocks: [2], finalized: 1 })).rejects.toThrow(
+        'network down',
+      )
+
+      await downgradeToSchemaV3(statePath)
+
+      const upgraded = new FakePublisher()
+      await driveBatches({
+        statePath,
+        publisher: upgraded,
+        blocks: [3],
+        finalized: 1,
+        targetOptions: { allowColdStart: false },
+      })
+
+      const sequence = upgraded.operations().map((operation) => operation.seq)
+      expect(sequence).toEqual([2, 3])
     })
   })
 

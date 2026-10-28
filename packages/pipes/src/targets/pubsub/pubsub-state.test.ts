@@ -10,6 +10,7 @@ import { testLogger } from '~/testing/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 import { CommitInput, INTERNAL_DRIVER, PendingOperation, SqlitePubsubState } from './pubsub-state.js'
+import { downgradeToSchemaV3, inspectStateFile, withStatePath } from './test-support.js'
 
 const encoder = new TextEncoder()
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -112,6 +113,25 @@ function operation(overrides: Partial<PendingOperation> & { id?: string } = {}):
     ...overrides,
   }
 }
+
+/** Opens states on the test's own path and closes every one of them when the test ends. */
+const withState = withStatePath.extend<{ open: () => Promise<{ state: SqlitePubsubState; coldStart: boolean }> }>({
+  open: async ({ statePath }, use) => {
+    const states: SqlitePubsubState[] = []
+
+    await use(async () => {
+      const state = new SqlitePubsubState({ path: statePath })
+      states.push(state)
+      const { coldStart } = await state.open({ cursorKey: 'test-pipe', logger: testLogger() })
+
+      return { state, coldStart }
+    })
+
+    for (const state of states) {
+      await state.close()
+    }
+  },
+})
 
 describe('SqlitePubsubState', () => {
   it('reports a cold start once and resumes warm afterwards', async () => {
@@ -297,14 +317,86 @@ describe('SqlitePubsubState', () => {
     expect(result.coldStart).toBe(false)
   })
 
-  // No in-place migration: a file another version wrote is refused rather than guessed at.
-  it('refuses a state file written by another schema version', async () => {
-    const path = statePath()
-    const first = await openState(path)
-    await first.state.setMeta('schema_version', '1')
+  // Only schema 3 migrates in place; anything older is refused rather than guessed at.
+  withState('refuses a state file written by a schema it cannot migrate', async ({ open }) => {
+    const first = await open()
+    await first.state.setMeta('schema_version', '2')
     await first.state.close()
 
-    await expect(openState(path)).rejects.toBeInstanceOf(PubsubTargetError)
+    await expect(open()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
+  })
+
+  describe('schema 3 migration', () => {
+    withState('keeps the change sequence and the unconfirmed outbox', async ({ statePath, open }) => {
+      const first = await open()
+      await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
+      await first.state.confirm((await first.state.pending()).map((row) => row.rowId))
+      await commit(first.state, {
+        operations: [operation({ id: 'row-2' })],
+        ledger: [],
+        cursor: block(101),
+        finalized: null,
+      })
+      await first.state.close()
+      await downgradeToSchemaV3(statePath)
+
+      const migrated = await open()
+      expect(migrated.coldStart).toBe(false)
+      expect(await migrated.state.getCursor()).toMatchObject({ latest: { number: 101 } })
+
+      await commit(migrated.state, {
+        operations: [operation({ id: 'row-3' })],
+        ledger: [],
+        cursor: block(102),
+        finalized: null,
+      })
+      const sequenced = (await migrated.state.pending()).map((row) => [row.id, row.seq])
+      expect(sequenced).toEqual([
+        ['row-2', 2],
+        ['row-3', 3],
+      ])
+    })
+
+    withState('leaves the file in the shape schema 4 creates', async ({ statePath, open }) => {
+      const first = await open()
+      await first.state.close()
+      await downgradeToSchemaV3(statePath)
+
+      const migrated = await open()
+      await migrated.state.close()
+
+      const file = await inspectStateFile(statePath)
+      expect(file).toMatchObject({ schemaVersion: '4', forkEpoch: undefined })
+      expect(file.outboxColumns).not.toContain('kind')
+    })
+
+    withState('rewrites the wire config the way schema 4 stores it', async ({ statePath, open }) => {
+      const wireConfig = JSON.stringify(['test-pipe', true, false, '{}', [['transfers', 'canonical']]])
+
+      const first = await open()
+      await first.state.setMeta('wire_config', wireConfig)
+      await first.state.close()
+      await downgradeToSchemaV3(statePath, { signalRoutes: ['events'] })
+
+      const { state } = await open()
+
+      expect(await state.getMeta('wire_config')).toBe(wireConfig)
+    })
+
+    // Schema 4 has no signal routes, so nothing could ever publish those rows.
+    withState('refuses unpublished signal operations and leaves the file as it was', async ({ statePath, open }) => {
+      const first = await open()
+      await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: null })
+      const [signal] = await first.state.pending()
+      await first.state.close()
+      await downgradeToSchemaV3(statePath, { signalRowIds: [signal.rowId] })
+
+      await expect(open()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
+
+      const file = await inspectStateFile(statePath)
+      expect(file).toMatchObject({ schemaVersion: '3', forkEpoch: '0' })
+      expect(file.outboxColumns).toContain('kind')
+    })
   })
 
   describe('fork compensation', () => {

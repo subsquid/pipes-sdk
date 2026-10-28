@@ -157,8 +157,9 @@ rollback chain for ancestor resolution — `manifest(route, topic, ordering_key,
 block_number, mode, op, id, attributes, payload)`, `materialized_baseline(route, topic,
 ordering_key, id, op, attributes, payload, block_number)`, `materialized_identity(id,
 route, topic, ordering_key, attributes)`, and `rollback_inverse(route, topic,
-ordering_key, id, op, payload)`. An older schema version is refused rather than migrated in
-place, and a state file that started empty is refused unless `allowColdStart` declares the
+ordering_key, id, op, payload)`. Schema 3 is migrated in place on open, keeping the
+producer-wide sequence, unless its outbox still holds signal operations (E2411); any other
+schema version is refused, and a state file that started empty is refused unless `allowColdStart` declares the
 bootstrap (E2420, CN-46).
 
 Each payload is a plain-object BigQuery CDC row containing the author's columns plus

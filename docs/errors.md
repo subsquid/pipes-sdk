@@ -702,11 +702,15 @@ numbers they already hold.
 
 ### E2411 · State schema version mismatch
 
-The state file was written by a different schema version of the target. State schemas are not
-migrated in place.
+The state file was written by a schema version of the target that this build cannot open. A
+schema 3 file, written by `1.0.0-beta.4`, is migrated in place on first open and keeps its change
+sequence. It is refused only while its outbox still holds signal operations, because signal routes
+no longer exist. Other schema versions are not migrated.
 
-**Fix** — run the SDK version that owns the state, or start a fresh state and re-bootstrap the
-destination. A new state file is a new sequencer; see the cold-start warning in the target's logs.
+**Fix** — for a schema 3 file with pending signal operations, let the SDK version that wrote it
+drain the outbox, then upgrade. For any other version, run the SDK version that owns the state, or
+start a fresh state and re-bootstrap the destination. A new state file is a new sequencer; see the
+cold-start warning in the target's logs.
 
 ### E2412 · Ordering key while message ordering is disabled
 
