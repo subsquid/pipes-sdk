@@ -421,8 +421,7 @@ target refuses to start.
 
 **Fix** — if you deliberately reset the sync table, also `TRUNCATE`/drop the tracked tables it names.
 If you're upgrading from a pre-`id`-keyed cursor, keep the old cursor by pinning
-`settings: { state: { id: 'stream' } }` — see the
-[migration guide](https://github.com/subsquid-labs/pipes-sdk/blob/main/packages/pipes/MIGRATION.md#10-target-cursors-are-now-keyed-by-the-pipe-id).
+`settings: { state: { id: 'stream' } }`.
 
 ### E2213 · BigQuery rejected rows in AppendRows
 

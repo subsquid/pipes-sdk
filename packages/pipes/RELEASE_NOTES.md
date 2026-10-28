@@ -354,7 +354,7 @@ This is an API and state compatibility break:
   column instead of 1970. A BigQuery subscription reads a JSON number in a `TIMESTAMP` column as
   microseconds since the epoch.
 - State schema v2 has no in-place migration. Drain the old outbox, then use fresh state, a fresh
-  namespace, and a re-bootstrapped destination. See `MIGRATION.md` for the full procedure.
+  namespace, and a re-bootstrapped destination.
 
 `docs/pubsub-bigquery.md` is the setup guide for the receiving end: the destination column type each
 encoded value requires, the table DDL, the subscription flags, the IAM grants for a subscription
