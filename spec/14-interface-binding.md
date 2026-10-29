@@ -227,10 +227,11 @@ producer fails coded (E2410).
 
 **IB-25 — Cache store.** SQLite table `data(query_hash TEXT, block_from INTEGER,
 block_to INTEGER, value BLOB, PRIMARY KEY(block_from, block_to, query_hash))`; `value`
-= compressed (zstd, else gzip) JSON of the finalized-narrowed batch; query hash =
-SHA-256 hex of the query JSON minus positional fields (RS-21). The codec is not marked
-in the store; readers MUST discriminate zstd vs gzip by content magic *(the reference
-reader feature-detects by runtime instead — GAP-27)*.
+= compressed (zstd, else gzip) JSON of the finalized-narrowed batch, or plain JSON when
+compression is off; query hash = SHA-256 hex of the query JSON minus positional fields
+(RS-21). The codec is not marked in the store. Readers MUST find it from the content
+magic: `1F 8B` gzip, `28 B5 2F FD` zstd, other bytes plain JSON. Readers MUST NOT use
+their runtime or their own compression option to find it.
 
 **IB-26 — Legacy cursor key.** The literal `stream` (DEF-9, RP-31).
 
@@ -271,8 +272,9 @@ they bind the ingestion path, not a sink.
 ## Observability HTTP surface
 
 **IB-40 — Server.** Default port P-METRICS-PORT; JSON endpoints wrap payloads as
-`{"payload": …}`; CORS allows localhost origins only (remote dashboards proxy) *(the
-reference matches `localhost` as a substring — GAP-34)*; no authentication; read-only.
+`{"payload": …}`; by default, CORS allows only an origin whose host is `localhost`,
+`127.0.0.1` or `[::1]` (remote dashboards proxy); the operator can set the allowed
+origins or turn CORS off; no authentication; read-only.
 
 **IB-41 — `GET /stats`.** `{payload: {sdk: {version}, runtime: {name, version},
 entrypoint, pipes: [{id, dataset, portal: {url, query}, progress: {from, current, to,
