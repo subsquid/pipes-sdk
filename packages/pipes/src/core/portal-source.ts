@@ -283,7 +283,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     this.#metricServer = options.metrics ?? noopMetricsServer()
     this.#transformers = options.transformers || []
 
-    this.#metricServer.registerPipe(this.#id)
+    this.#metricServer.registerPipe(this.#id, { profiler: this.#options.profiler !== false })
   }
 
   /**

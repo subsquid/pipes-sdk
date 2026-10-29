@@ -23,6 +23,12 @@ export type MetricsServerOptions = {
   port?: number
   enabled?: boolean
   logger?: Logger
+  /**
+   * Which browser origins may read the server. `origin` is a list of exact origins as the browser
+   * sends them (`https://dash.example.com`), or a predicate. `false` sends no CORS headers.
+   * @default an origin whose host is `localhost`, `127.0.0.1` or `[::1]`, on any port
+   */
+  cors?: { origin: string[] | ((origin: string) => boolean) } | false
 }
 
 export type Stats = {
@@ -201,7 +207,28 @@ function transformPreview(profiler: Profiler): TransformationResult {
 const MAX_HISTORY = 50
 const DEFAULT_PORT = 9090
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+
+/** Matches the parsed host, not a substring, so `http://localhost.evil.com` is not local. */
+function isLoopbackOrigin(origin: string): boolean {
+  const host = URL.parse(origin)?.hostname
+
+  return host !== undefined && LOOPBACK_HOSTS.has(host)
+}
+
+function corsPolicy(cors: MetricsServerOptions['cors'] = { origin: isLoopbackOrigin }): (origin: string) => boolean {
+  if (cors === false) return () => false
+
+  if (typeof cors.origin === 'function') return cors.origin
+
+  const allowed = new Set(cors.origin)
+
+  return (origin) => allowed.has(origin)
+}
+
 type PipeData = {
+  /** Whether the pipe collects profiles; unknown until the pipe registers. */
+  profiler?: boolean
   lastBatch?: BatchContext
   profilers: { profiler: ProfilerResult; collectedAt: Date }[]
   transformationPreview?: TransformationResult
@@ -217,12 +244,13 @@ class ExpressMetricServer implements MetricsServer {
   #logger?: Logger
   #pipes: Map<string, PipeData> = new Map()
 
-  constructor({ port = DEFAULT_PORT, enabled = true, logger }: MetricsServerOptions = {}) {
+  constructor({ port = DEFAULT_PORT, enabled = true, logger, cors }: MetricsServerOptions = {}) {
     this.#options = {
       port,
       enabled,
     }
     this.#logger = logger
+    const allowOrigin = corsPolicy(cors)
 
     const registry = new client.Registry()
     client.collectDefaultMetrics({ register: registry })
@@ -236,9 +264,8 @@ class ExpressMetricServer implements MetricsServer {
         const exits = metricsCache.get(options.name)
         if (exits) return exits
 
-        const metric = new client.Counter(options)
+        const metric = new client.Counter({ ...options, registers: [registry] })
         metricsCache.set(options.name, metric)
-        registry.registerMetric(metric)
 
         return metric
       },
@@ -247,9 +274,8 @@ class ExpressMetricServer implements MetricsServer {
         const exits = metricsCache.get(options.name)
         if (exits) return exits
 
-        const metric = new client.Gauge(options)
+        const metric = new client.Gauge({ ...options, registers: [registry] })
         metricsCache.set(options.name, metric)
-        registry.registerMetric(metric)
 
         return metric
       },
@@ -258,9 +284,8 @@ class ExpressMetricServer implements MetricsServer {
         const exits = metricsCache.get(options.name)
         if (exits) return exits
 
-        const metric = new client.Histogram(options)
+        const metric = new client.Histogram({ ...options, registers: [registry] })
         metricsCache.set(options.name, metric)
-        registry.registerMetric(metric)
 
         return metric
       },
@@ -269,9 +294,8 @@ class ExpressMetricServer implements MetricsServer {
         const exits = metricsCache.get(options.name)
         if (exits) return exits
 
-        const metric = new client.Summary(options)
+        const metric = new client.Summary({ ...options, registers: [registry] })
         metricsCache.set(options.name, metric)
-        registry.registerMetric(metric)
 
         return metric
       },
@@ -280,8 +304,7 @@ class ExpressMetricServer implements MetricsServer {
     this.#app.use((req, res, next): any => {
       const origin = req.headers.origin
 
-      // Allow requests only from localhost
-      if (origin && origin.includes('localhost')) {
+      if (origin && allowOrigin(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin)
         res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
@@ -345,9 +368,8 @@ class ExpressMetricServer implements MetricsServer {
       const profiles = profilers.filter((p) => p.collectedAt >= from).map((p) => p.profiler)
 
       return res.json({
-        // FIXME: remove hardcoded field
         payload: {
-          enabled: true,
+          enabled: pipeData?.profiler ?? false,
           profiles,
         },
       })
@@ -399,7 +421,6 @@ class ExpressMetricServer implements MetricsServer {
 
   async stop() {
     this.#started = false
-    client.register.clear()
 
     return new Promise<void>((done) => {
       if (!this.#server) return done()
@@ -415,12 +436,17 @@ class ExpressMetricServer implements MetricsServer {
     return first.done ? undefined : this.#pipes.get(first.value)
   }
 
-  registerPipe(id: string) {
+  registerPipe(id: string, options?: { profiler: boolean }) {
     let data = this.#pipes.get(id)
     if (!data) {
       data = { profilers: [] }
       this.#pipes.set(id, data)
     }
+
+    if (options) {
+      data.profiler = options.profiler
+    }
+
     return data
   }
 
