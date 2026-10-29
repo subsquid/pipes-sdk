@@ -95,7 +95,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
         r.range.from === 'latest'
           ? {
               from: Math.min(latest?.number || 0, bound?.from || Infinity),
-              ...(r.range.to ? { to: r.range.to } : {}),
+              ...(r.range.to != null ? { to: r.range.to } : {}),
             }
           : {
               from: resolveRequiredRangeValue(r.range.from, resolvedTimestamps),
