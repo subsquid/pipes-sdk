@@ -60,4 +60,6 @@ export const PARQUET_ERROR_CODES = {
   SEGMENT_NOT_PARQUET: 'E2320',
   /** The output directory holds another cursor key's state file — a directory belongs to one pipe. */
   DIRECTORY_SHARED: 'E2321',
+  /** Published data files and no state file: nothing records which of their blocks were committed. */
+  ORPHANED_DATA: 'E2322',
 } as const

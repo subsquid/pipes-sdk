@@ -1,11 +1,6 @@
-import { isDeepStrictEqual } from 'node:util'
-
 import { describe, expect } from 'vitest'
 
-import { testLogger } from '~/testing/index.js'
-
-import { validateParquetSnapshot } from '../oracle/validators.js'
-import { RANGES, S1, S1_ROWS, s1Oracle } from '../scenarios/backfill.js'
+import { S1, s1Oracle } from '../scenarios/backfill.js'
 import { TABLE_NAMES } from '../scenarios/erc20.js'
 import {
   ANY_TEMP_UNIT,
@@ -22,17 +17,16 @@ import {
   unitOf,
 } from './harness.js'
 import type { KillPoint } from './kill-switch.js'
-import { streamParquet } from './pipe.js'
-import { rowsOf } from './probe.js'
 
 /** 'PAR1': what a Parquet writer puts in a file before any row. */
 const HEADER = 4
 
 /**
- * The class-K commit protocol (CN-12) step by step. A checkpoint publishes each table's unit
- * (transfers first), then writes the state to a temp file and renames it over the state record.
- * Block 1 holds a transfer and an approval, so the first checkpoint publishes both tables. Counts
- * are within one run, so a restart counts from 1 again.
+ * The class-K commit protocol (CN-12) step by step. A run with no commit first writes a start state
+ * (IB-22). A checkpoint publishes each table's unit (transfers first), then writes the state to a
+ * temp file and renames it over the state record. Block 1 holds a transfer and an approval, so the
+ * first checkpoint publishes both tables. Counts are within one run, so a restart counts from 1
+ * again, and a restart that resumes from a commit writes no start state.
  */
 const POINTS = {
   midUnitWrite: { name: 'mid-unit-write', op: 'write', path: tempUnitOf('transfers'), at: 2 },
@@ -42,22 +36,36 @@ const POINTS = {
     path: tempUnitOf('transfers'),
     at: 1,
   },
+  startStateRename: {
+    name: 'before the start state rename',
+    op: 'rename',
+    path: STATE_FILE,
+    at: 1,
+    when: 'before',
+  },
   beforeStateWrite: {
     name: 'post-publish, before the state write',
     op: 'writeFile',
     path: TEMP_STATE,
-    at: 2,
+    at: 3,
     when: 'before',
   },
   beforeStateRename: {
     name: 'post-publish, before the state rename',
     op: 'rename',
     path: STATE_FILE,
+    at: 3,
+    when: 'before',
+  },
+  firstCommitRename: {
+    name: 'post-publish, before the first commit’s state rename',
+    op: 'rename',
+    path: STATE_FILE,
     at: 2,
     when: 'before',
   },
-  firstStateRename: {
-    name: 'post-publish, before the first state rename',
+  restartStateRename: {
+    name: 'the first checkpoint of a restart from a commit, before its state rename',
     op: 'rename',
     path: STATE_FILE,
     at: 1,
@@ -72,7 +80,7 @@ const POINTS = {
     when: 'after',
     straddling: true,
   },
-  postState: { name: 'post-state', op: 'rename', path: STATE_FILE, at: 2, when: 'after' },
+  postState: { name: 'post-state', op: 'rename', path: STATE_FILE, at: 3, when: 'after' },
   recoverySweep: {
     name: 'recovery, before the over-cursor sweep',
     op: 'unlink',
@@ -114,7 +122,29 @@ describe('Parquet (class K) · S1 backfill · killed at each commit step (CT-2)'
     await resumeToEnd({ simulator, dir, model, store })
   })
 
-  it('mid-unit-write before the first commit: no state and no unit, and the restart starts cold', async ({
+  it('before the start state rename: no state, the temp start state, and the restart starts cold', async ({
+    simulateS1,
+    dir,
+  }) => {
+    const simulator = await simulateS1()
+    const model = s1Oracle()
+
+    const { store, window } = await crashAt({ simulator, dir, model, point: POINTS.startStateRename })
+
+    expect(window).toEqual({
+      state: false,
+      start: undefined,
+      above: { transfers: [], approvals: [] },
+      aboveEnds: [],
+      temp: { transfers: [], approvals: [] },
+      tempStates: 1,
+      unknown: [],
+    })
+
+    await resumeToEnd({ simulator, dir, model, store })
+  })
+
+  it('mid-unit-write before the first commit: the start state and no unit, and the restart starts cold', async ({
     simulateS1,
     dir,
   }) => {
@@ -123,7 +153,13 @@ describe('Parquet (class K) · S1 backfill · killed at each commit step (CT-2)'
 
     const { store, window } = await crashAt({ simulator, dir, model, point: POINTS.firstUnitWrite })
 
-    expect(window).toMatchObject({ state: false, above: { transfers: [], approvals: [] }, tempStates: 0, unknown: [] })
+    expect(window).toMatchObject({
+      state: false,
+      start: S1.from,
+      above: { transfers: [], approvals: [] },
+      tempStates: 0,
+      unknown: [],
+    })
     expect(window.temp.transfers).toEqual([HEADER])
     expect([[], [HEADER]]).toContainEqual(window.temp.approvals)
 
@@ -224,6 +260,7 @@ describe('Parquet (class K) · S1 backfill · killed at each commit step (CT-2)'
 
     expect(window).toEqual({
       state: true,
+      start: undefined,
       above: { transfers: [], approvals: [] },
       aboveEnds: [],
       temp: { transfers: [], approvals: [] },
@@ -279,7 +316,7 @@ describe('Parquet (class K) · S1 backfill · killed at each commit step (CT-2)'
     const model = s1Oracle()
 
     const first = await crashAt({ simulator, dir, model, point: POINTS.beforeStateRename })
-    const second = await crashAt({ simulator, dir, model, point: POINTS.firstStateRename })
+    const second = await crashAt({ simulator, dir, model, point: POINTS.restartStateRename })
 
     // The restart swept the first crash's window and published one checkpoint of its own above the same cursor.
     expect(second.store.state).toStrictEqual(first.store.state)
@@ -291,7 +328,7 @@ describe('Parquet (class K) · S1 backfill · killed at each commit step (CT-2)'
     await resumeToEnd({ simulator, dir, model, store: second.store })
   })
 
-  it('GAP-41 (open): recovery keeps the units published before the first state write, and the restart does not converge', async ({
+  it('post-publish, before the first commit’s state rename: recovery deletes the units, and the restart converges (CN-12)', async ({
     simulateS1,
     dir,
   }) => {
@@ -308,38 +345,59 @@ describe('Parquet (class K) · S1 backfill · killed at each commit step (CT-2)'
     })
     const model = s1Oracle()
 
-    const { store, window } = await crashAt({ simulator, dir, model, point: POINTS.firstStateRename })
-    const published = TABLE_NAMES.flatMap((table) => store.tables[table].units.map((unit) => `${table}/${unit.name}`))
+    const { store, window } = await crashAt({ simulator, dir, model, point: POINTS.firstCommitRename })
 
-    expect(window).toMatchObject({ state: false, temp: { transfers: [], approvals: [] }, tempStates: 1, unknown: [] })
+    expect(window).toMatchObject({
+      state: false,
+      start: S1.from,
+      temp: { transfers: [], approvals: [] },
+      tempStates: 1,
+      unknown: [],
+    })
     expect(window.above.transfers).toHaveLength(1)
     expect(window.above.approvals).toHaveLength(1)
 
     restarted = true
-    const outcome = await streamParquet({
-      range: { from: S1.from, to: S1.to },
-      url: simulator.chain.url,
-      dir,
-      logger: testLogger(),
-      observe: () => {},
-    }).then(
-      () => undefined,
-      (error: unknown) => error,
-    )
+    await resumeToEnd({ simulator, dir, model, store })
 
+    // No commit, so every unit is above the cursor and recovery leaves none (INV-42).
     const afterRecovery = await recovered
-    const survivors = TABLE_NAMES.flatMap((table) =>
-      (afterRecovery?.tables[table].units ?? []).map((unit) => `${table}/${unit.name}`),
-    )
-    const end = await readParquetStore(dir)
-    const endViolations = validateParquetSnapshot(end, RANGES)
-    const endRows = rowsOf(end)
-    const converged = outcome === undefined && endViolations.length === 0 && isDeepStrictEqual(endRows, S1_ROWS)
+    const survivors = TABLE_NAMES.flatMap((table) => afterRecovery?.tables[table].units ?? [])
 
-    // CN-12 and INV-42 want no unit left once recovery is done: with no cursor, every unit is above it.
-    // GAP-41 skips the sweep when no state exists, so the units survive and the restart collides
-    // with them (E2309) or duplicates them, depending on batch partitioning. Flip both lines when it closes.
-    expect(survivors).toEqual(published)
-    expect(converged).toBe(false)
+    expect(afterRecovery).toBeDefined()
+    expect(survivors).toEqual([])
+  })
+
+  it('a second crash in the first checkpoint after a start state: the residue does not pile up (CN-42)', async ({
+    simulateS1,
+    dir,
+  }) => {
+    const simulator = await simulateS1()
+    const model = s1Oracle()
+
+    const first = await crashAt({ simulator, dir, model, point: POINTS.firstCommitRename })
+    // The restart starts cold, so it writes a start state of its own before its first commit.
+    const second = await crashAt({ simulator, dir, model, point: POINTS.firstCommitRename })
+
+    expect(second.window).toEqual(first.window)
+
+    await resumeToEnd({ simulator, dir, model, store: second.store })
+  })
+
+  it('a crash in recovery from a start state, before its sweep: recovery runs again and converges (INV-41)', async ({
+    simulateS1,
+    dir,
+  }) => {
+    const simulator = await simulateS1()
+    const model = s1Oracle()
+
+    const first = await crashAt({ simulator, dir, model, point: POINTS.firstCommitRename })
+    const second = await crashAt({ simulator, dir, model, point: POINTS.recoverySweep })
+
+    // The temp sweep ran before the kill; the sweep of the units did not.
+    expect(second.window).toEqual({ ...first.window, tempStates: 0 })
+    expect(first.window.tempStates).toBe(1)
+
+    await resumeToEnd({ simulator, dir, model, store: second.store })
   })
 })

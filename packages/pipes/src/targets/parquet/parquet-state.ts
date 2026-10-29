@@ -16,11 +16,21 @@ const DATA_FILE_RE = /^(\d+)-(\d+)\.parquet$/
 /** Any key's state file, the id-less form included. */
 const STATE_FILE_RE = new RegExp(`^${STATE_BASENAME}(\\..+)?\\.json$`)
 
+/**
+ * The cursor of the state written before the first checkpoint publishes: one block below the stream
+ * start, with no hash. It marks a directory whose files are all this pipe's crash residue.
+ */
+type StartCursor = { kind: 'start'; number: number }
+
+function isStartCursor(cursor: BlockCursor | StartCursor): cursor is StartCursor {
+  return 'kind' in cursor && cursor.kind === 'start'
+}
+
 type PersistedState = {
   /** Optional pipe namespace, mirrored from `settings.id`. */
   id?: string
   /** Last durably-checkpointed cursor — `read` resumes from `cursor.number + 1`. */
-  cursor: BlockCursor
+  cursor: BlockCursor | StartCursor
   /**
    * Finalized head observed at the checkpoint, persisted so the source can re-seed its monotonic
    * finalized watermark after an unclean restart mid-fork. Absent in state written before this
@@ -60,6 +70,10 @@ export type ParquetStateOptions = {
  * holding blocks above the cursor is a remnant of a checkpoint that published files but crashed
  * before persisting the new cursor, and any `.tmp-*` file is an aborted in-progress segment —
  * both are deleted so `read(cursor)` regenerates that (deterministic, finalized) data cleanly.
+ *
+ * The first checkpoint has no cursor to fall back to, so a start state precedes it. With the start
+ * state on disk a crash before the first commit is recoverable, and published files with no state
+ * at all can only be orphaned: their state was lost, so startup refuses them (`E2322`).
  */
 export class ParquetState {
   readonly #baseDir: string
@@ -94,11 +108,12 @@ export class ParquetState {
    * from the stream beginning).
    *
    * Always: `mkdir -p` the base dir + every table dir, refuse a directory another key's state file
-   * claims (`E2321`) before touching anything, and delete every `.tmp-*` file. When a committed
-   * cursor exists, additionally delete every published data file whose coverage end exceeds it
-   * (incomplete-checkpoint remnants) — refusing up front if one straddles the cursor without being
-   * explained by the persisted coverage, which would mean the state file and the data files came
-   * from different runs (`E2317`).
+   * claims (`E2321`) or published data files no state file accounts for (`E2322`) before touching
+   * anything, and delete every `.tmp-*` file. A start state means nothing was committed: every
+   * published file is deleted and the run starts cold. When a committed cursor exists, delete every
+   * published data file whose coverage end exceeds it (incomplete-checkpoint remnants) — refusing
+   * up front if one straddles the cursor without being explained by the persisted coverage, which
+   * would mean the state file and the data files came from different runs (`E2317`).
    */
   async getCursor(): Promise<TargetState | undefined> {
     await mkdir(this.#baseDir, { recursive: true })
@@ -108,10 +123,19 @@ export class ParquetState {
       await mkdir(path.join(this.#baseDir, table), { recursive: true })
     }
 
-    await this.#deleteTempFiles()
-
     const state = await this.#readState()
     if (!state) {
+      await this.#refuseOrphanedFiles()
+      await this.#deleteTempFiles()
+
+      return undefined
+    }
+
+    await this.#deleteTempFiles()
+
+    if (isStartCursor(state.cursor)) {
+      await this.#deleteFilesAboveCursor(state.cursor.number)
+
       return undefined
     }
 
@@ -131,9 +155,6 @@ export class ParquetState {
    */
   async saveCursor(cursor: BlockCursor, finalized?: BlockCursor, coverage?: Record<string, number>): Promise<void> {
     const payload: PersistedState = { cursor }
-    if (this.#id) {
-      payload.id = this.#id
-    }
     if (finalized) {
       payload.finalized = finalized
     }
@@ -141,9 +162,23 @@ export class ParquetState {
       payload.coverage = coverage
     }
 
+    await this.#write(payload)
+  }
+
+  /**
+   * Persists the start state, written before the first checkpoint publishes anything. Its cursor
+   * sits one block below `initial`, the stream start, so a resume through an SDK that does not know
+   * start states still re-fetches from `initial`.
+   */
+  async saveStartCursor(initial: number): Promise<void> {
+    await this.#write({ cursor: { kind: 'start', number: initial - 1 } })
+  }
+
+  async #write(payload: PersistedState): Promise<void> {
+    const record = this.#id ? { id: this.#id, ...payload } : payload
     const tmpPath = path.join(this.#baseDir, `${TMP_PREFIX}state-${path.basename(this.#statePath)}`)
 
-    await writeFile(tmpPath, JSON.stringify(payload))
+    await writeFile(tmpPath, JSON.stringify(record))
     await fsyncFile(tmpPath)
     await rename(tmpPath, this.#statePath)
     await fsyncDir(this.#baseDir)
@@ -195,6 +230,38 @@ export class ParquetState {
         `deletes files it cannot tell apart from another pipe's. Point this pipe at a directory of its ` +
         `own. If the pipe was renamed, or its state predates pipe ids, rename the state file to '${own}' ` +
         `to resume from it.`,
+    )
+  }
+
+  /**
+   * A crash cannot publish a file with no state on disk, since the start state comes first. So a
+   * published file here outlived its state: deleted, lost, or never this pipe's. Some of its blocks
+   * may be committed, and starting over would write them again (CN-44).
+   */
+  async #refuseOrphanedFiles(): Promise<void> {
+    const orphaned: string[] = []
+
+    for (const table of this.#tables) {
+      // No fallback to an empty listing: an unreadable table directory may hold data files.
+      const entries = await readdir(path.join(this.#baseDir, table))
+      const published = entries.filter((name) => DATA_FILE_RE.test(name)).sort()
+
+      orphaned.push(...published.map((name) => path.join(table, name)))
+    }
+
+    if (orphaned.length === 0) {
+      return
+    }
+
+    const listed = orphaned.slice(0, 3).join(', ')
+    const more = orphaned.length > 3 ? ` and ${orphaned.length - 3} more` : ''
+
+    throw new ParquetTargetError(
+      PARQUET_ERROR_CODES.ORPHANED_DATA,
+      `Parquet output directory '${this.#baseDir}' holds published data files (${listed}${more}), ` +
+        `but no state file '${path.basename(this.#statePath)}' records which of their blocks were committed. ` +
+        `Starting over would write those blocks again. Restore the state file to resume, or delete the ` +
+        `table directories to re-index from the start.`,
     )
   }
 

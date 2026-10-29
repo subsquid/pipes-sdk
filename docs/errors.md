@@ -649,6 +649,21 @@ table, its files cannot be told apart, so re-index that pipe into its new direct
 state file is this pipe's own under an old key — the source `id` or `settings.id` changed, or the
 state predates pipe ids — rename it to the name the message gives, and the pipe resumes from it.
 
+### E2322 · Published data files with no state file
+
+The output directory holds published `<from>-<to>.parquet` files, but this pipe's state file
+`_sqd_parquet_state.<id>.json` is missing. The state file records which blocks were committed;
+without it the target cannot tell committed data from leftovers, and starting over would write
+the same blocks a second time. A crash cannot leave this shape: the target writes its state file
+before it publishes its first file. So the state file was deleted, lost in a copy or restore, or the
+files came from somewhere else. The target refuses at startup, before it touches any file. The
+message names the first files it found.
+
+**Fix** — restore the state file to resume. To re-index from the start instead, delete the table
+directories along with any state file. If the previous run used an SDK version that did not write
+its state file first and crashed before its first checkpoint completed, the files are that run's
+leftovers: delete them and restart.
+
 ---
 
 ## Google PubSub target

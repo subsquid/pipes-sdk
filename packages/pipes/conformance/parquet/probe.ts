@@ -12,15 +12,31 @@ const DATA_FILE = /^(\d{12})-(\d{12})\.parquet$/
 /** IB-22: the fields of the state sidecar. A field outside them is a format change, not something to skip. */
 const STATE_FIELDS: ReadonlySet<string> = new Set(['id', 'cursor', 'finalized', 'coverage'])
 
+/** IB-22: the cursor of the start state, written before the first checkpoint publishes. */
+type StartCursor = { kind: 'start'; number: number }
+
 type ParquetStateFile = {
   id?: string
-  cursor: Cursor
+  cursor: Cursor | StartCursor
   finalized?: Cursor
   coverage?: Record<string, number>
 }
 
+function isStartCursor(cursor: Cursor | StartCursor): cursor is StartCursor {
+  return 'kind' in cursor
+}
+
 /** A published unit with its rows as the store holds them. */
 export type ParquetUnit = PublishedUnit & { rows: OracleRow[] }
+
+/** One read of a class-K store: the snapshot the validators judge, and the start state beside it. */
+export type ParquetRead<Table extends string> = ParquetSnapshot<ParquetUnit, Table> & {
+  /**
+   * The stream's first block, when the sidecar is a start state (IB-22): the pipe began its first
+   * checkpoint and committed nothing, so `state` is `undefined`.
+   */
+  start: number | undefined
+}
 
 export type ParquetProbeOptions<Table extends string> = {
   dir: string
@@ -44,7 +60,7 @@ export async function readParquetSnapshot<Table extends string>({
   id,
   tables,
   blockColumn = 'blockNumber',
-}: ParquetProbeOptions<Table>): Promise<ParquetSnapshot<ParquetUnit, Table>> {
+}: ParquetProbeOptions<Table>): Promise<ParquetRead<Table>> {
   const stateName = `_sqd_parquet_state.${id}.json`
   const statePath = path.join(dir, stateName)
 
@@ -76,13 +92,16 @@ export async function readParquetSnapshot<Table extends string>({
     snapshots[table] = { units, next: stateFile?.coverage?.[table] }
   }
 
+  const cursor = stateFile?.cursor
+  const start = cursor !== undefined && isStartCursor(cursor) ? cursor.number + 1 : undefined
+
   // IB-22 has no chain field: the finalized-only route keeps no fork history (WP-47).
   const state: OracleState | undefined =
-    stateFile === undefined
+    cursor === undefined || isStartCursor(cursor)
       ? undefined
-      : { current: stateFile.cursor, finalized: stateFile.finalized, rollbackChain: [] }
+      : { current: cursor, finalized: stateFile?.finalized, rollbackChain: [] }
 
-  return { state, tables: snapshots, residue: residue.sort() }
+  return { state, start, tables: snapshots, residue: residue.sort() }
 }
 
 /** Every row the snapshot holds: table by table in declaration order, each in window order. */
@@ -137,6 +156,10 @@ function parseState(raw: string, statePath: string, id: string): ParquetStateFil
     fail(`it names the pipe '${String(stateId)}', not '${id}'`)
   }
 
+  if (isStartState(cursor)) {
+    return parseStart(cursor, { finalized, coverage }, fail, stateId as string | undefined)
+  }
+
   if (!isCursor(cursor)) {
     fail('the cursor is missing or has no number and hash')
   }
@@ -163,6 +186,32 @@ function parseState(raw: string, statePath: string, id: string): ParquetStateFil
     finalized: finalized as Cursor | undefined,
     coverage: coverage as Record<string, number> | undefined,
   }
+}
+
+/** A cursor with a `kind` claims to be a start cursor; `parseStart` judges the claim. */
+function isStartState(cursor: unknown): cursor is object {
+  return typeof cursor === 'object' && cursor !== null && 'kind' in cursor
+}
+
+/** IB-22: a start cursor is one block below the stream start, and the state records nothing beside it. */
+function parseStart(
+  cursor: object,
+  { finalized, coverage }: { finalized: unknown; coverage: unknown },
+  fail: (reason: string) => never,
+  id: string | undefined,
+): ParquetStateFile {
+  const { kind, number, ...rest } = cursor as { kind: unknown; number: unknown }
+  const belowBlock = typeof number === 'number' && isHeight(number + 1)
+
+  if (kind !== 'start' || !belowBlock || Object.keys(rest).length > 0) {
+    fail(`the cursor ${JSON.stringify(cursor)} is not a start cursor one block below a block`)
+  }
+
+  if (finalized !== undefined || coverage !== undefined) {
+    fail('a start state carries a finalized head or coverage')
+  }
+
+  return { id, cursor: { kind: 'start', number: number as number } }
 }
 
 async function readUnitRows(filePath: string, table: string, blockColumn: string): Promise<OracleRow[]> {

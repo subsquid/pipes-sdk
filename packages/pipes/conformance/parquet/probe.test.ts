@@ -107,9 +107,26 @@ describe('readParquetSnapshot', () => {
 
     expect(snapshot).toStrictEqual({
       state: undefined,
+      start: undefined,
       tables: { transfers: { units: [], next: undefined } },
       residue: [],
     })
+  })
+
+  it('reads a start state as no commit, with the stream start beside it (IB-22)', async ({ dir }) => {
+    await writeUnit(dir, '000000000010-000000000019.parquet', [{ blockNumber: 12n, amount: 1n }])
+    await writeFile(
+      path.join(dir, `_sqd_parquet_state.${PIPE_ID}.json`),
+      JSON.stringify({ id: PIPE_ID, cursor: { kind: 'start', number: 9 } }),
+    )
+
+    const snapshot = await read(dir)
+    const unitNames = snapshot.tables.transfers.units.map((unit) => unit.name)
+
+    expect(snapshot.state).toBeUndefined()
+    expect(snapshot.start).toBe(10)
+    expect(snapshot.tables.transfers.next).toBeUndefined()
+    expect(unitNames).toEqual(['000000000010-000000000019.parquet'])
   })
 
   it('refuses a block column that is no block, or that it cannot read exactly', async ({ dir }) => {
@@ -152,6 +169,11 @@ describe('readParquetSnapshot', () => {
       noFinalizedHash: { ...STATE, finalized: { number: 20 } },
       nullFinalized: { ...STATE, finalized: null },
       notAnObject: null,
+      otherKind: { id: PIPE_ID, cursor: { kind: 'end', number: 9 } },
+      startBelowBlocks: { id: PIPE_ID, cursor: { kind: 'start', number: -2 } },
+      startWithHash: { id: PIPE_ID, cursor: { kind: 'start', number: 9, hash: '0x9' } },
+      startWithFinalized: { id: PIPE_ID, cursor: { kind: 'start', number: 9 }, finalized: { number: 9, hash: '0x9' } },
+      startWithCoverage: { id: PIPE_ID, cursor: { kind: 'start', number: 9 }, coverage: { transfers: 10 } },
     }
 
     for (const [name, state] of Object.entries(stateFiles)) {
