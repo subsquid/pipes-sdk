@@ -93,7 +93,7 @@ export type MockPortalOptions = {
   latest?: number
   /** The finalized head. `null` makes the dataset report none. Defaults to the latest head. */
   finalized?: number | null
-  /** `metadata.kind` of the dataset. Defaults to `evm`. */
+  /** `metadata.kind` of the dataset; it also sets the unit of block timestamps. Defaults to `evm`. */
   kind?: string
   /** The most blocks one response covers, like a worker chunk. Defaults to the whole request. */
   blocksPerResponse?: number

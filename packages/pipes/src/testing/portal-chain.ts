@@ -80,7 +80,12 @@ export type ChainOptions = {
   blocksPerResponse?: number
   previousBlocks?: number
   maxAddresses?: number
+  /** `metadata.kind` of the dataset; it sets the unit of block timestamps. Defaults to `evm`. */
+  kind?: string
 }
+
+/** Dataset kinds whose block timestamps the portal reports in milliseconds; the others use seconds. */
+const MILLISECOND_TIMESTAMP_KINDS = new Set(['tron', 'substrate', 'hyperliquidFills'])
 
 /**
  * Branch 0 matches `mockBlock`'s default hash, so a block reads the same whether a test gave it or
@@ -107,6 +112,7 @@ export class PortalChain {
   #blocksPerResponse: number
   #previousBlocks: number
   #maxAddresses: number | undefined
+  #timestampsPerSecond: number
 
   constructor(options: ChainOptions = {}) {
     for (const block of options.blocks ?? []) {
@@ -118,6 +124,7 @@ export class PortalChain {
     this.#blocksPerResponse = options.blocksPerResponse ?? Number.POSITIVE_INFINITY
     this.#previousBlocks = options.previousBlocks ?? 10
     this.#maxAddresses = options.maxAddresses
+    this.#timestampsPerSecond = MILLISECOND_TIMESTAMP_KINDS.has(options.kind ?? 'evm') ? 1000 : 1
   }
 
   get latest(): number {
@@ -156,9 +163,11 @@ export class PortalChain {
    * do not decrease along the chain.
    */
   blockAt(seconds: number): number | undefined {
+    // The route takes seconds on every network, while block timestamps keep the dataset's unit.
+    const time = seconds * this.#timestampsPerSecond
     const timestamp = (number: number) => this.header(number).timestamp ?? 0
 
-    if (timestamp(this.#latest) < seconds) {
+    if (timestamp(this.#latest) < time) {
       return undefined
     }
 
@@ -166,7 +175,7 @@ export class PortalChain {
     let high = this.#latest
     while (low < high) {
       const middle = Math.floor((low + high) / 2)
-      if (timestamp(middle) < seconds) {
+      if (timestamp(middle) < time) {
         low = middle + 1
       } else {
         high = middle

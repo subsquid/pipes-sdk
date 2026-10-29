@@ -6,6 +6,7 @@ import { resolveForkCursor } from '~/core/fork.js'
 import { TargetState, createTarget } from '~/core/target.js'
 import { BlockCursor } from '~/core/types.js'
 import { evmPortalStream } from '~/evm/index.js'
+import { HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 
 import { mockBlock } from './evm/mock-block.js'
@@ -426,6 +427,39 @@ describe('mockPortal stall', () => {
     expect(numbers).toEqual([1, 2])
     expect(next).toBe('silence')
     expect(portal.requests[0].answer?.kind).toBe('stalled')
+  })
+})
+
+describe('mockPortal timestamp route', () => {
+  /** The block the route answers for `seconds`, or the status of its refusal. */
+  async function blockAt(portal: MockPortal, seconds: number) {
+    try {
+      return await new PortalClient({ url: portal.url }).resolveTimestamp(seconds)
+    } catch (error) {
+      return `HTTP ${(error as HttpError).response.status}`
+    }
+  }
+
+  // Made-up blocks are `number * 1000` seconds apart from genesis.
+  withPortal('finds the first block at or after a time in seconds', async ({ portal: open }) => {
+    const portal = await open({ latest: 3 })
+
+    expect(await blockAt(portal, 0)).toBe(0)
+    expect(await blockAt(portal, 1_000)).toBe(1)
+    expect(await blockAt(portal, 1_500)).toBe(2)
+    expect(await blockAt(portal, 3_001)).toBe('HTTP 404')
+  })
+
+  withPortal('reads block timestamps in milliseconds on a tron dataset', async ({ portal: open }) => {
+    const second = 1_700_000_000
+    const blocks = [0, 1, 2].map((number) => ({
+      header: { number, hash: `0x${number}`, timestamp: (second + number * 3) * 1000 },
+    }))
+    const portal = await open({ kind: 'tron', blocks })
+
+    expect(await blockAt(portal, second + 3)).toBe(1)
+    expect(await blockAt(portal, second + 4)).toBe(2)
+    expect(await blockAt(portal, second + 7)).toBe('HTTP 404')
   })
 })
 
