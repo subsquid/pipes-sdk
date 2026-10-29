@@ -43,16 +43,31 @@ export type ChainFault =
       /** How many stream requests in a row get this answer. Defaults to 1. */
       times?: number
     }
+  | {
+      /** Answers 200 with this many blocks of the answer, then half the line of the next one, and ends the body there. */
+      cutAfter: number
+      /** How many stream requests in a row get this answer. Defaults to 1. */
+      times?: number
+    }
+  | {
+      /** Answers 200 with this many blocks of the answer, then `line` as a line of its own, and ends the body. */
+      lineAfter: number
+      line: string
+      /** How many stream requests in a row get this answer. Defaults to 1. */
+      times?: number
+    }
 
 export type ChainAnswer =
   | { kind: 'blocks'; blocks: ChainBlock[] }
   | { kind: 'stalled'; blocks: ChainBlock[] }
+  | { kind: 'cut'; blocks: ChainBlock[]; cutBlock?: ChainBlock }
+  | { kind: 'line'; blocks: ChainBlock[]; line: string }
   | { kind: 'at-head' }
   | { kind: 'refused'; message: string }
   | { kind: 'fork'; previousBlocks: { number: number; hash: string }[] }
   | { kind: 'fault'; status: number; retryAfter?: number | string }
 
-const STATUS = { blocks: 200, stalled: 200, 'at-head': 204, refused: 400, fork: 409 } as const
+const STATUS = { blocks: 200, stalled: 200, cut: 200, line: 200, 'at-head': 204, refused: 400, fork: 409 } as const
 
 export function statusOf(answer: ChainAnswer): number {
   return answer.kind === 'fault' ? answer.status : STATUS[answer.kind]
@@ -133,6 +148,32 @@ export class PortalChain {
         timestamp: number * 1000,
       }
     )
+  }
+
+  /**
+   * The first block whose timestamp is at or after `seconds`, as `GET timestamps/{seconds}/block` finds
+   * it: block 0 for a time before the chain, `undefined` for a time after the head. Assumes timestamps
+   * do not decrease along the chain.
+   */
+  blockAt(seconds: number): number | undefined {
+    const timestamp = (number: number) => this.header(number).timestamp ?? 0
+
+    if (timestamp(this.#latest) < seconds) {
+      return undefined
+    }
+
+    let low = 0
+    let high = this.#latest
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (timestamp(middle) < seconds) {
+        low = middle + 1
+      } else {
+        high = middle
+      }
+    }
+
+    return low
   }
 
   head(): WireHead {
@@ -230,6 +271,20 @@ export class PortalChain {
         const blocks = answer.kind === 'blocks' ? answer.blocks.slice(0, fault.stallAfter) : []
 
         return { kind: 'stalled', blocks }
+      }
+
+      if ('cutAfter' in fault) {
+        const answer = this.#serve(endpoint, query)
+        const blocks = answer.kind === 'blocks' ? answer.blocks : []
+
+        return { kind: 'cut', blocks: blocks.slice(0, fault.cutAfter), cutBlock: blocks[fault.cutAfter] }
+      }
+
+      if ('lineAfter' in fault) {
+        const answer = this.#serve(endpoint, query)
+        const blocks = answer.kind === 'blocks' ? answer.blocks.slice(0, fault.lineAfter) : []
+
+        return { kind: 'line', blocks, line: fault.line }
       }
 
       return { kind: 'fault', status: fault.status, retryAfter: fault.retryAfter }

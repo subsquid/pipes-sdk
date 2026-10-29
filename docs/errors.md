@@ -21,7 +21,7 @@ Every error `@subsquid/pipes` raises carries a stable code and ends its message 
 this page:
 
 ```
-Pipe requires a non-default ID when used with targets.
+Pipe requires a non-empty id: targets persist progress under it.
 ...
 See: https://docs.sqd.dev/en/sdk/pipes-sdk/errors/E0001
 ```
@@ -45,9 +45,8 @@ are stable. Codes are grouped by where they originate:
 
 ### E0001 · Pipe requires a unique id
 
-A pipe was connected to a target (`.pipeTo(...)`) while still using the default id. Targets persist
-their resume cursor under the pipe's `id`, so a shared/default id would let two pipes silently
-overwrite each other's progress.
+A pipe was created with an empty or blank `id`. Targets persist their resume cursor under the pipe's
+`id`, so a missing id would let two pipes silently overwrite each other's progress.
 
 **Fix** — set a stable, globally unique, non-empty `id`:
 
@@ -57,8 +56,9 @@ evmPortalStream({ id: 'eth-transfers', portal: '...', outputs })
 
 ### E0002 · Invalid block range
 
-A `range` (on the stream or a decoder) is misconfigured — an inverted range (`from` after `to`), an
-invalid date, or a timestamp that can't be resolved to a block. The message names the exact problem.
+A `range` (on the stream or a decoder) is misconfigured — an inverted range (`from` after `to`), a
+bound that is not a block number (a word, a fraction, a negative number, `NaN`), an invalid date or
+`Date` object, or a date after the newest block of the dataset. The message names the exact problem.
 
 **Fix** — ensure `from ≤ to` and use a resolvable bound: `'latest'`, a block number (`'12,000,000'`),
 an ISO date (`'2024-01-01'`), or a `Date`.
@@ -166,11 +166,12 @@ evmPortalStream({
 
 ## Fork handling
 
-Raised while unwinding a chain reorganization (fork). Targets that read the hot stream — ClickHouse,
-Postgres, BigQuery — handle forks themselves, so E1001–E1003 mostly surface in **custom** targets.
-The finalized-only targets (Parquet, memory) read `/finalized-stream`, where a fork cannot occur;
-they raise E1005 instead if one is reported anyway. E1006 guards the block order of every stream, forks
-or not. E1004–E1006 mean the portal broke its contract: report them against the portal.
+Raised while unwinding a chain reorganization (fork), or when the portal sends data the pipe cannot
+use. Targets that read the hot stream — ClickHouse, Postgres, BigQuery — handle forks themselves, so
+E1001 and E1003 mostly surface in **custom** targets. The finalized-only targets (Parquet, memory) read
+`/finalized-stream`, where a fork cannot occur; they raise E1005 instead if one is reported anyway.
+E1006–E1008 guard the blocks of every stream, forks or not. E1002 and E1004–E1007 mean the portal broke
+its contract: report them against the portal.
 
 ### E1001 · Target does not support fork handling
 
@@ -182,10 +183,13 @@ set `requiresFinalizedStream: true`, which puts it on a stream no fork can reach
 
 ### E1002 · Fork with no canonical blocks
 
-A fork was detected but no canonical blocks were supplied to resolve it — an internal invariant
-violation.
+The portal answered a request with a fork (HTTP 409) but sent no canonical blocks (`previousBlocks`),
+so the pipe cannot find the block to roll back to. The pipe stopped without rolling anything back.
+The message quotes the portal's own error text when the answer has one.
 
-**Fix** — none; please [report it as a bug](https://github.com/subsquid-labs/pipes-sdk/issues).
+**Fix** — none in user code; please
+[report it](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal. A restart resumes
+from the target's persisted cursor.
 
 ### E1003 · resolveFork() returned no cursor
 
@@ -229,6 +233,28 @@ Blocks with no matching data are skipped, so a gap between block numbers is not 
 **Fix** — none in user code; please
 [report it](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal. A restart resumes
 from the target's persisted cursor.
+
+### E1007 · Malformed portal response
+
+A stream response holds a line the pipe cannot read as a block: a line that is not valid JSON, or a
+block without a number. The pipe also raises this when a response ends inside a block twice in a row
+at the same block; after the first such cut, it requests the response again from that block. The
+message names the block that was due and shows the start of the line. The pipe stops before the line
+reaches any transformer or target.
+
+**Fix** — none in user code; please
+[report it](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal. A restart resumes
+from the target's persisted cursor.
+
+### E1008 · Block does not match the selected fields
+
+A block from the portal has a value that the schema of the selected fields does not allow, for example
+a string where the block timestamp must be a number. The message names the block and the path of the
+field (`/header/timestamp`). The pipe stops before the block reaches any output or target.
+
+**Fix** — none in user code; please
+[report it](https://github.com/subsquid-labs/pipes-sdk/issues) with the block number and the field.
+Either the portal sent a wrong value, or the SDK schema rejects a value the chain really has.
 
 ---
 
@@ -281,6 +307,23 @@ announces this risk before a fork ever arrives.
 **Fix** — configure `onRollback` on the ClickHouse target. The typical implementation is
 `store.removeRowsAfter(safeCursor, { tables })`. A pipe reading `/finalized-stream` never forks
 and does not need one.
+
+### E2008 · Rollback table does not exist
+
+A rollback (`removeRowsAfter` in `onRollback`) named a table that does not exist in the database, so
+its rows cannot be removed.
+
+**Fix** — check the table names `onRollback` passes, and that the table is created in the database
+the client uses (or qualify it as `database.table`).
+
+### E2009 · SQL file statement failed
+
+A statement from a file that `store.executeFiles(dir)` runs failed. The message names the file, quotes
+ClickHouse's error and shows the statement; the original error is the `cause`. Statements before it in
+the same run were already executed.
+
+**Fix** — correct the statement in the named file. Write statements that can run again
+(`CREATE TABLE IF NOT EXISTS`), because a restart executes the files from the start.
 
 ---
 

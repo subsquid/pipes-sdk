@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
+import { DefaultPipeIdError } from '~/core/errors.js'
 import { RollbackRecord, resolveForkCursor } from '~/core/fork.js'
 import { defaultLogger } from '~/core/logger.js'
 import { PortalCache } from '~/core/portal-source.js'
@@ -68,7 +69,7 @@ describe('Portal abstract stream', () => {
           portal: 'http://localhost:1',
           outputs: blockDecoder({ from: 0, to: 1 }),
         }),
-      ).toThrow(/non-empty "id"/)
+      ).toThrow(DefaultPipeIdError)
     })
 
     it('should expose finalization headers', async () => {

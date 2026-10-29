@@ -80,7 +80,7 @@ export type MockPortalBlock = ChainBlock
 /** A stream request the mock portal received, with what it answered and the head it reported. */
 export type MockPortalRequest = ChainRequest
 
-/** What the mock portal answered a stream request: blocks, at-head, a fork, a refusal, a fault or a stall. */
+/** What the mock portal answered a stream request: blocks, at-head, a fork, a refusal, a fault, a stall, a cut or a raw line. */
 export type MockPortalAnswer = ChainAnswer
 
 /** A failure the mock portal serves instead of the next answers: an error status, or a response that stalls. */
@@ -119,6 +119,8 @@ export type MockChainPortal = MockPortal & {
   /**
    * Answers the next stream requests with a failure instead of data. `{ stallAfter: n }` sends the
    * headers and `n` blocks, then holds the response open until the client gives up on it.
+   * `{ cutAfter: n }` sends `n` blocks and half of the next, then ends the body. `{ lineAfter: n, line }`
+   * sends `n` blocks and then `line`, ended by a newline.
    */
   fail(fault: MockPortalFault): void
 }
@@ -193,6 +195,13 @@ async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal>
       return
     }
 
+    const timestamp = url.match(/^\/timestamps\/(\d+)\/block$/)
+    if (timestamp) {
+      writeTimestampBlock(res, chain.blockAt(Number(timestamp[1])))
+
+      return
+    }
+
     if (url === '/stream' || url === '/finalized-stream') {
       const endpoint: StreamEndpoint = url === '/stream' ? 'stream' : 'finalized-stream'
       const query = JSON.parse(body)
@@ -233,6 +242,23 @@ async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal>
   }
 }
 
+/** The portal's answer to a time after its head is a 404 with its error envelope. */
+function writeTimestampBlock(res: ServerResponse, block: number | undefined) {
+  res.writeHead(block === undefined ? 404 : 200, { 'Content-Type': 'application/json' })
+
+  if (block === undefined) {
+    res.end(
+      JSON.stringify({
+        error: { type: 'invalid_request_error', code: 'not_found', message: 'block not in hotblocks' },
+      }),
+    )
+
+    return
+  }
+
+  res.end(JSON.stringify({ block_number: block }))
+}
+
 function writeAnswer(res: ServerResponse, answer: ChainAnswer, head: WireHead) {
   switch (answer.kind) {
     case 'blocks':
@@ -244,6 +270,18 @@ function writeAnswer(res: ServerResponse, answer: ChainAnswer, head: WireHead) {
       writeBlocks(res, answer.blocks, head)
       // With no block written, Node holds the headers back, and the client would wait for them instead.
       res.flushHeaders()
+      break
+
+    case 'cut': {
+      writeBlocks(res, answer.blocks, head)
+      const line = answer.cutBlock ? JSON.stringify(answer.cutBlock) : ''
+      res.end(line.slice(0, Math.floor(line.length / 2)))
+      break
+    }
+
+    case 'line':
+      writeBlocks(res, answer.blocks, head)
+      res.end(answer.line + '\n')
       break
 
     case 'at-head':

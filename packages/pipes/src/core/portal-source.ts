@@ -13,6 +13,7 @@ import {
 import { last, partition } from '../internal/array.js'
 import { stallWatchdog } from '../internal/stall-watchdog.js'
 import {
+  DefaultPipeIdError,
   ForkCursorMissingError,
   ForkOnFinalizedStreamError,
   MissingForkAncestorError,
@@ -244,7 +245,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     // "not bound" and falls back to the shared legacy "stream" key — which would silently put
     // this pipe back into the cross-pipe cursor collision the id exists to prevent.
     if (!id?.trim()) {
-      throw new Error('PortalStream requires a non-empty "id": targets use it as the cursor key to persist progress')
+      throw new DefaultPipeIdError()
     }
 
     this.#id = id

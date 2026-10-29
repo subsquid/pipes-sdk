@@ -3,7 +3,7 @@ import { Readable } from 'stream'
 import { unexpectedCase, wait, withErrorContext } from '@subsquid/util-internal'
 
 import { formatDuration } from '~/core/formatters.js'
-import { PortalBlockOrderError } from '~/core/index.js'
+import { MalformedPortalResponseError, MissingForkAncestorError, PortalBlockOrderError } from '~/core/index.js'
 import { type Logger } from '~/core/logger.js'
 import {
   HttpBody,
@@ -17,7 +17,7 @@ import { npmVersion } from '~/version.js'
 
 import { ForkException } from './fork-exception.js'
 import { GetBlock, PortalQuery, Query } from './query/index.js'
-import { splitLines } from './split-lines.js'
+import { Lines, splitLines } from './split-lines.js'
 import { type BlockRef, type PortalHead, StreamBuffer, type StreamData } from './stream-buffer.js'
 import { isBodyTimeoutError, streamBodyTimeout } from './stream-timeout.js'
 
@@ -113,17 +113,6 @@ export interface PortalBlockStreamOptions {
  */
 export interface PortalBlockStream<B> extends AsyncIterable<StreamData<B>> {}
 
-/** The portal can answer 409 with the error envelope alone, leaving no chain to walk back to. */
-function isForkHttpError(err: unknown): err is HttpError {
-  if (!(err instanceof HttpError)) return false
-  if (err.response.status !== 409) return false
-
-  const previousBlocks = err.response.body?.previousBlocks
-  if (!Array.isArray(previousBlocks) || previousBlocks.length === 0) return false
-
-  return true
-}
-
 export class PortalClient {
   readonly #client: HttpClient
   readonly #url: URL
@@ -216,6 +205,13 @@ export class PortalClient {
           stalledMs,
         })
       },
+      onCut: ({ fromBlock }: Cut) => {
+        this.#logger?.warn({
+          message: `portal response ended inside a block, requesting again from block ${fromBlock}`,
+          url: withoutCredentials(this.#url),
+          fromBlock,
+        })
+      },
     }
 
     return createPortalStream(query, settings, async (q, o) =>
@@ -243,14 +239,22 @@ export class PortalClient {
           throw unexpectedCase(res.status)
       }
     } catch (e: unknown) {
-      if (isForkHttpError(e)) {
-        throw new ForkException(e.response.body.previousBlocks, {
-          fromBlock: query.fromBlock,
-          parentBlockHash: query.parentBlockHash,
-        })
+      const fork = e instanceof HttpError && e.response.status === 409
+      if (!fork) {
+        throw e
       }
 
-      throw e
+      // The portal can answer 409 with the error envelope alone, leaving no chain to walk back to.
+      const previousBlocks = e.response.body?.previousBlocks
+      const noAncestor = !Array.isArray(previousBlocks) || previousBlocks.length === 0
+      if (noAncestor) {
+        throw new MissingForkAncestorError({ block: query.fromBlock, portalMessage: e.response.body?.error?.message })
+      }
+
+      throw new ForkException(previousBlocks, {
+        fromBlock: query.fromBlock,
+        parentBlockHash: query.parentBlockHash,
+      })
     }
   }
 
@@ -269,6 +273,12 @@ export class PortalClient {
 /** A response that went silent: `fromBlock` is where the next request starts. */
 type Stall = { fromBlock: number; stalledMs: number }
 
+/** A response that ended inside a block: `fromBlock` is where the next request starts. */
+type Cut = { fromBlock: number }
+
+/** Returned for a line the body ended inside of: the response was cut, not malformed. */
+const CUT = Symbol('cut')
+
 function createPortalStream<Q extends Query>(
   query: Q,
   options: {
@@ -279,6 +289,7 @@ function createPortalStream<Q extends Query>(
     maxWaitTime: number
     headPollInterval: number
     onStall: (stall: Stall) => void
+    onCut: (cut: Cut) => void
   },
   requestStream: (
     query: Q,
@@ -286,10 +297,10 @@ function createPortalStream<Q extends Query>(
   ) => Promise<{
     head: PortalHead
     status: number
-    stream?: AsyncIterable<string[]> | null | undefined
+    stream?: AsyncIterable<Lines> | null | undefined
   }>,
 ): PortalBlockStream<GetBlock<Q>> {
-  const { headPollInterval, request, onStall, ...bufferOptions } = options
+  const { headPollInterval, request, onStall, onCut, ...bufferOptions } = options
   const buffer = new StreamBuffer<GetBlock<Q>>(bufferOptions)
 
   let { fromBlock = 0, toBlock, parentBlockHash } = query
@@ -298,6 +309,8 @@ function createPortalStream<Q extends Query>(
   // Outside the loop: a response carrying no blocks hands its counters to no batch, so they must
   // survive into the next iteration.
   let requests: Record<number, number> = {}
+  // The block a response last ended inside of. A second cut there is not a transport fault.
+  let cutAt: number | undefined
 
   const ingest = async () => {
     while (!buffer.signal.aborted) {
@@ -342,40 +355,48 @@ function createPortalStream<Q extends Query>(
       let lastDataAt = Date.now()
 
       try {
-        for await (let data of res.stream) {
+        for await (const { lines, unterminated } of res.stream) {
           const lastBlockReceivedAt = new Date()
           lastDataAt = lastBlockReceivedAt.getTime()
 
           const blocks: { block: GetBlock<Q>; bytes: number }[] = []
           const requestedFromBlock = fromBlock
 
-          for (let line of data) {
-            try {
-              const block = JSON.parse(line)
-              const number = block.header.number
+          for (const line of lines) {
+            const block = parseBlockLine(line, { fromBlock, unterminated })
 
-              // `fromBlock` is the request start, then one past the last block delivered.
-              const outOfWindow = number < fromBlock || (toBlock != null && number > toBlock)
-              if (outOfWindow) {
-                const previous = fromBlock > start ? fromBlock - 1 : undefined
-
-                throw new PortalBlockOrderError({ block: number, previous, range: { from: start, to: toBlock } })
+            // The body has ended, so the loop requests again from `fromBlock`.
+            if (block === CUT) {
+              if (cutAt === fromBlock) {
+                throw new MalformedPortalResponseError({ problem: 'cut-twice', fromBlock, line })
               }
 
-              // Update for next request
-              fromBlock = number + 1
-              parentBlockHash = block.header.hash
-
-              // Collect a block and its size
-              blocks.push({ block, bytes: line.length })
-            } catch (e: any) {
-              // FIXME we need to catch JSON parse errors here
-              // we hit an incomplete line, we should break and wait for more data
-              // we need to find the RC first
-              // if (e.message?.includes?.('Unterminated string')) break
-
-              throw e
+              cutAt = fromBlock
+              onCut({ fromBlock })
+              break
             }
+
+            const number = block.header.number
+
+            // `fromBlock` is the request start, then one past the last block delivered.
+            const outOfWindow = number < fromBlock || (toBlock != null && number > toBlock)
+            if (outOfWindow) {
+              const previous = fromBlock > start ? fromBlock - 1 : undefined
+
+              throw new PortalBlockOrderError({ block: number, previous, range: { from: start, to: toBlock } })
+            }
+
+            // Update for next request
+            fromBlock = number + 1
+            parentBlockHash = block.header.hash
+
+            // Collect a block and its size
+            blocks.push({ block, bytes: line.length })
+          }
+
+          // Only a cut line leaves nothing to deliver; its counters go with the next batch.
+          if (!blocks.length) {
+            continue
           }
 
           // `!= null`: a head of 0 is real, and reading it as absent would hold hot blocks back.
@@ -419,6 +440,29 @@ function createPortalStream<Q extends Query>(
   )
 
   return buffer.iterate()
+}
+
+/**
+ * Reads one line of a stream response as a block. A line that does not parse is a cut when the body
+ * ended inside it, and malformed when a newline ended it.
+ */
+function parseBlockLine(line: string, { fromBlock, unterminated }: { fromBlock: number; unterminated: boolean }) {
+  let block: any
+  try {
+    block = JSON.parse(line)
+  } catch {
+    if (unterminated) {
+      return CUT
+    }
+
+    throw new MalformedPortalResponseError({ problem: 'invalid-json', fromBlock, line })
+  }
+
+  if (!Number.isSafeInteger(block?.header?.number)) {
+    throw new MalformedPortalResponseError({ problem: 'no-block-number', fromBlock, line })
+  }
+
+  return block
 }
 
 function getHeadFromHeaders(headers: HttpResponse['headers']) {

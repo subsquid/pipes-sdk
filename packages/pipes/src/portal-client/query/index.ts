@@ -1,5 +1,7 @@
 import { unexpectedCase } from '@subsquid/util-internal'
-import { Validator } from '@subsquid/util-internal-validation'
+import { ValidationFailure, Validator } from '@subsquid/util-internal-validation'
+
+import { BlockValidationError } from '~/core/errors.js'
 
 import * as bitcoin from './bitcoin.js'
 import * as evm from './evm.js'
@@ -72,4 +74,21 @@ export function getBlockSchema<Block>(query: Query): Validator<Block, any> {
   BLOCK_SCHEMAS.set(query, schema)
 
   return schema
+}
+
+/** Casts raw portal blocks to `schema`, naming the block and the field a value of which does not match it. */
+export function castBlocks<Block>(schema: Validator<Block, any>, blocks: unknown[]): Block[] {
+  return blocks.map((block) => {
+    const result = schema.cast(block)
+    if (result instanceof ValidationFailure) {
+      const number = (block as { header?: { number?: unknown } } | null)?.header?.number
+
+      throw new BlockValidationError({
+        block: typeof number === 'number' ? number : undefined,
+        failure: result.toString(),
+      })
+    }
+
+    return result
+  })
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { MalformedPortalResponseError, MissingForkAncestorError } from '~/core/errors.js'
 import { defaultLogger } from '~/core/logger.js'
 import { HttpClient, HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
@@ -129,10 +130,8 @@ describe('PortalClient fork detection', () => {
   }
 
   // The pre-ADR-011 shape, and still the only part of the body that is read.
-  it('reads a fork from a 409 that carries previous blocks alone', async () => {
-    portal = await mockPortal([
-      { statusCode: 409, data: { previousBlocks: [{ number: 1, hash: '0x1' }] } },
-    ] satisfies MockResponse[])
+  withPortal('reads a fork from a 409 that carries previous blocks alone', async ({ portal: serve }) => {
+    const portal = await serve([{ statusCode: 409, data: { previousBlocks: [{ number: 1, hash: '0x1' }] } }])
 
     const client = new PortalClient({ url: portal.url })
     const err = await streamError(client)
@@ -142,8 +141,8 @@ describe('PortalClient fork detection', () => {
   })
 
   // ADR-011 put `error` beside `previousBlocks`, not in place of it.
-  it('reads a fork from a 409 that also carries the error envelope', async () => {
-    portal = await mockPortal([
+  withPortal('reads a fork from a 409 that also carries the error envelope', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 409,
         data: {
@@ -155,7 +154,7 @@ describe('PortalClient fork detection', () => {
           },
         },
       },
-    ] satisfies MockResponse[])
+    ])
 
     const client = new PortalClient({ url: portal.url })
     const err = await streamError(client)
@@ -165,8 +164,8 @@ describe('PortalClient fork detection', () => {
   })
 
   // Read as a fork, this walks an undefined list and throws a TypeError over the status.
-  it('surfaces a 409 that carries no previous blocks instead of misreading it as a fork', async () => {
-    portal = await mockPortal([
+  withPortal('refuses a 409 that carries no previous blocks with a coded error', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 409,
         data: {
@@ -177,26 +176,109 @@ describe('PortalClient fork detection', () => {
           },
         },
       },
-    ] satisfies MockResponse[])
+    ])
 
     const client = new PortalClient({ url: portal.url })
     const err = await streamError(client)
 
     expect(isForkException(err)).toBe(false)
-    expect(err).toBeInstanceOf(HttpError)
-    expect((err as HttpError).response.status).toBe(409)
+    expect(err).toBeInstanceOf(MissingForkAncestorError)
+    expect((err as Error).message).toContain('The portal said: "Base block mismatch"')
   })
 
   // No ancestor to walk back to either, and `last()` throws on it.
-  it('surfaces a 409 whose previous blocks are an empty list', async () => {
-    portal = await mockPortal([{ statusCode: 409, data: { previousBlocks: [] } }] satisfies MockResponse[])
+  withPortal('refuses a 409 whose previous blocks are an empty list', async ({ portal: serve }) => {
+    const portal = await serve([{ statusCode: 409, data: { previousBlocks: [] } }])
 
     const client = new PortalClient({ url: portal.url })
     const err = await streamError(client)
 
     expect(isForkException(err)).toBe(false)
+    expect(err).toBeInstanceOf(MissingForkAncestorError)
+  })
+
+  // A 409 is the fork signal only; any other refusal stays a transport error.
+  withPortal('keeps an error status other than 409 an HTTP error', async ({ portal: serve }) => {
+    const portal = await serve([{ statusCode: 500 }])
+
+    const err = await streamError(new PortalClient({ url: portal.url }))
+
     expect(err).toBeInstanceOf(HttpError)
-    expect((err as HttpError).response.status).toBe(409)
+  })
+})
+
+describe('PortalClient malformed response', () => {
+  const range = { ...query, fromBlock: 1, toBlock: 5, includeAllBlocks: true }
+
+  /** Block numbers the stream delivered, and the error it ended with. */
+  async function readUntilError(client: PortalClient) {
+    const delivered: number[] = []
+    try {
+      for await (const batch of client.getStream(range, { request: { retryAttempts: 0 } })) {
+        delivered.push(...batch.blocks.map((b: any) => b.header.number))
+      }
+    } catch (error) {
+      return { delivered, error: error as Error }
+    }
+
+    return { delivered, error: undefined }
+  }
+
+  // The blocks before the cut are delivered once, so the next request starts at the cut block.
+  withPortal('requests a response cut inside a block again from that block', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ cutAfter: 2 })
+
+    const logger = defaultLogger({ level: 'silent' })
+    const warn = vi.spyOn(logger, 'warn')
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url, logger }))
+
+    expect(error).toBeUndefined()
+    expect(delivered).toEqual([1, 2, 3, 4, 5])
+    expect(portal.requests.map((r) => [r.query.fromBlock, r.answer?.kind])).toEqual([
+      [1, 'cut'],
+      [3, 'blocks'],
+    ])
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: 'portal response ended inside a block, requesting again from block 3' }),
+    )
+  })
+
+  withPortal('refuses a response cut inside the same block twice in a row', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ cutAfter: 2 })
+    portal.fail({ cutAfter: 0 })
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }))
+
+    expect(error).toBeInstanceOf(MalformedPortalResponseError)
+    expect(error?.message).toContain('ended its response inside the next block, at or above block 3, twice in a row')
+    expect(delivered).toEqual([1, 2].slice(0, delivered.length))
+  })
+
+  withPortal('refuses a line that is not valid JSON, naming where it came', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ lineAfter: 2, line: '{"header": nope' })
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }))
+
+    expect(error).toBeInstanceOf(MalformedPortalResponseError)
+    expect(error?.message).toContain('not valid JSON in place of the next block, at or above block 3')
+    expect(error?.message).toContain('Line: {"header": nope')
+    expect(delivered).toEqual([1, 2].slice(0, delivered.length))
+    expect(portal.requests).toHaveLength(1)
+  })
+
+  withPortal('refuses a line without a block number', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ lineAfter: 0, line: '{"header":{"hash":"0x1"}}' })
+
+    const { delivered, error } = await readUntilError(new PortalClient({ url: portal.url }))
+
+    expect(error).toBeInstanceOf(MalformedPortalResponseError)
+    expect(error?.message).toContain('a line without a block number in place of the next block, at or above block 1')
+    expect(delivered).toEqual([])
   })
 })
 

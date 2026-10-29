@@ -10,8 +10,8 @@ import { PipeError, SdkErrorName } from '~/core/errors.js'
  * BigQuery, E23xx Parquet, E24xx PubSub).
  */
 export class ClickhouseTargetError extends PipeError {
-  constructor(code: string, message: string | string[]) {
-    super(code, SdkErrorName.TargetConfiguration, message)
+  constructor(code: string, message: string | string[], options?: ErrorOptions) {
+    super(code, SdkErrorName.TargetConfiguration, message, options)
   }
 }
 
@@ -31,4 +31,8 @@ export const CLICKHOUSE_ERROR_CODES = {
   INVALID_ROLLBACK_INDEX_COLUMN: 'E2006',
   /** A chain fork arrived but no `onRollback` handler is configured to remove the orphaned rows. */
   MISSING_ROLLBACK_ON_FORK: 'E2007',
+  /** A rollback named a table that does not exist. */
+  ROLLBACK_TABLE_NOT_FOUND: 'E2008',
+  /** A statement from a file `executeFiles` runs failed. */
+  SQL_FILE_STATEMENT_FAILED: 'E2009',
 } as const

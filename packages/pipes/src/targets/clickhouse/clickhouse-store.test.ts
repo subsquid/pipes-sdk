@@ -1,4 +1,7 @@
 import { randomBytes } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import { createClient } from '@clickhouse/client'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -628,14 +631,6 @@ describe('Clickhouse store', () => {
         new RegExp(`Distributed table.*${TEST_DB}\\.dist_local`, 's'),
       )
     })
-
-    it('rejects a table that does not exist', async () => {
-      const store = new ClickhouseStore(client)
-
-      await expect(store.removeAllRows({ tables: 'missing', where: 'id > 0' })).rejects.toThrow(
-        /"missing" does not exist/,
-      )
-    })
   })
 
   describe('rollback index', () => {
@@ -777,5 +772,45 @@ describe('ClickhouseStore.removeRowsAfter', () => {
     await events.store.removeRowsAfter({ number: -1, upTo: 3 }, { tables: 'events', where: "pipe = 'a'" })
 
     expect(await events.blocks('a')).toEqual([4, 5, 6, 7, 8, 9])
+  })
+})
+
+describe('ClickhouseStore coded refusals', () => {
+  /** An empty database of the test's own, and a directory for SQL files. */
+  const withStore = it.extend<{ store: ClickhouseStore; sqlDir: string }>({
+    store: async ({}, use) => {
+      const name = `store_refusals_${randomBytes(6).toString('hex')}`
+      await admin.command({ query: `CREATE DATABASE ${name}` })
+      const scoped = createClient({ ...connection, database: name })
+
+      await use(new ClickhouseStore(scoped))
+
+      await scoped.close()
+      await admin.command({ query: `DROP DATABASE ${name} SYNC` })
+    },
+    sqlDir: async ({}, use) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'sqd-sql-'))
+
+      await use(dir)
+
+      await rm(dir, { recursive: true, force: true })
+    },
+  })
+
+  withStore('refuses to roll back a table that does not exist (E2008)', async ({ store }) => {
+    const rollback = store.removeRowsAfter({ number: 0 }, { tables: 'missing' })
+
+    await expect(rollback).rejects.toMatchObject({ code: 'E2008' })
+    await expect(rollback).rejects.toThrow(/"missing" does not exist/)
+  })
+
+  // Exiting the process instead would skip the caller's cleanup and end every other pipe in it.
+  withStore('throws on a failing statement, naming its file (E2009)', async ({ store, sqlDir }) => {
+    await writeFile(path.join(sqlDir, 'broken.sql'), 'CREATE TABLE broken (id NoSuchType) ENGINE = Memory;')
+
+    const running = store.executeFiles(sqlDir)
+
+    await expect(running).rejects.toMatchObject({ code: 'E2009', cause: expect.any(Error) })
+    await expect(running).rejects.toThrow(/A statement in ".*broken\.sql" failed/)
   })
 })

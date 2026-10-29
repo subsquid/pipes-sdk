@@ -1,3 +1,4 @@
+import { HttpError } from '~/http-client/index.js'
 import { Query } from '~/portal-client/index.js'
 
 import { Heap } from '../internal/heap.js'
@@ -148,13 +149,19 @@ export abstract class QueryBuilder<F extends {}, R = any> {
         try {
           resolved.set(ts, await portal.resolveTimestamp(ts))
         } catch (error) {
-          if (error instanceof Error && error.message.toLowerCase().includes('no chunk found for timestamp')) {
-            const date = new Date(ts * 1000).toISOString()
-            throw new BlockRangeConfigurationError(
-              `Failed to resolve timestamp ${date} to a block number. The block for this timestamp may not have been produced yet.`,
-            )
+          // The portal answers a timestamp before its first block with that block, so 404 means after its head.
+          const noBlockYet = error instanceof HttpError && error.response.status === 404
+          if (!noBlockYet) {
+            throw error
           }
-          throw error
+
+          const date = new Date(ts * 1000).toISOString()
+          const portalMessage = error.response.body?.error?.message
+
+          throw new BlockRangeConfigurationError([
+            `Failed to resolve timestamp ${date} to a block number. The block for this timestamp may not have been produced yet.`,
+            ...(portalMessage ? [`The portal said: "${portalMessage}"`] : []),
+          ])
         }
       }),
     )
