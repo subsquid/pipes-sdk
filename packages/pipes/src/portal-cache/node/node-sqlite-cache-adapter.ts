@@ -45,7 +45,7 @@ class PortalSqliteCache extends PortalCacheNodeJs<PortalSqliteCacheOptions> {
 
   async *stream({ fromBlock, queryHash }: StreamBatch) {
     while (true) {
-      const res = this.assertDb().get<{ value: Buffer; block_to: number }>(this.#statements.select, [
+      const res = this.assertDb().get<{ value: Uint8Array; block_to: number }>(this.#statements.select, [
         fromBlock,
         queryHash,
       ])
