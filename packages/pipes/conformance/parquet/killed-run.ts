@@ -14,7 +14,7 @@ const { range, url, dir, journal, state, point } = JSON.parse(process.argv[2]) a
 
 const record = journalTo<JournalEntry>(journal)
 
-// IB-22: the cursor of the state record is the store's commit point.
+// IB-22: the cursor of the state record is the store's commit point. A start state commits nothing.
 const committed = () => {
   let raw: string
   try {
@@ -23,7 +23,9 @@ const committed = () => {
     return undefined
   }
 
-  return (JSON.parse(raw) as { cursor: { number: number } }).cursor.number
+  const { cursor } = JSON.parse(raw) as { cursor: { kind?: string; number: number } }
+
+  return cursor.kind === 'start' ? undefined : cursor.number
 }
 
 armKillSwitch({

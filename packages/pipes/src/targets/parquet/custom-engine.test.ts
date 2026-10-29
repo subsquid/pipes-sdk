@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -6,6 +6,7 @@ import { ParquetReader, ParquetSchema, ParquetWriter } from '@dsnp/parquetjs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { evmPortalStream } from '~/evm/index.js'
+import { withDir } from '~/testing/dir-fixture.js'
 import { type MockPortal, type MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
 
 import type { ParquetEngine } from './engine.js'
@@ -173,28 +174,33 @@ describe('parquetTarget with a custom engine', () => {
     expect(stateFiles).toHaveLength(1)
   })
 
-  it('refuses an engine output that merely wraps non-Parquet bytes in the magic', async () => {
-    portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
+  withDir(
+    'refuses an engine output that merely wraps non-Parquet bytes in the magic',
+    async ({ portal: open, dir }) => {
+      const portal = await open([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
-    await expect(
-      evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
-        parquetTarget({
-          dir,
-          tables: [{ table: 'blocks', schema: { blockNumber: { type: 'INT64' } } }],
-          settings: { engine: magicWrappedJsonEngine() },
-          onData: ({ store, data }) => {
-            store.insert(
-              'blocks',
-              data.map((b) => ({ blockNumber: b.number })),
-            )
-          },
-        }),
-      ),
-    ).rejects.toThrowError(/complete Parquet files/)
+      await expect(
+        evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+          parquetTarget({
+            dir,
+            tables: [{ table: 'blocks', schema: { blockNumber: { type: 'INT64' } } }],
+            settings: { engine: magicWrappedJsonEngine() },
+            onData: ({ store, data }) => {
+              store.insert(
+                'blocks',
+                data.map((b) => ({ blockNumber: b.number })),
+              )
+            },
+          }),
+        ),
+      ).rejects.toThrowError(/complete Parquet files/)
 
-    // Nothing was published, the temp file was cleaned up, and no cursor was persisted —
-    // the run is fully recoverable.
-    expect(await readdir(path.join(dir, 'blocks'))).toEqual([])
-    expect((await readdir(dir)).filter((f) => f.startsWith('_sqd_parquet_state.'))).toEqual([])
-  })
+      // Nothing was published, the temp file was cleaned up, and no cursor was committed: the state
+      // is the start state the first batch wrote, so the run is fully recoverable.
+      const state = JSON.parse(await readFile(path.join(dir, '_sqd_parquet_state.test.json'), 'utf8'))
+
+      expect(await readdir(path.join(dir, 'blocks'))).toEqual([])
+      expect(state).toEqual({ id: 'test', cursor: { kind: 'start', number: -1 } })
+    },
+  )
 })

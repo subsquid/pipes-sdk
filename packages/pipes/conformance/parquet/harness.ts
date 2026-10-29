@@ -9,18 +9,13 @@ import { testLogger } from '~/testing/index.js'
 
 import { killChild } from '../kill/spawn.js'
 import type { ReferenceModel } from '../oracle/reference-model.js'
-import {
-  type ParquetSnapshot,
-  type ParquetTableSnapshot,
-  validateParquetSnapshot,
-  validateRouteMode,
-} from '../oracle/validators.js'
+import { type ParquetTableSnapshot, validateParquetSnapshot, validateRouteMode } from '../oracle/validators.js'
 import { RANGES, S1, type S1Simulator, S1_ROWS, endStateOf, follow, s1Oracle } from '../scenarios/backfill.js'
 import { PIPE_ID, TABLE_NAMES, type TableName, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
 import type { JournalEntry, KillPoint } from './kill-switch.js'
 import { streamParquet } from './pipe.js'
-import { type ParquetUnit, readParquetSnapshot, rowsOf } from './probe.js'
+import { type ParquetRead, type ParquetUnit, readParquetSnapshot, rowsOf } from './probe.js'
 
 const KILLED_RUN = fileURLToPath(new URL('./killed-run.ts', import.meta.url))
 
@@ -42,7 +37,7 @@ export const it = scenarios.extend<{ dir: string }>({
 })
 
 /** A read of a class-K store of the ERC-20 tables. */
-export type ParquetStore = ParquetSnapshot<ParquetUnit, TableName>
+export type ParquetStore = ParquetRead<TableName>
 
 export function readParquetStore(dir: string): Promise<ParquetStore> {
   return readParquetSnapshot({ dir, id: PIPE_ID, tables: TABLE_NAMES })
@@ -141,8 +136,10 @@ export async function runKilled({
 
 /** What a crash left beside its commit point. */
 export type CrashWindow = {
-  /** Whether the store holds a state record. */
+  /** Whether the store holds a commit. */
   state: boolean
+  /** The stream start its start state names, when the store holds one instead of a commit. */
+  start: number | undefined
   /** Per table, the units above the cursor (every unit, with no cursor), by name. */
   above: Record<TableName, string[]>
   /** The window ends of the units above the cursor: one checkpoint publishes them all at one end. */
@@ -174,6 +171,7 @@ async function crashWindowOf(dir: string, store: ParquetStore): Promise<CrashWin
 
   return {
     state: store.state !== undefined,
+    start: store.start,
     above,
     aboveEnds: [...new Set(ends.map((unit) => unit.to))],
     temp,
@@ -193,7 +191,7 @@ function committedPart(store: ParquetStore): ParquetStore {
     tables[table] = { units: units.filter((unit) => unit.to <= cursor), next }
   }
 
-  return { state: store.state, tables, residue: [] }
+  return { state: store.state, start: store.start, tables, residue: [] }
 }
 
 /**

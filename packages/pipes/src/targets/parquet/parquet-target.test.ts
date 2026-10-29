@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { type PortalRange, type SpanHooks, createTarget } from '~/core/index.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
+import { withDir } from '~/testing/dir-fixture.js'
 import { type MockPortal, type MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
-import { withPortal } from '~/testing/portal-fixture.js'
 
 import { PARQUET_ERROR_CODES, ParquetTargetError } from './errors.js'
 import { ParquetState } from './parquet-state.js'
@@ -76,6 +76,11 @@ async function listDataFiles(dir: string, table: string): Promise<string[]> {
   const entries = await readdir(path.join(dir, table)).catch(() => [] as string[])
 
   return entries.filter((f) => /^\d+-\d+\.parquet$/.test(f)).sort()
+}
+
+/** The parsed state file of the pipe `id`. */
+async function readStateFile(dir: string, id: string): Promise<unknown> {
+  return JSON.parse(await readFile(path.join(dir, `_sqd_parquet_state.${id}.json`), 'utf8'))
 }
 
 /** All entries in a table dir (to assert temp-file cleanup). */
@@ -148,15 +153,6 @@ function spanTracker() {
     unended: () => started.filter((p) => p.startsWith('batch > parquet') && !ended.includes(p)),
   }
 }
-
-/** A test with a fresh output directory, removed after the test, beside the `portal` fixture. */
-const withDir = withPortal.extend<{ dir: string }>({
-  dir: async ({}, use) => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'sqd-parquet-test-'))
-    await use(dir)
-    await rm(dir, { recursive: true, force: true })
-  },
-})
 
 /** Writes a Parquet file directly (used to seed stale/over-cursor files for recovery tests). */
 async function seedParquetFile(filePath: string, rows: BlockRow[]): Promise<void> {
@@ -1041,8 +1037,8 @@ describe('parquetTarget', () => {
   })
 
   describe('profiling', () => {
-    it('opens a target span per batch, with a child span per phase', async () => {
-      portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
+    withDir('opens a target span per batch, with a child span per phase', async ({ portal: open, dir }) => {
+      const portal = await open([blocksResponse([1, 2, 3], 3)], { finalized: true })
       const spans = spanTracker()
 
       // The checkpoint has to fire inside the batch (that is where a span exists to nest under);
@@ -1064,6 +1060,7 @@ describe('parquetTarget', () => {
 
       expect(spans.targetSpans()).toEqual([
         'batch > parquet',
+        'batch > parquet > save start state',
         'batch > parquet > data handler',
         'batch > parquet > flush batch',
         'batch > parquet > checkpoint (interval-blocks)',
@@ -1073,8 +1070,8 @@ describe('parquetTarget', () => {
       expect(spans.unended()).toEqual([])
     })
 
-    it('closes the target span when the batch throws', async () => {
-      portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
+    withDir('closes the target span when the batch throws', async ({ portal: open, dir }) => {
+      const portal = await open([blocksResponse([1, 2, 3], 3)], { finalized: true })
       const spans = spanTracker()
 
       await expect(
@@ -1094,7 +1091,11 @@ describe('parquetTarget', () => {
         ),
       ).rejects.toThrowError('onData failed')
 
-      expect(spans.targetSpans()).toEqual(['batch > parquet', 'batch > parquet > data handler'])
+      expect(spans.targetSpans()).toEqual([
+        'batch > parquet',
+        'batch > parquet > save start state',
+        'batch > parquet > data handler',
+      ])
       expect(spans.unended()).toEqual([])
     })
   })
@@ -1185,11 +1186,11 @@ describe('parquetTarget', () => {
   })
 
   describe('crash safety', () => {
-    it('discards open temp files and does not advance the cursor when a batch throws', async () => {
+    withDir('discards open temp files and commits no cursor when a batch throws', async ({ portal: open, dir }) => {
       // Batch 1 opens a writer with a finalized row (no checkpoint — huge default maxBytes);
-      // batch 2 throws before any checkpoint, so the open temp file must be discarded and the
-      // cursor must never be persisted. maxBytes:1 forces one batch per response.
-      portal = await mockPortal({ latest: 2, blocksPerResponse: 1 })
+      // batch 2 throws before any checkpoint, so the open temp file must be discarded and no
+      // cursor may be committed. maxBytes:1 forces one batch per response.
+      const portal = await open({ latest: 2, blocksPerResponse: 1 })
 
       let batches = 0
       await expect(
@@ -1214,9 +1215,8 @@ describe('parquetTarget', () => {
       expect(await listDataFiles(dir, 'blocks')).toEqual([])
       // ...no temp file leaked...
       expect((await listAll(dir, 'blocks')).filter((f) => f.startsWith('.tmp-'))).toEqual([])
-      // ...and the cursor was never persisted (no checkpoint happened). The pipe runs with
-      // id 'test', so the namespaced state file is the one that must be absent.
-      expect((await listAll(dir, '')).includes('_sqd_parquet_state.test.json')).toBe(false)
+      // ...and no checkpoint committed a cursor: the state is the start state the first batch wrote.
+      expect(await readStateFile(dir, 'test')).toEqual({ id: 'test', cursor: { kind: 'start', number: -1 } })
     })
   })
 
@@ -1617,6 +1617,93 @@ describe('one pipe per directory', () => {
 
     expect(await state().getCursor()).toEqual({ latest: { number: 5, hash: '0x5' }, finalized: null })
   })
+})
+
+describe('before the first commit', () => {
+  withDir(
+    'writes a start state one block below the stream start before anything is published',
+    async ({ portal: open, dir }) => {
+      const portal = await open({ latest: 5 })
+      let stateBefore: unknown
+      let publishedBefore: string[] | undefined
+
+      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 3, to: 5 }) }).pipeTo(
+        parquetTarget({
+          dir,
+          tables: [BLOCKS_TABLE],
+          onData: async ({ store, data }) => {
+            // The first batch's handler runs before its checkpoint, the first that can publish.
+            if (publishedBefore === undefined) {
+              stateBefore = await readStateFile(dir, 'test')
+              publishedBefore = await listDataFiles(dir, 'blocks')
+            }
+
+            insertBlocks({ store, data })
+          },
+        }),
+      )
+
+      expect(stateBefore).toEqual({ id: 'test', cursor: { kind: 'start', number: 2 } })
+      expect(publishedBefore).toEqual([])
+    },
+  )
+
+  withDir(
+    'recovers from a start state by deleting every published file and starting cold',
+    async ({ portal: open, dir }) => {
+      // The first checkpoint published a file and died before its state write.
+      await writeFile(
+        path.join(dir, '_sqd_parquet_state.test.json'),
+        JSON.stringify({ id: 'test', cursor: { kind: 'start', number: -1 } }),
+      )
+      await mkdir(path.join(dir, 'blocks'))
+      await seedParquetFile(path.join(dir, 'blocks', '000000000000-000000000002.parquet'), [
+        { blockNumber: 1, hash: 'STALE', timestamp: 0 },
+      ])
+      let resumed: unknown
+      const portal = await open(
+        [{ ...blocksResponse([0, 1, 2, 3], 3), validateRequest: (request) => (resumed = request) }],
+        { finalized: true },
+      )
+
+      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+        parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
+      )
+
+      expect(resumed).toMatchObject({ fromBlock: 0 })
+      expect(resumed).not.toHaveProperty('parentBlockHash')
+      expect(await readBlocks(dir)).toEqual([
+        { blockNumber: 0, hash: '0x0', timestamp: 0 },
+        { blockNumber: 1, hash: '0x1', timestamp: 1000 },
+        { blockNumber: 2, hash: '0x2', timestamp: 2000 },
+        { blockNumber: 3, hash: '0x3', timestamp: 3000 },
+      ])
+    },
+  )
+
+  withDir(
+    'refuses published files with no state file, before touching any file (CN-44)',
+    async ({ portal: open, dir }) => {
+      await mkdir(path.join(dir, 'blocks'))
+      await seedParquetFile(path.join(dir, 'blocks', '000000000000-000000000002.parquet'), [
+        { blockNumber: 1, hash: '0x1', timestamp: 1000 },
+      ])
+      await writeFile(path.join(dir, 'blocks', '.tmp-000000.parquet'), '')
+      const before = await listAll(dir, 'blocks')
+      const portal = await open({ latest: 3 })
+
+      const run = evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+        parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
+      )
+
+      await expect(run).rejects.toMatchObject({
+        code: PARQUET_ERROR_CODES.ORPHANED_DATA,
+        message: expect.stringContaining(`holds published data files (blocks/000000000000-000000000002.parquet)`),
+      })
+      expect(await listAll(dir, 'blocks')).toEqual(before)
+      expect(portal.requests).toEqual([])
+    },
+  )
 })
 
 describe('parquet index barrel', () => {

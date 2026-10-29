@@ -105,7 +105,9 @@ type ParquetTargetMetrics = {
  * checkpoint, and the persisted cursor advances only at a checkpoint — so no finalized row is ever
  * held past the cursor. On restart, recovery deletes any published file above the cursor (an
  * incomplete checkpoint) and any temp file, then `read(cursor)` re-fetches the deterministic,
- * finalized data after the cursor, which regenerates identically.
+ * finalized data after the cursor, which regenerates identically. A crash in the first checkpoint
+ * recovers the same way. Published files with no state file at all are refused (`E2322`): nothing
+ * records which of their blocks were committed.
  *
  * **Contract (load-bearing): `onData` must be a pure function of the batch for finalized blocks.**
  * Recovery re-processes finalized blocks after a crash and relies on regenerating byte-identical
@@ -269,6 +271,14 @@ export function parquetTarget<T>(options: {
                     `block ${formatBlock(seeded)} — the furthest a file could start for the committed cursor. ` +
                     `Seeding ${formatBlock(seeded)} instead, so the blocks after the cursor stay claimed. This is ` +
                     `expected if the configured query ranges changed since the state file was written.`,
+                )
+              }
+
+              // Before the first publish, so recovery from a crash in the first checkpoint finds a
+              // state that claims the files instead of orphaned data.
+              if (!startCursor) {
+                await target.measure({ name: 'save start state', labels: 'db' }, () =>
+                  state.saveStartCursor(ctx.stream.state.initial),
                 )
               }
             }
