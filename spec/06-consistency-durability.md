@@ -32,6 +32,9 @@ exceeds the cursor plus all temporary files, then re-fetches; requires replay pu
 **unless** it starts where the recorded coverage says that table was next due to
 publish from, which identifies it as the interrupted checkpoint's own unit (a sparse
 table's stretched unit straddles by construction) and so as a remnant to delete.
+Before its first checkpoint a sink with no state persists a start state, which records no
+commit (IB-22): a crash in the first checkpoint then leaves units recovery knows to be its
+own, and deletes. Units with no state at all have outlived it and are refused (CN-44).
 Delivery: effectively exactly-once.
 
 **CN-13 — Class A (append-lagged).** Data is appended by author code first; the cursor
@@ -177,8 +180,7 @@ undecidable — "table non-empty" is not evidence of *orphan* data, the rows may
 another key — and probing them would make one pipe's startup depend on another's data,
 contrary to INV-35; a sink over shared tables MUST NOT run the guard. *(The write-ahead
 binding probes table-wide and so refuses a legitimate first run into a populated shared
-table — GAP-20; the file binding refuses another key's state but starts afresh over data
-with no state at all — GAP-41.)*
+table — GAP-20.)*
 
 **CN-45 — Cross-implementation recovery.** [MUST] Recovery reads state via the formats
 of IB-20…IB-28 only; any conforming implementation recovers state written by any other

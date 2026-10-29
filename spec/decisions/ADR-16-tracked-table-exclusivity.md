@@ -22,7 +22,9 @@ filename.
 The underlying obstacle: absent per-row key attribution, "are these rows mine?" is
 unanswerable. Rows generally carry no pipe key. The same question blocks recovery from a
 crash before the first cursor write: what that crash leaves may be removed only if the
-sink can tell it from another pipe's data (GAP-41; for class A, ADR-15).
+sink can tell it from another pipe's data (for class A, ADR-15). The file binding could
+not: it read a directory with data and no state as a cold start, so it neither removed
+that crash's files nor refused data whose state was lost.
 
 ## Decision
 
@@ -46,6 +48,12 @@ startup refuses a directory that holds another key's state sidecar (IB-22, E2321
 sidecar is the one mark of another pipe that a keyless directory carries. The check runs
 at startup only, so two first runs started together on an empty directory both pass it,
 and the next start of either refuses.
+
+The file binding tells its own crash residue from orphaned data by a **start state**
+(IB-22): before its first checkpoint publishes anything, a pipe with no state writes a
+state that records no commit. Recovery from a start state deletes every published file
+and starts cold. Published files with no state at all can then only have outlived their
+state, so startup refuses them, with a coded error, before it touches any file (CN-44).
 
 A directory that two pipes share today, each with its own tables, refuses at its next
 start; moving one pipe's state file and table directories to a directory of its own
@@ -75,10 +83,10 @@ enforce the same thing.
 CN-44 gains a precondition and stops contradicting INV-35. The file binding's recovery
 stops acting on a co-resident pipe's files, since it refuses to run beside one; this
 closes the shared-directory gap. Its exclusivity also makes CN-44 apply to it: the
-refusal under another key's sidecar covers a wrong key, but a directory with data and no
-state at all still starts afresh (GAP-41). A crash before the first state write leaves
-the same shape, so to repair that crash rather than refuse it as orphan data, the
-binding must tell the two apart, which takes a state write before the first publish.
+refusal under another key's sidecar covers a wrong key, the refusal of data with no state
+a lost state, and a crash in the first checkpoint recovers like any other. A directory
+whose last run crashed in its first checkpoint under a release that wrote no start state
+refuses once after the upgrade; deleting its table directories re-indexes it.
 
 The class-A repair hook is called over the range start after a crash in the first batch
 (ADR-15), since the removal it makes is the author's to scope. The binding's documented

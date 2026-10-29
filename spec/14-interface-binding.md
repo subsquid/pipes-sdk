@@ -128,9 +128,14 @@ P-PG-UNFINALIZED-RETENTION blocks of snapshots. Legacy migration: single guarded
 (id-less form `_sqd_parquet_state.json` — written only when the target is configured
 without an id, unreachable through a source-connected pipe, WP-3): `{id?, cursor,
 finalized?, coverage: {<table>: next-window-start}}`, written temp-file → fsync →
-rename → dir-fsync. The output directory belongs to one cursor key (ADR-16): before it
+rename → dir-fsync. A pipe with no state writes a **start state** before its first
+checkpoint publishes: `{id?, cursor: {"kind": "start", "number": <stream start − 1>}}`,
+with no hash, finalized head or coverage; `kind` tells it from a commit. Recovery from a
+start state deletes every published file and starts cold; the first commit replaces it.
+The output directory belongs to one cursor key (ADR-16): before it
 touches any file, startup refuses a directory that holds a state sidecar under another
-key, the id-less form included (coded). Two first runs started together on an empty
+key, the id-less form included (coded), and published data files with no state sidecar
+(coded, CN-44). Two first runs started together on an empty
 directory both pass; the next start of either refuses. Data files
 `<table>/<from>-<to>.parquet`, names zero-padded to 12 digits, window = coverage (DEF-14)
 not row min/max; publish refuses to overwrite (coded). Recovery deletes `*.tmp-*` always
@@ -239,7 +244,7 @@ is scoped to the cursor key by whoever makes it (ADR-16).
 |---|---|---|---|---|
 | ClickHouse | A | none | yes | not declared — guard off; the repair hook scopes its removal to the pipe's rows (RP-42) |
 | Postgres | T | advisory, per batch | yes | not declared — guard off |
-| Parquet | K | none | no | declared per output directory; startup refuses another key's state sidecar (IB-22) — guard on *(a directory with data and no state starts afresh: GAP-41)* |
+| Parquet | K | none | no | declared per output directory; startup refuses another key's state sidecar and published data with no state (IB-22) — guard on |
 | BigQuery | W | none | no | assumed exclusive — guard on, probed table-wide *(GAP-20)* |
 | Pub/Sub | C | exclusive state-file lock, process-lifetime | no | n/a — the sink owns no tables; ids are namespaced per producer |
 
@@ -315,7 +320,7 @@ consumers MUST NOT read it as a block number.
 | E20xx | ClickHouse binding | E2001–E2009 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler, rollback of a missing table, failed SQL file statement) |
 | E21xx | Postgres binding | E2101–E2107 (client, config, advisory lock, untracked table, missing PK, FK cycle, unresolved column name) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
-| E23xx | Parquet binding | E2301–E2317, E2320 and E2321 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused; E2321 output directory claimed by another cursor key). E2318–E2319 retired, unassigned |
+| E23xx | Parquet binding | E2301–E2317 and E2320–E2322 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused; E2321 output directory claimed by another cursor key; E2322 published data with no state). E2318–E2319 retired, unassigned |
 | E24xx | Pub/Sub binding | E2401–E2429, with E2427 unassigned (topic/attribute/request guards E2401–E2404, checked pre-commit and again after recovery encoding; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, state write failure E2426, state identity/wire binding E2419/E2421, cold-start refusal E2420, and sequence exhaustion E2424; row-identity guards E2412–E2413, E2418, E2422; route configuration E2414–E2416, E2423, E2425; sequence barrier E2428 one topic per producer, E2429 forward block order) |
 
 **IB-51 — Transport errors.** Non-coded, typed: HTTP error (with response), request
