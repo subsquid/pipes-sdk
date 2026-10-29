@@ -9,7 +9,15 @@ import { ReadOptions, Target, TargetState, createTarget } from '~/core/target.js
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
 import { PortalBlockStreamOptions, PortalClient, PortalClientOptions, Query } from '~/portal-client/index.js'
-import { MockPortal, MockResponse, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
+import {
+  MockChainPortal,
+  MockPortal,
+  MockResponse,
+  blockDecoder,
+  mockMetricsServer,
+  mockPortal,
+  readAll,
+} from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
 /**
@@ -42,14 +50,12 @@ function spanCounter() {
   }
 }
 
-function threeBlockPortal() {
-  return mockPortal(
-    [1, 2, 3].map((number) => ({
-      statusCode: 200,
-      data: [{ header: { number, hash: `0x${number}`, timestamp: number * 1000 } }],
-      head: { finalized: { number: 0, hash: '0x0' } },
-    })),
-  )
+function threeBlockResponses(): MockResponse[] {
+  return [1, 2, 3].map((number) => ({
+    statusCode: 200,
+    data: [{ header: { number, hash: `0x${number}`, timestamp: number * 1000 } }],
+    head: { finalized: { number: 0, hash: '0x0' } },
+  }))
 }
 
 describe('Portal abstract stream', () => {
@@ -583,14 +589,8 @@ describe('Portal abstract stream', () => {
 })
 
 describe('stop lifecycle', () => {
-  let portal: MockPortal
-
-  afterEach(async () => {
-    await portal?.close()
-  })
-
-  it('invokes transformer stop hook exactly once on normal completion', async () => {
-    portal = await mockPortal([
+  withPortal('invokes transformer stop hook exactly once on normal completion', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -619,8 +619,8 @@ describe('stop lifecycle', () => {
     expect(stopSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('runs stop hook cleanup when a transformer start hook fails', async () => {
-    portal = await mockPortal([
+  withPortal('runs stop hook cleanup when a transformer start hook fails', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [{ header: { number: 1, hash: '0x123', timestamp: 1000 } }],
@@ -656,10 +656,58 @@ describe('stop lifecycle', () => {
     expect(stopSpy).toHaveBeenCalledTimes(1)
   })
 
+  withPortal('runs the start and stop hooks once across a fork', async ({ portal: serve }) => {
+    let forked = false
+    const chain: MockChainPortal = await serve({
+      latest: 8,
+      finalized: 2,
+      blocksPerResponse: 2,
+      // Once the pipe asks past 5, every block above 3 is replaced
+      delay: ({ query }) => {
+        if (query.fromBlock === 6 && !forked) {
+          forked = true
+          chain.fork(3)
+        }
+      },
+    })
+    const metrics = { ...mockMetricsServer().server, start: vi.fn(), stop: vi.fn(async () => {}) }
+    const hooks = { start: vi.fn(), stop: vi.fn(), rollback: vi.fn() }
+    const records: RollbackRecord[] = []
+    const written: number[] = []
+
+    await evmPortalStream({
+      id: 'test',
+      portal: chain.url,
+      logger: 'silent',
+      metrics,
+      outputs: blockDecoder({ from: 0, to: 8 }),
+    })
+      .pipe(createTransformer({ profiler: { name: 'hooks' }, transform: (data) => data, ...hooks }))
+      .pipeTo(
+        createTarget({
+          write: async ({ read }) => {
+            for await (const { data, ctx } of read()) {
+              written.push(...data.map((block) => block.number))
+              // Newest first, as a store reads its records back.
+              records.unshift({ rollbackChain: ctx.stream.state.rollbackChain, finalized: ctx.stream.head.finalized })
+            }
+          },
+          resolveFork: (canonical) => resolveForkCursor(records, canonical),
+        }),
+      )
+
+    expect(hooks.rollback).toHaveBeenCalledTimes(1)
+    expect(written.at(-1)).toBe(8)
+    expect(hooks.start).toHaveBeenCalledTimes(1)
+    expect(hooks.stop).toHaveBeenCalledTimes(1)
+    expect(metrics.start).toHaveBeenCalledTimes(1)
+    expect(metrics.stop).toHaveBeenCalledTimes(1)
+  })
+
   // The read loop arms a batch/fetch span pair up front, so the last one is always for a batch
   // that never arrives. It leaks a pair per stream, and read() restarts on every retry.
-  it('ends the span pair armed for a batch that never arrives', async () => {
-    portal = await mockPortal([
+  withPortal('ends the span pair armed for a batch that never arrives', async ({ portal: serve }) => {
+    const portal = await serve([
       { statusCode: 200, data: [], head: { finalized: { number: 0, hash: '0x0' } } },
       {
         statusCode: 200,
@@ -685,8 +733,8 @@ describe('stop lifecycle', () => {
 
   // A 204 head poll puts a zero-block batch and flushes it, so the read loop sees a batch it
   // never yields and nothing downstream closes its span.
-  it('ends the batch span for the empty batch a 204 head poll delivers', async () => {
-    portal = await mockPortal([
+  withPortal('ends the batch span for the empty batch a 204 head poll delivers', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
@@ -719,8 +767,8 @@ describe('stop lifecycle', () => {
 
   // Unwinding through the yield leaves readSpan already ended at the top of the loop body, so the
   // finally would end it a second time.
-  it('does not double-end the fetch span when the consumer breaks early', async () => {
-    portal = await threeBlockPortal()
+  withPortal('does not double-end the fetch span when the consumer breaks early', async ({ portal: serve }) => {
+    const portal = await serve(threeBlockResponses())
 
     const spans = spanCounter()
 
@@ -737,8 +785,8 @@ describe('stop lifecycle', () => {
     expect(spans.unbalanced()).toEqual([])
   })
 
-  it('does not double-end the fetch span when the consumer throws', async () => {
-    portal = await threeBlockPortal()
+  withPortal('does not double-end the fetch span when the consumer throws', async ({ portal: serve }) => {
+    const portal = await serve(threeBlockResponses())
 
     const spans = spanCounter()
 
@@ -759,8 +807,8 @@ describe('stop lifecycle', () => {
   })
 
   // A throwing transformer skips its own span.end() and the enclosing 'apply transformers' one.
-  it('ends transformer spans when a transformer throws mid-stream', async () => {
-    portal = await threeBlockPortal()
+  withPortal('ends transformer spans when a transformer throws mid-stream', async ({ portal: serve }) => {
+    const portal = await serve(threeBlockResponses())
 
     const spans = spanCounter()
 

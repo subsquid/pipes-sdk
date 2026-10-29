@@ -637,52 +637,72 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       read: async function* (state?: TargetState, options?: ReadOptions) {
         await self.configure()
 
-        while (true) {
-          try {
-            for await (const batch of self.read(state, options, forceFinalized)) {
-              yield batch as PortalBatch<T>
-              self.batchEnd(batch.ctx)
-            }
-            return
-          } catch (e) {
-            if (!isForkException(e)) throw e
-
-            // A fork on `/finalized-stream` contradicts the route's contract. Never dispatch it to
-            // a target rollback handler: that could delete data already committed as finalized.
-            if (finalized) {
-              throw new ForkOnFinalizedStreamError()
-            }
-
-            if (!e.canonicalBlocks.length) {
-              throw new MissingForkAncestorError()
-            }
-
-            if (!target.resolveFork) {
-              throw new TargetForkNotSupportedError()
-            }
-
-            const forkProfiler = Span.root('fork', self.#options.profiler).addLabels('core')
-
-            const span = forkProfiler.start({ name: 'target_rollback', labels: 'core' })
-            const forkedCursor = await target.resolveFork(e.canonicalBlocks)
-            span.end()
-
-            if (!forkedCursor) {
-              throw new ForkCursorMissingError()
-            }
-
-            await self.rollbackTransformers(forkProfiler, forkedCursor)
-
-            // Resume from the forked cursor; the finalized floor persists in the
-            // instance #watermark across read() re-invocation, so re-seeding with the
-            // same state.finalized is a harmless monotonic no-op.
-            state = { latest: forkedCursor, finalized: state?.finalized ?? null }
-          } finally {
-            await self.stop()
-          }
+        // A fork resumes the run, it does not restart the lifecycle (WP-30).
+        try {
+          yield* self.readAcrossForks(target, state, options, forceFinalized)
+        } finally {
+          await self.stop()
         }
       },
     })
+  }
+
+  /** Reads to the end of the run; after a fork, from the common ancestor. */
+  private async *readAcrossForks(
+    target: Target<T>,
+    state: TargetState | undefined,
+    options: ReadOptions | undefined,
+    forceFinalized: boolean,
+  ): AsyncIterable<PortalBatch<T>> {
+    while (true) {
+      try {
+        for await (const batch of this.read(state, options, forceFinalized)) {
+          yield batch as PortalBatch<T>
+          this.batchEnd(batch.ctx)
+        }
+
+        return
+      } catch (e) {
+        if (!isForkException(e)) throw e
+
+        const ancestor = await this.rollbackFork(target, e.canonicalBlocks, forceFinalized)
+
+        // The finalized floor persists in #watermark across read() calls, so re-seeding it with
+        // the same state.finalized is a harmless monotonic no-op.
+        state = { latest: ancestor, finalized: state?.finalized ?? null }
+      }
+    }
+  }
+
+  /** Rolls the target, then the transformers, back to the common ancestor, and returns it. */
+  private async rollbackFork(target: Target<T>, canonicalBlocks: BlockCursor[], forceFinalized: boolean) {
+    // A fork on `/finalized-stream` contradicts the route's contract. Never dispatch it to
+    // a target rollback handler: that could delete data already committed as finalized.
+    if (this.#portal.finalized || forceFinalized) {
+      throw new ForkOnFinalizedStreamError()
+    }
+
+    if (!canonicalBlocks.length) {
+      throw new MissingForkAncestorError()
+    }
+
+    if (!target.resolveFork) {
+      throw new TargetForkNotSupportedError()
+    }
+
+    const profiler = Span.root('fork', this.#options.profiler).addLabels('core')
+
+    const span = profiler.start({ name: 'target_rollback', labels: 'core' })
+    const ancestor = await target.resolveFork(canonicalBlocks)
+    span.end()
+
+    if (!ancestor) {
+      throw new ForkCursorMissingError()
+    }
+
+    await this.rollbackTransformers(profiler, ancestor)
+
+    return ancestor
   }
 
   private batchEnd(ctx: BatchContext) {

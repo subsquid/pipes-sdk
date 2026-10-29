@@ -272,19 +272,14 @@ export function solanaInstructionDecoder<T extends Instructions>(
   })
 
   const unboundAddresses = !program && programId.length > 1
-  // `start` runs again after every fork (GAP-22).
-  let warned = false
 
   return query.build().pipe({
     profiler: opts.profiler || { name: 'instruction decoder' },
 
     start: ({ logger }) => {
-      if (!unboundAddresses || warned) {
-        return
+      if (unboundAddresses) {
+        logger.warn(UNBOUND_ADDRESSES_WARNING)
       }
-
-      warned = true
-      logger.warn(UNBOUND_ADDRESSES_WARNING)
     },
 
     transform: async (data, ctx) => {
