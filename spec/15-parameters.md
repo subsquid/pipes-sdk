@@ -39,7 +39,7 @@ Target = ratified contract value; ⚠ = proposed, pending ADR-14.
 | Parameter | Role | Observed | Target |
 |---|---|---|---|
 | P-PROGRESS-INTERVAL-MS | progress sampling/log cadence (OB-4) | 5000 ms | same |
-| P-RUNNER-RETRY | dev-runner restart attempts (GAP-32: explicit `retry: 0` currently coerced to the default) | 5 | same |
+| P-RUNNER-RETRY | dev-runner restart attempts; an explicit `0` fails on the first error | 5 | same |
 | P-METRICS-PORT | observability server port (IB-40) | 9090 | ⚠ review (collides with conventional scraper port) |
 | P-PREVIEW-HISTORY | profiler/preview snapshots retained (OB-22, IB-43, PF-5) | 50 | same |
 | P-PREVIEW-ARRAY-LIMIT | preview array truncation (IB-44, OB-23) | 10 (hardcoded literal in the reference) | same |
