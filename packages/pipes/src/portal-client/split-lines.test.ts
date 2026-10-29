@@ -12,9 +12,21 @@ async function* toChunks(parts: string[]) {
 
 async function read(input: AsyncIterable<Uint8Array>) {
   const out: string[] = []
-  for await (const lines of splitLines(input)) {
+  for await (const { lines } of splitLines(input)) {
     out.push(...lines)
   }
+  return out
+}
+
+/** The lines no newline ended. */
+async function unterminated(input: AsyncIterable<Uint8Array>) {
+  const out: string[] = []
+  for await (const { lines, unterminated } of splitLines(input)) {
+    if (unterminated) {
+      out.push(...lines)
+    }
+  }
+
   return out
 }
 
@@ -49,5 +61,10 @@ describe('splitLines', () => {
     const input = toChunks(['a\nb', 'c'])
 
     expect(await read(input)).toEqual(['a', 'bc'])
+  })
+
+  it('marks only a last line with no newline after it as unterminated', async () => {
+    expect(await unterminated(toChunks(['a\nb', 'c']))).toEqual(['bc'])
+    expect(await unterminated(toChunks(['a\n', 'b\n']))).toEqual([])
   })
 })

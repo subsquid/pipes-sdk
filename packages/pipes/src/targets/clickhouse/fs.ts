@@ -1,7 +1,10 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-export async function loadSqlFiles(directoryOrFile: string): Promise<string[]> {
+/** A statement of a SQL file, with the file it came from. */
+export type SqlStatement = { file: string; query: string }
+
+export async function loadSqlFiles(directoryOrFile: string): Promise<SqlStatement[]> {
   let sqlFiles: string[] = []
 
   if (directoryOrFile.endsWith('.sql')) {
@@ -13,5 +16,10 @@ export async function loadSqlFiles(directoryOrFile: string): Promise<string[]> {
 
   const contents = await Promise.all(sqlFiles.map((file) => fs.readFile(file, 'utf-8')))
 
-  return contents.flatMap((table) => table.split(';').filter((t) => t.trim().length > 0))
+  return contents.flatMap((content, index) =>
+    content
+      .split(';')
+      .filter((query) => query.trim().length > 0)
+      .map((query) => ({ file: sqlFiles[index], query })),
+  )
 }

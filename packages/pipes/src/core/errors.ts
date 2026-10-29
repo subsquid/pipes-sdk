@@ -14,8 +14,8 @@ export enum SdkErrorName {
 export class PipeError extends Error {
   readonly code: string
 
-  constructor(code: string, name: SdkErrorName, message: string | string[]) {
-    super(joinLines([...arrayify(message), '', `See: ${DOCS_BASE}/${code}`]))
+  constructor(code: string, name: SdkErrorName, message: string | string[], options?: ErrorOptions) {
+    super(joinLines([...arrayify(message), '', `See: ${DOCS_BASE}/${code}`]), options)
     this.code = code
     this.name = name
   }
@@ -24,14 +24,14 @@ export class PipeError extends Error {
 // ─── Source errors (E0xxx) ────────────────────────────────────────────────────
 
 /**
- * E0001: Thrown when a pipe with the default ID is connected to a target.
+ * E0001: Thrown when a pipe is created with an empty or blank id.
  * Targets need a stable, unique ID to persist cursor state across restarts.
  */
 export class DefaultPipeIdError extends PipeError {
   constructor() {
     super('E0001', SdkErrorName.PipeConfiguration, [
-      'Pipe requires a non-default ID when used with targets.',
-      'Set a unique id in your pipe source options:',
+      'Pipe requires a non-empty id: targets persist progress under it.',
+      'Set a stable, unique id in your pipe source options:',
       '',
       '  evmPortalStream({ portal: "...", id: "my-pipe", outputs })',
     ])
@@ -89,13 +89,19 @@ export class TargetForkNotSupportedError extends PipeError {
 }
 
 /**
- * E1002: Thrown when a fork is detected but the canonical block list is empty (internal invariant violation).
+ * E1002: Thrown when the portal reports a fork without the canonical blocks the pipe needs to find the
+ * common ancestor. The pipe stops rather than guess where to roll back to.
  */
 export class MissingForkAncestorError extends PipeError {
-  constructor() {
+  constructor({ block, portalMessage }: { block?: number; portalMessage?: string } = {}) {
+    const at = block === undefined ? '' : ` at block ${formatNumber(block)}`
+
     super('E1002', SdkErrorName.ForkHandling, [
-      'A blockchain fork was detected, but no canonical blocks were provided to resolve it.',
-      'This is an internal error — please report it as a bug.',
+      `The portal reported a fork${at}, but sent no canonical blocks to find the common ancestor.`,
+      ...(portalMessage ? [`The portal said: "${portalMessage}"`] : []),
+      'The pipe stopped without rolling anything back.',
+      '',
+      'Report it against the portal. A restart resumes from the persisted cursor.',
     ])
   }
 }
@@ -177,4 +183,65 @@ function portalBlockOrderReason({
   }
 
   return `The portal delivered block ${formatNumber(block)}, above the requested end ${formatNumber(range.to ?? Infinity)}.`
+}
+
+/** Why a stream response line is not a block: see {@link MalformedPortalResponseError}. */
+export type MalformedLine = 'invalid-json' | 'no-block-number' | 'cut-twice'
+
+const LINE_EXCERPT_LENGTH = 120
+
+/**
+ * E1007: Thrown when a stream response holds a line the client cannot read as a block: a line that
+ * is not valid JSON, a block without a number, or a response that ends inside a block twice in a row.
+ * A response cut inside a block once is requested again from that block.
+ */
+export class MalformedPortalResponseError extends PipeError {
+  constructor({ problem, fromBlock, line }: { problem: MalformedLine; fromBlock: number; line?: string }) {
+    super('E1007', SdkErrorName.PortalContract, [
+      malformedLineReason(problem, fromBlock),
+      ...(line === undefined ? [] : [`Line: ${lineExcerpt(line)}`]),
+      'The pipe stopped before the line reached any transformer or target.',
+      '',
+      'Report it against the portal. A restart resumes from the persisted cursor.',
+    ])
+  }
+}
+
+function malformedLineReason(problem: MalformedLine, fromBlock: number) {
+  const due = `the next block, at or above block ${formatNumber(fromBlock)}`
+
+  switch (problem) {
+    case 'invalid-json':
+      return `The portal sent a line that is not valid JSON in place of ${due}.`
+    case 'no-block-number':
+      return `The portal sent a line without a block number in place of ${due}.`
+    case 'cut-twice':
+      return `The portal ended its response inside ${due}, twice in a row.`
+  }
+}
+
+function lineExcerpt(line: string) {
+  if (line.length <= LINE_EXCERPT_LENGTH) {
+    return line
+  }
+
+  return `${line.slice(0, LINE_EXCERPT_LENGTH)}… (${formatNumber(line.length)} characters)`
+}
+
+/**
+ * E1008: Thrown when a block from the portal does not match the schema of the fields the query selects.
+ * The message names the block and the field.
+ */
+export class BlockValidationError extends PipeError {
+  constructor({ block, failure }: { block?: number; failure: string }) {
+    const name = block === undefined ? 'A block without a number' : `Block ${formatNumber(block)}`
+
+    super('E1008', SdkErrorName.PortalContract, [
+      `${name} does not match the schema of the selected fields: ${failure}.`,
+      'The pipe stopped before the block reached any output or target.',
+      '',
+      'Report it with the block number and the field.',
+      'Either the portal sent a wrong value, or the SDK schema rejects a value the chain really has.',
+    ])
+  }
 }

@@ -1,16 +1,22 @@
-export async function* splitLines(chunks: AsyncIterable<Uint8Array>) {
+/**
+ * Lines of a body as they arrive. `unterminated` marks the last line of the body when no newline
+ * ends it: a body cut inside a line ends this way.
+ */
+export type Lines = { lines: string[]; unterminated: boolean }
+
+export async function* splitLines(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Lines> {
   const splitter = new LineSplitter()
 
   for await (let chunk of chunks) {
     const lines = splitter.push(chunk)
     if (lines.length) {
-      yield lines
+      yield { lines, unterminated: false }
     }
   }
 
   const lastLine = splitter.end()
   if (lastLine) {
-    yield [lastLine]
+    yield { lines: [lastLine], unterminated: true }
   }
 }
 

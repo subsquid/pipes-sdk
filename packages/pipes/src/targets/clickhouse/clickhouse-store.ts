@@ -58,8 +58,6 @@ type TableMeta = {
   columns: { name: string; defaultKind: string }[]
 }
 
-class TableNotFoundError extends Error {}
-
 const PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
@@ -96,15 +94,19 @@ export class ClickhouseStore {
 
   // FIXME use glob
   async executeFiles(dir: string) {
-    const queries = await loadSqlFiles(dir)
+    const statements = await loadSqlFiles(dir)
 
-    for (const query of queries) {
+    for (const { file, query } of statements) {
       try {
         await this.client.command({ query })
-      } catch (e: any) {
-        console.error(e)
+      } catch (error) {
+        const reason = (error instanceof Error ? error.message : String(error)).trim()
 
-        process.exit(1)
+        throw new ClickhouseTargetError(
+          CLICKHOUSE_ERROR_CODES.SQL_FILE_STATEMENT_FAILED,
+          [`A statement in "${file}" failed: ${reason}`, '', query.trim()],
+          { cause: error },
+        )
       }
     }
   }
@@ -165,7 +167,10 @@ export class ClickhouseStore {
       engine_full: string
     }[]
     if (!tables.length) {
-      throw new TableNotFoundError(`Table "${table}" does not exist`)
+      throw new ClickhouseTargetError(CLICKHOUSE_ERROR_CODES.ROLLBACK_TABLE_NOT_FOUND, [
+        `Table "${table}" does not exist, so the rollback cannot remove its rows.`,
+        'Check the table names passed to `removeRowsAfter` in `onRollback`.',
+      ])
     }
 
     const columnsRes = await this.client.query({
@@ -364,7 +369,8 @@ export class ClickhouseStore {
         try {
           meta = await this.#fetchTableMeta(table)
         } catch (error) {
-          if (error instanceof TableNotFoundError) {
+          // A coded refusal (no such table, unparseable name) is not a reason to read the table blind.
+          if (error instanceof ClickhouseTargetError) {
             throw error
           }
 

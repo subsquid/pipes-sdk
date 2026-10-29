@@ -1,5 +1,3 @@
-import { cast } from '@subsquid/util-internal-validation'
-
 import { MetricsServer } from '~/core/metrics-server.js'
 import { ProgressTrackerOptions, progressTracker } from '~/core/progress-tracker.js'
 import * as hl from '~/portal-client/query/hyperliquid-fills.js'
@@ -15,7 +13,7 @@ import {
   createTransformer,
   mergeOutputs,
 } from '../core/index.js'
-import { PortalClientOptions, getBlockSchema } from '../portal-client/index.js'
+import { PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
 import { HyperliquidFillsPortalData, HyperliquidFillsQueryBuilder } from './hyperliquid-fills-query-builder.js'
 
 export type HyperliquidFillsFieldSelection = hl.FieldSelection
@@ -87,7 +85,7 @@ export function hyperliquidFillsPortalStream<Out extends HyperliquidFillsOutputs
         transform: (data, ctx) => {
           const schema = getBlockSchema<hl.Block<F>>(ctx.stream.query.raw)
 
-          return data.map((b) => cast(schema, b))
+          return castBlocks(schema, data)
         },
       }),
       mergeOutputs(outputs),

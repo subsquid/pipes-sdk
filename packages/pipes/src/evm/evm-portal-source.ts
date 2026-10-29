@@ -1,5 +1,3 @@
-import { cast } from '@subsquid/util-internal-validation'
-
 import {
   LogLevel,
   Logger,
@@ -14,7 +12,7 @@ import {
 import { MetricsServer } from '~/core/metrics-server.js'
 import { ProgressTrackerOptions, progressTracker } from '~/core/progress-tracker.js'
 
-import { PortalClient, PortalClientOptions, getBlockSchema } from '../portal-client/index.js'
+import { PortalClient, PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
 import * as evm from '../portal-client/query/evm.js'
 import { EvmPortalData, EvmQueryBuilder } from './evm-query-builder.js'
 
@@ -87,7 +85,7 @@ export function evmPortalStream<Out extends EvmOutputs>({
         transform: (data, ctx) => {
           const schema = getBlockSchema<evm.Block<F>>(ctx.stream.query.raw)
 
-          return data.map((b) => cast(schema, b))
+          return castBlocks(schema, data)
         },
       }),
       mergeOutputs(outputs),

@@ -1,5 +1,3 @@
-import { cast } from '@subsquid/util-internal-validation'
-
 import { MetricsServer } from '~/core/metrics-server.js'
 import { ProgressTrackerOptions, progressTracker } from '~/core/progress-tracker.js'
 import * as btc from '~/portal-client/query/bitcoin.js'
@@ -15,7 +13,7 @@ import {
   createTransformer,
   mergeOutputs,
 } from '../core/index.js'
-import { PortalClientOptions, getBlockSchema } from '../portal-client/index.js'
+import { PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
 import { BitcoinPortalData, BitcoinQueryBuilder } from './bitcoin-query-builder.js'
 
 export type BitcoinFieldSelection = btc.FieldSelection
@@ -87,7 +85,7 @@ export function bitcoinPortalStream<Out extends BitcoinOutputs>({
         transform: (data, ctx) => {
           const schema = getBlockSchema<btc.Block<F>>(ctx.stream.query.raw)
 
-          return data.map((b) => cast(schema, b))
+          return castBlocks(schema, data)
         },
       }),
       mergeOutputs(outputs),

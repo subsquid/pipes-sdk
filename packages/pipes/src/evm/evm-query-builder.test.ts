@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import { BlockRangeConfigurationError } from '~/core/errors.js'
+import { PortalClient } from '~/portal-client/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 import { stubPortal } from '~/testing/stub-portal.js'
 
 import { EvmQueryBuilder } from './evm-query-builder.js'
@@ -77,28 +79,44 @@ describe('EvmQuery', () => {
       expect(bounded).toEqual([{ range: { from: 18908900, to: 19145700 }, request: {} }])
     })
 
-    it('should throw a descriptive error when portal cannot resolve a timestamp', async () => {
+    // Mock chain timestamps are `number * 1000` seconds, so block 10 is the head at 10,000 s.
+    withPortal('resolves a date through the portal', async ({ portal: open }) => {
+      const portal = await open({ latest: 10 })
+      const builder = new EvmQueryBuilder()
+      builder.addRange({ from: new Date(4_500 * 1000), to: new Date(7_000 * 1000) })
+
+      const { bounded } = await builder.calculateRanges({ portal: new PortalClient({ url: portal.url }) })
+
+      expect(bounded).toEqual([{ range: { from: 5, to: 7 }, request: {} }])
+    })
+
+    withPortal('refuses a date after the head with a coded range error', async ({ portal: open }) => {
+      const portal = await open({ latest: 10 })
       const builder = new EvmQueryBuilder()
       builder.addRange({ from: new Date('2030-01-01T00:00:00Z') })
 
-      await expect(
-        builder.calculateRanges({
-          portal: stubPortal({
-            resolveTimestamp: async () => {
-              throw new Error('No chunk found for timestamp')
-            },
-          }),
+      const resolving = builder.calculateRanges({ portal: new PortalClient({ url: portal.url }) })
+
+      await expect(resolving).rejects.toThrow(BlockRangeConfigurationError)
+      await expect(resolving).rejects.toThrow(
+        'Failed to resolve timestamp 2030-01-01T00:00:00.000Z to a block number. The block for this timestamp may not have been produced yet.',
+      )
+    })
+
+    it('passes through a portal failure other than a missing block', async () => {
+      const builder = new EvmQueryBuilder()
+      builder.addRange({ from: new Date('2024-01-01T00:00:00Z') })
+
+      const outage = new Error('connect ECONNREFUSED')
+      const resolving = builder.calculateRanges({
+        portal: stubPortal({
+          resolveTimestamp: async () => {
+            throw outage
+          },
         }),
-      ).rejects.toThrow(BlockRangeConfigurationError)
-      await expect(
-        builder.calculateRanges({
-          portal: stubPortal({
-            resolveTimestamp: async () => {
-              throw new Error('No chunk found for timestamp')
-            },
-          }),
-        }),
-      ).rejects.toThrow('Failed to resolve timestamp 2030-01-01T00:00:00.000Z to a block number')
+      })
+
+      await expect(resolving).rejects.toBe(outage)
     })
 
     it('should deduplicate identical timestamps', async () => {
