@@ -6,15 +6,20 @@ import { hashQuery } from '~/core/query-builder.js'
 import { last } from '~/internal/array.js'
 import { GetBlock, PortalBlockStream, PortalClient, Query, StreamData } from '~/portal-client/index.js'
 
-// @ts-ignore
-const compressAsync = promisify('zstdCompress' in zlib ? (zlib.zstdCompress as any) : zlib.gzip)
-// @ts-ignore
-const decompressAsync = promisify('zstdDecompress' in zlib ? (zlib.zstdDecompress as any) : zlib.gunzip)
+// zstd entered node:zlib in Node 22.15, after the typings this package pins
+const zstd = zlib as unknown as Partial<Record<'zstdCompress' | 'zstdDecompress', typeof zlib.gzip>>
+
+const compressAsync = promisify(zstd.zstdCompress ?? zlib.gzip)
+const gunzipAsync = promisify(zlib.gunzip)
+const zstdDecompressAsync = zstd.zstdDecompress && promisify(zstd.zstdDecompress)
+
+const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 
 export type Options<ImplOptions> = {
   /**
-   * Enable or disable data compression.
-   * Uses zstd compression algorithm.
+   * Enable or disable data compression on write.
+   * Uses zstd, or gzip on a runtime without zstd. Reads decode any of them whatever this is set to.
    * @default true
    */
   compress?: boolean
@@ -36,7 +41,7 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
   #initialized = false
 
   protected abstract initialize?(): Promise<void>
-  protected abstract stream(request: StreamBatch): AsyncIterable<Buffer>
+  protected abstract stream(request: StreamBatch): AsyncIterable<Uint8Array>
   protected abstract save(batch: SaveBatch): Promise<void>
 
   protected async compress(value: string): Promise<Buffer> {
@@ -45,10 +50,26 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
     return await compressAsync(value)
   }
 
-  protected async decompress(value: Buffer): Promise<string> {
-    if (!this.options.compress) return value.toString('utf-8')
+  /**
+   * A stored value does not record its codec, and the runtime that wrote it or its `compress`
+   * option may differ from this one, so the codec is read from the value's magic bytes.
+   */
+  protected async decompress(value: Uint8Array): Promise<string> {
+    // Bun's SQLite driver returns a BLOB as a plain Uint8Array, which has no `equals` or `toString(encoding)`
+    const buffer = Buffer.from(value.buffer, value.byteOffset, value.byteLength)
 
-    const buffer = await decompressAsync(value)
+    if (hasPrefix(buffer, GZIP_MAGIC)) {
+      return (await gunzipAsync(buffer)).toString('utf8')
+    }
+
+    if (hasPrefix(buffer, ZSTD_MAGIC)) {
+      if (!zstdDecompressAsync) {
+        throw new Error('The portal cache holds a zstd-compressed entry, and this runtime has no zstd in node:zlib')
+      }
+
+      return (await zstdDecompressAsync(buffer)).toString('utf8')
+    }
+
     return buffer.toString('utf8')
   }
 
@@ -132,6 +153,10 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
       // TODO check next batch in cache
     }
   }
+}
+
+function hasPrefix(value: Buffer, prefix: Buffer): boolean {
+  return value.subarray(0, prefix.length).equals(prefix)
 }
 
 /**

@@ -1,13 +1,18 @@
 import fs from 'node:fs/promises'
+import path from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { PortalBatch } from '~/core/index.js'
 import { createTarget } from '~/core/target.js'
+import { loadSqlite } from '~/drivers/sqlite/sqlite.js'
 import { evmPortalStream } from '~/evm/index.js'
-import { portalSqliteCache } from '~/portal-cache/node/node-sqlite-cache-adapter.js'
+import { Options, PortalCacheNodeJs, SaveBatch, StreamBatch } from '~/portal-cache/node/node-portal-cache.js'
+import { PortalSqliteCacheOptions, portalSqliteCache } from '~/portal-cache/node/node-sqlite-cache-adapter.js'
 import { createMemoryTarget } from '~/targets/memory/memory-target.js'
-import { MockPortal, blockDecoder, mockPortal } from '~/testing/index.js'
+import { withDir } from '~/testing/dir-fixture.js'
+import { MockPortal, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
 // Transform batch to only include data and meta without any functions or complex objects
@@ -766,4 +771,102 @@ describe('Portal cache finalized floor', () => {
 
     expect(await run(8)).toEqual([[1, 2, 3, 4, 5], [6], [7], [8]])
   })
+})
+
+// A store outlives the runtime and the options that wrote it, so a read must not assume either.
+describe('Portal cache codec', () => {
+  const blocks = [1, 2, 3, 4, 5].map((n) => ({ header: { number: n, hash: `0x${n}`, timestamp: n * 1000 } }))
+
+  async function rewriteValues(file: string, encode: (value: Buffer) => Buffer) {
+    const db = await loadSqlite({ path: file })
+    const rows = db.all<{ rowid: number; value: Buffer }>('SELECT rowid, value FROM data')
+
+    for (const row of rows) {
+      db.exec('UPDATE data SET value = ? WHERE rowid = ?', [encode(row.value), row.rowid])
+    }
+
+    db.close()
+  }
+
+  type Case = {
+    entry: string
+    write: Partial<PortalSqliteCacheOptions>
+    encode?: (value: Buffer) => Buffer
+    read: Partial<PortalSqliteCacheOptions>
+  }
+
+  withDir.for<Case>([
+    { entry: 'a gzip entry under the default options', write: { compress: false }, encode: gzipSync, read: {} },
+    { entry: 'an uncompressed entry under the default options', write: { compress: false }, read: {} },
+    { entry: 'a compressed entry with compress off', write: {}, read: { compress: false } },
+  ])('reads $entry', async ({ write, encode, read }, { portal: open, dir }) => {
+    const portal = await open({ blocks, finalized: 5 })
+    const file = path.join(dir, 'cache.db')
+    const run = (options: Partial<PortalSqliteCacheOptions>) =>
+      readAll(
+        evmPortalStream({
+          id: 'test',
+          portal: portal.url,
+          logger: 'silent',
+          outputs: blockDecoder({ from: 1, to: 5 }),
+          cache: portalSqliteCache({ path: file, ...options }),
+        }),
+      )
+
+    const written = await run(write)
+    if (encode) {
+      await rewriteValues(file, encode)
+    }
+
+    expect(await run(read)).toEqual(written)
+    expect(portal.requests).toHaveLength(1)
+  })
+
+  /** Hands each value back as a plain `Uint8Array`, the way Bun's SQLite driver returns a BLOB. */
+  class Uint8ArrayCache extends PortalCacheNodeJs<object> {
+    #rows = new Map<string, { to: number; value: Uint8Array }>()
+
+    constructor(options: Options<object>) {
+      super(options)
+    }
+
+    protected async initialize() {}
+
+    protected async *stream({ queryHash, fromBlock }: StreamBatch) {
+      for (
+        let row = this.#rows.get(`${queryHash}:${fromBlock}`);
+        row;
+        row = this.#rows.get(`${queryHash}:${row.to + 1}`)
+      ) {
+        yield new Uint8Array(row.value)
+      }
+    }
+
+    protected async save({ queryHash, cursors, data }: SaveBatch) {
+      this.#rows.set(`${queryHash}:${cursors.first}`, { to: cursors.last, value: data })
+    }
+  }
+
+  withPortal.for([true, false])(
+    'reads a value a store hands back as Uint8Array, compress %s',
+    async (compress, { portal: open }) => {
+      const portal = await open({ blocks, finalized: 5 })
+      const cache = new Uint8ArrayCache({ compress })
+      const run = () =>
+        readAll(
+          evmPortalStream({
+            id: 'test',
+            portal: portal.url,
+            logger: 'silent',
+            outputs: blockDecoder({ from: 1, to: 5 }),
+            cache,
+          }),
+        )
+
+      const written = await run()
+
+      expect(await run()).toEqual(written)
+      expect(portal.requests).toHaveLength(1)
+    },
+  )
 })
