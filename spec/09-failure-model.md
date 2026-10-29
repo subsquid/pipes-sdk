@@ -26,7 +26,7 @@ Bands 10–19.
 | # | Fault | Required response |
 |---|---|---|
 | FM-10 | slow / unresponsive portal | mask via retry (P-RETRY-SCHEDULE-MS, unbounded for streaming) + alarm OB-13 while stalled |
-| FM-11 | malformed batch line (invalid JSON, schema-violating block) | fail-safe + alarm, diagnostic names the offending block (WP-16; GAP-5, GAP-25) |
+| FM-11 | malformed batch line (invalid JSON, schema-violating block) | fail-safe + alarm, diagnostic names the offending block (WP-16: E1007 for an unreadable line, E1008 for a schema violation); a body cut inside a line is a transport fault, requested again once |
 | FM-12 | regressing / vanishing finalized head | mask: clamp at floor (INV-12); never un-finalize |
 | FM-13 | finalized-only delivery cannot establish finality (no-finality dataset), or receives a fork signal | no floor: degrade with the explicit "not reorg-safe" limitation; fork: fail-safe because the sink intentionally has no rollback path (WP-45) |
 | FM-14 | fork signal with empty canonical chain | fail-safe with coded contract violation (WP-41) |
