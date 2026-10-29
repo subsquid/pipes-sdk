@@ -185,6 +185,19 @@ describe('EvmQuery', () => {
       `)
     })
 
+    // An end below the head is an inverted range, also when it is block 0.
+    it('refuses an end of block 0 below the latest head', async () => {
+      const builder = new EvmQueryBuilder()
+      builder.addRange({ from: 'latest', to: 0 })
+
+      const resolving = builder.calculateRanges({
+        portal: stubPortal({ getHead: async () => ({ number: 10, hash: '0x' }) }),
+      })
+
+      await expect(resolving).rejects.toThrow(BlockRangeConfigurationError)
+      await expect(resolving).rejects.toThrow("'from' (10) must be less than or equal to 'to' (0)")
+    })
+
     it('should take bound over latest', async () => {
       const builder = new EvmQueryBuilder()
       builder.addRange({ from: 'latest' })
