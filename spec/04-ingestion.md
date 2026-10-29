@@ -37,8 +37,7 @@ parent-linkage check (IB-3).
 *Why:* seeding from `latest` would mark unfinalized data safe on no-finality datasets.
 
 **WP-3 — Pipe-id validation.** [MUST] A pipe connected to a sink with a blank or
-missing pipe id fails startup with the documented configuration error (IB-50 band
-E0xxx). *(Current code throws an uncoded error — GAP-4.)*
+missing pipe id fails startup with the documented configuration error (E0001).
 
 **WP-4 — Range resolution.** [MUST] Symbolic endpoints resolve before streaming:
 `latest` → current head (bounded below by the resume bound), dates/timestamps → block
@@ -103,10 +102,12 @@ or outside the requested range, halts the pipe with a coded error before any sta
 it (FM-16, ADR-1).
 
 **WP-16 — Malformed input.** [MUST] A batch line that fails schema validation is an
-integrity fault (FM-11): fail with a diagnostic identifying the offending block; never
-silently coerce or drop. *(Partial-line vs malformed-JSON discrimination is currently
-unimplemented — GAP-5; schema-validation failures currently surface uncoded and without
-block identification — GAP-25.)*
+integrity fault (FM-11): fail with a diagnostic identifying the offending block and field
+(E1008); never silently coerce or drop. A line that does not parse is malformed when a
+newline ended it, and a cut when the body ended inside it. A cut is a transport fault:
+request again from the cut block. A second cut at the same block in a row, an invalid
+line and a line without a block number fail with E1007, naming the block that was due
+(ADR-4).
 
 ## Transform & decode
 
@@ -158,10 +159,9 @@ parent-hash anchor (IB-4) and supplying the canonical chain (DEF-10). The pipe t
 this as authoritative (ADR-1). This transition applies to the full stream; the
 finalized-only route does not emit forks (DEF-15).
 
-**WP-41 — Empty canonical chain.** [MUST] A fork signal with an empty canonical chain
-is a portal-contract violation: fail with the coded error (E1xxx band), never guess.
-*(Currently an empty or absent chain surfaces as a raw HTTP 409 error, so the coded path
-is unreachable — GAP-8.)*
+**WP-41 — Empty canonical chain.** [MUST] A fork signal with an empty or absent
+canonical chain is a portal-contract violation: fail with the coded error (E1002), never
+guess.
 
 **WP-42 — Ancestor search.** [MUST] The search walks the persisted rollback records
 newest → oldest, each record's chain descending, keeping a canonical **window** that
