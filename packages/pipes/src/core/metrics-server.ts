@@ -61,7 +61,7 @@ export type Metrics = {
 export type MetricsServer = {
   start(): void
   stop(): Promise<void>
-  registerPipe(id: string): void
+  registerPipe(id: string, options?: { profiler: boolean }): void
   batchProcessed(ctx: BatchContext): void
   metrics: Metrics
 }
