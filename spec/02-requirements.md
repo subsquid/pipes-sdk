@@ -150,4 +150,4 @@ Deliberately left open — conformance tests MUST NOT pin these:
 |---|---|---|
 | OQ-4 | SLO targets for SLI-1…SLI-7 are unratified (⚠ in 15-parameters). | SDK team |
 | OQ-5 | Cache growth policy: unbounded append-only accepted, or add eviction/versioning? (HZ-6). | SDK team |
-| OQ-7 | Cursor timestamps are network-dependent (tron reports ms — GAP-24): normalize to one unit, or spec per network? | SDK team |
+| OQ-7 | Cursor timestamps are network-dependent (tron and substrate report ms): normalize to one unit, or spec per network? | SDK team |

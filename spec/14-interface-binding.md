@@ -83,7 +83,7 @@ mode. Decision: ADR-22.
 Cross-implementation contract: any conforming implementation MUST read and write these
 formats (CN-45). JSON cursor encoding everywhere: `{"number": ℕ, "hash": string?,
 "timestamp": ℕ?}`, the timestamp being the portal header value verbatim, in a
-network-dependent unit (DEF-1; GAP-24).
+network-dependent unit (DEF-1; OQ-7).
 
 **IB-20 — ClickHouse binding (class A).** Sync table (default `<db>.sync`):
 `id String, current String (cursor JSON), finalized String (cursor JSON | '' when
@@ -118,9 +118,11 @@ an accepted deviation, ADR-15)*.
 **IB-21 — Postgres binding (class T).** Sync table (default `public.sync`):
 `id text, current_number numeric, current_hash text, "current_timestamp" timestamptz,
 finalized jsonb ('{}' when absent), rollback_chain jsonb, PRIMARY KEY (id,
-current_number)`. Data + cursor in one transaction, serializable by default
-*(operator-downgradable — weaker levels void CN-10's lost-update protection; GAP-26)*.
-Undo log: per tracked
+current_number)`. `"current_timestamp"` holds the block time as an instant, whatever
+the portal's unit, and NULL when no timestamp can hold it; a resumed cursor reads it back
+in seconds. Data + cursor in one transaction, serializable by default. A weaker level is
+the operator's choice, and with it the operator owns lost-update safety for rows another
+writer also updates. Undo log: per tracked
 table a `<table>__snapshots` before/after-image table + row trigger, gated per
 transaction to unfinalized blocks; fork replays images newest-first. Retention:
 P-PG-UNFINALIZED-RETENTION blocks of snapshots. Legacy migration: single guarded

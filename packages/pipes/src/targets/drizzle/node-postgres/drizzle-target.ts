@@ -11,6 +11,7 @@ import { doWithRetry } from '~/internal/function.js'
 import { DrizzleTracker } from './drizzle-tracker.js'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
 import { PostgresState, StateOptions } from './postgres-state.js'
+import { isTransientPgError } from './retry.js'
 import { orderTablesForDelete } from './rollback.js'
 
 export type Transaction = PgTransaction<NodePgQueryResultHKT, any, any>
@@ -104,6 +105,8 @@ export function drizzleTarget<T>({
             title: 'postgres triggers configuration',
             retries: 3,
             delayMs: 100,
+            shouldRetry: isTransientPgError,
+            logger,
           },
         )
       }
@@ -160,6 +163,8 @@ export function drizzleTarget<T>({
               title: 'postgres batch insert transaction',
               retries: 3,
               delayMs: 100,
+              shouldRetry: isTransientPgError,
+              logger,
             },
           )
         } finally {

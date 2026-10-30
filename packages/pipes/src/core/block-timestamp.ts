@@ -10,7 +10,7 @@ const MILLISECOND_THRESHOLD = MIN_PLAUSIBLE_SECONDS * 1000
 /**
  * Normalize a portal block timestamp to epoch seconds, or `undefined` when it cannot be trusted.
  *
- * Portal block times are network-dependent (GAP-24): EVM and Solana report seconds, tron and
+ * Portal block times are network-dependent: EVM and Solana report seconds, tron and
  * substrate milliseconds. Consumers that subtract them from a wall clock need one unit.
  *
  * Out-of-range values are dropped rather than clamped. Tron's portal is known to emit integers
@@ -26,4 +26,24 @@ export function blockTimestampSeconds(timestamp: number | undefined): number | u
   if (seconds < MIN_PLAUSIBLE_SECONDS || seconds > MAX_PLAUSIBLE_SECONDS) return undefined
 
   return seconds
+}
+
+/**
+ * A portal block timestamp as epoch milliseconds, whatever unit the network reports, or
+ * `undefined` when no `Date` can hold it. Unlike `blockTimestampSeconds`, it keeps implausible
+ * but representable values, such as a devnet's stub times: it is for storing a block time, not
+ * for subtracting it from a wall clock.
+ */
+export function blockTimestampMilliseconds(timestamp: number | undefined): number | undefined {
+  if (typeof timestamp !== 'number') return undefined
+
+  const milliseconds = timestamp >= MILLISECOND_THRESHOLD ? timestamp : timestamp * 1000
+
+  if (!isValidDate(milliseconds)) return undefined
+
+  return milliseconds
+}
+
+function isValidDate(milliseconds: number): boolean {
+  return !Number.isNaN(new Date(milliseconds).getTime())
 }

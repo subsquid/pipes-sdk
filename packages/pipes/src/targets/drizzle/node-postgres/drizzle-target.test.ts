@@ -2,11 +2,13 @@ import { eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { integer, jsonb, numeric, pgTable, timestamp, varchar } from 'drizzle-orm/pg-core'
 import { Pool, QueryResultRow } from 'pg'
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { MockInstance, afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { defaultLogger } from '~/core/logger.js'
 import { evmPortalStream } from '~/evm/index.js'
 import { MockPortal, MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
+import { TronQueryBuilder, tronPortalStream } from '~/tron/index.js'
 
 import { drizzleTarget } from './index.js'
 
@@ -1499,6 +1501,163 @@ describe('Drizzle target', () => {
 
       expect(restored?.id).toEqual(1)
       expect(restored?.amount).toEqual(10)
+    })
+  })
+
+  describe('class-T batch transaction retry', () => {
+    const rows = pgTable('retried', { id: integer().primaryKey() })
+
+    const test = withPortal.extend<{ transactions: MockInstance; pipeLockHeldElsewhere: void }>({
+      transactions: async ({}, use) => {
+        const spy = vi.spyOn(db, 'transaction')
+        await use(spy)
+        spy.mockRestore()
+      },
+      pipeLockHeldElsewhere: async ({}, use) => {
+        const client = await pool.connect()
+        await client.query(`SELECT pg_advisory_lock(hashtext('test')::bigint)`)
+        await use()
+        await client.query('SELECT pg_advisory_unlock_all()')
+        client.release()
+      },
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE retried (id integer PRIMARY KEY);
+      `)
+    })
+
+    test('halts on an integrity fault without a retry', async ({ portal: serve }) => {
+      const portal = await serve({ latest: 1 })
+      let calls = 0
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [rows],
+          onData: async ({ tx }) => {
+            calls++
+            await tx.insert(rows).values([{ id: 1 }, { id: 1 }])
+          },
+        }),
+      )
+
+      await expect(run).rejects.toMatchObject({ cause: { code: '23505' } })
+      expect(calls).toBe(1)
+    })
+
+    test('retries a serialization failure, commits, and warns', async ({ portal: serve }) => {
+      const portal = await serve({ latest: 1 })
+      const logger = defaultLogger({ level: 'silent' })
+      const warn = vi.spyOn(logger, 'warn')
+      let calls = 0
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [rows],
+          onData: async ({ tx }) => {
+            calls++
+            if (calls === 1) {
+              throw Object.assign(new Error('could not serialize access'), { code: '40001' })
+            }
+
+            await tx.insert(rows).values({ id: 1 })
+          },
+        }),
+      )
+
+      expect(calls).toBe(2)
+      expect(await db.select().from(rows)).toEqual([{ id: 1 }])
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'postgres batch insert transaction succeeded after 1 retry' }),
+      )
+    })
+
+    test('refuses at once when another session holds the pipe lock', async ({
+      portal: serve,
+      transactions,
+      pipeLockHeldElsewhere,
+    }) => {
+      const portal = await serve({ latest: 1 })
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
+
+      await expect(run).rejects.toMatchObject({ code: 'E2103' })
+      expect(transactions).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe('class-T sync row block time', () => {
+    const blockTime = (timestamp: number) => ({ header: { number: 1, hash: '0x1', timestamp } })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+      `)
+    })
+
+    const target = () => drizzleTarget({ db, tables: [], onData: async () => {} })
+
+    function tronBlock(portalUrl: string) {
+      return tronPortalStream({
+        id: 'test',
+        portal: portalUrl,
+        outputs: new TronQueryBuilder()
+          .addFields({ block: { number: true, hash: true, timestamp: true } })
+          .addRange({ from: 1, to: 1 }),
+      })
+    }
+
+    async function storedBlockTime() {
+      const [row] = await getAllFromSyncTable()
+
+      return row?.['current_timestamp'] as Date | null
+    }
+
+    withPortal('stores a block time in seconds as that instant', async ({ portal: serve }) => {
+      const portal = await serve({ blocks: [blockTime(1_700_000_000)] })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 1, to: 1 }),
+      }).pipeTo(target())
+
+      expect(await storedBlockTime()).toEqual(new Date(1_700_000_000_000))
+    })
+
+    withPortal('stores a block time in milliseconds as that instant', async ({ portal: serve }) => {
+      const portal = await serve({ blocks: [blockTime(1_700_000_000_000)], kind: 'tron' })
+
+      await tronBlock(portal.url).pipeTo(target())
+
+      expect(await storedBlockTime()).toEqual(new Date(1_700_000_000_000))
+    })
+
+    withPortal('stores NULL for a block time no timestamp can hold', async ({ portal: serve }) => {
+      const portal = await serve({ blocks: [blockTime(Number('639208360527210660'))], kind: 'tron' })
+
+      await tronBlock(portal.url).pipeTo(target())
+
+      expect(await storedBlockTime()).toBeNull()
     })
   })
 })

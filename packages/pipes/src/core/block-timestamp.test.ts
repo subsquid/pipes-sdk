@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { blockTimestampSeconds } from './block-timestamp.js'
+import { blockTimestampMilliseconds, blockTimestampSeconds } from './block-timestamp.js'
 
 describe('blockTimestampSeconds', () => {
   it('passes epoch-second timestamps through unchanged', () => {
@@ -36,5 +36,26 @@ describe('blockTimestampSeconds', () => {
     expect(blockTimestampSeconds(3_999_999_999)).toBe(3_999_999_999)
     expect(blockTimestampSeconds(4_000_000_001)).toBeUndefined()
     expect(blockTimestampSeconds(1_000_000_000_000)).toBe(1_000_000_000)
+  })
+})
+
+describe('blockTimestampMilliseconds', () => {
+  it('reads seconds and milliseconds as the same instant', () => {
+    expect(blockTimestampMilliseconds(1_700_000_000)).toBe(1_700_000_000_000)
+    expect(blockTimestampMilliseconds(1_700_000_000_000)).toBe(1_700_000_000_000)
+  })
+
+  it('keeps an implausible block time that a date can still hold', () => {
+    expect(blockTimestampMilliseconds(2000)).toBe(2_000_000)
+  })
+
+  it('drops the above-2^53 integers tron is known to emit', () => {
+    expect(blockTimestampMilliseconds(Number('639208360527210660'))).toBeUndefined()
+  })
+
+  it('drops absent and non-finite values', () => {
+    expect(blockTimestampMilliseconds(undefined)).toBeUndefined()
+    expect(blockTimestampMilliseconds(Number.NaN)).toBeUndefined()
+    expect(blockTimestampMilliseconds(Number.POSITIVE_INFINITY)).toBeUndefined()
   })
 })

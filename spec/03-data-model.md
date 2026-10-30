@@ -9,7 +9,7 @@ Definitions only; operational semantics live in 04/05, invariants in 07.
 one height; `timestamp` is the portal block-header timestamp **verbatim** — its unit is
 network-dependent: epoch seconds on evm/solana/bitcoin, epoch **milliseconds** on tron and
 substrate (hyperliquid unverified, presumed milliseconds); normalization is an open decision
-(GAP-24, OQ-7). Equality: two cursors denote the same
+(OQ-7). Equality: two cursors denote the same
 block iff numbers are equal and, when both hashes are present, hashes are equal.
 Ordering is by `number`.
 

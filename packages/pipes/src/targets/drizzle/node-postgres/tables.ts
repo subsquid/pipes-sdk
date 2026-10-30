@@ -34,7 +34,7 @@ export const syncTable = (table: Table) => `
       'The block hash of the current processed block. Used together with current_number to uniquely identify the block.';
   
   COMMENT ON COLUMN ${table.fqnName}."current_timestamp" IS
-      'Timestamp when this state entry was recorded. Indicates when the cursor was persisted.';
+      'Block time of the current processed block. NULL when the portal reported none or a value no timestamp can hold.';
   
   COMMENT ON COLUMN ${table.fqnName}."finalized" IS
       'JSON structure representing the latest finalized block returned by the chain head.';

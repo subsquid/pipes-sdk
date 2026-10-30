@@ -9,6 +9,7 @@ import {
   Profiler,
   RollbackRecord,
   TargetState,
+  blockTimestampMilliseconds,
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
@@ -164,6 +165,7 @@ export class PostgresState {
     // pipe's monotonic watermark, so persist them verbatim — the stored finalized floor
     // stays non-regressing without a target-local clamp.
     const finalizedBlock = head.finalized?.number
+    const blockTime = current.timestamp ? blockTimestampMilliseconds(current.timestamp) : undefined
 
     logger.debug(`Saving cursor at block ${current.number} for ${this.#key.value} row...`)
     await parentSpan.measure({ name: 'insert cursor', labels: 'db' }, async () => {
@@ -176,7 +178,7 @@ export class PostgresState {
               ${this.#key.value},
               ${current.number},
               ${current.hash},
-              ${current.timestamp ? new Date(current.timestamp * 1000) : sql.raw('NULL')},
+              ${blockTime !== undefined ? new Date(blockTime) : sql.raw('NULL')},
               ${JSON.stringify(head.finalized || {})},
               ${JSON.stringify(rollbackChain || [])}
           )

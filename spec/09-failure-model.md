@@ -43,7 +43,7 @@ Bands 20–29.
 | # | Fault | Required response |
 |---|---|---|
 | FM-20 | transient storage unavailability / timeout | mask via class retry (bounded, e.g. P-PG-TX-RETRY, P-BQ-RETRY-LIMIT) + alarm; then fail-safe |
-| FM-21 | transaction conflict / serialization failure (class T) | mask via bounded retry of the batch transaction *(retry currently ungated by fault class — GAP-26)* |
+| FM-21 | transaction conflict / serialization failure (class T) | mask via bounded retry of the batch transaction; only serialization failures, deadlocks and lost connections are retried, every other fault halts (FM-2) |
 | FM-22 | storage rejects rows (schema mismatch, oversized) | fail-safe with the coded sink error; batch not acknowledged |
 | FM-23 | lock contention (declared single-writer lock) | fail-safe for the losing instance with the coded lock error (INV-15) |
 | FM-24 | disk full / quota (class K state or units) | fail-safe; on restart recovery repairs partial units (CN-12) |
