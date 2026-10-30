@@ -50,6 +50,9 @@ type SyncRow = {
   timestamp: number
 }
 
+/** A sync row as read back, with its stamp in microseconds: the client reads `TIMESTAMP` as an object. */
+type StoredSyncRow = SyncRow & { timestamp_micros: number }
+
 /**
  * Common WAL args bag — every save* method takes a superset of this. Bundling args
  * into an options bag keeps method signatures at ≤3 positional arguments.
@@ -112,6 +115,7 @@ export class BigQuerySyncState {
   readonly #fqn: string
   readonly options: Required<BigQueryStateOptions>
   #saves = 0
+  #lastTimestamp = 0
   #lastCommittedCursor: BlockCursor | undefined
 
   // The id every WAL row is keyed by: an explicit `options.id`, else the pipe's source id once
@@ -185,7 +189,7 @@ export class BigQuerySyncState {
    *                                    rollback marker, return cursor (safe block).
    */
   async getCursor({ logger }: { logger: Logger }): Promise<TargetState | undefined> {
-    let row: SyncRow | undefined
+    let row: StoredSyncRow | undefined
     try {
       row = await this.#fetchLatestRow()
     } catch (e) {
@@ -221,6 +225,8 @@ export class BigQuerySyncState {
       await this.#assertNoOrphanTrackedData()
       return undefined
     }
+
+    this.#lastTimestamp = Math.max(this.#lastTimestamp, row.timestamp_micros)
 
     const cursor = decodeCursor(row.current)
 
@@ -271,7 +277,7 @@ export class BigQuerySyncState {
       range_low: null,
       range_high: null,
       committed: true,
-      timestamp: nowMicros(),
+      timestamp: this.#nextTimestamp(),
     })
 
     this.#lastCommittedCursor = cursor ?? undefined
@@ -305,7 +311,7 @@ export class BigQuerySyncState {
       range_low: range.low,
       range_high: range.high,
       committed: false,
-      timestamp: nowMicros(),
+      timestamp: this.#nextTimestamp(),
     })
   }
 
@@ -328,7 +334,7 @@ export class BigQuerySyncState {
       range_low: null,
       range_high: null,
       committed: true,
-      timestamp: nowMicros(),
+      timestamp: this.#nextTimestamp(),
     })
     this.#lastCommittedCursor = cursor
     this.#saves++
@@ -357,7 +363,7 @@ export class BigQuerySyncState {
       range_low: range.low,
       range_high: range.high,
       committed: false,
-      timestamp: nowMicros(),
+      timestamp: this.#nextTimestamp(),
     })
   }
 
@@ -374,7 +380,7 @@ export class BigQuerySyncState {
       range_low: null,
       range_high: null,
       committed: true,
-      timestamp: nowMicros(),
+      timestamp: this.#nextTimestamp(),
     })
     this.#lastCommittedCursor = cursor
   }
@@ -408,7 +414,6 @@ export class BigQuerySyncState {
 
   /**
    * Removes sync rows older than `maxRows`. Runs every 25 saves to amortize cost.
-   * The 7-day partition expiration on the sync table catches rows we missed.
    */
   async cleanupOldRows(logger: Logger): Promise<void> {
     // `current` and `timestamp` are BigQuery reserved keywords; backtick-quote uniformly.
@@ -438,6 +443,19 @@ export class BigQuerySyncState {
 
   async #writeRow(row: SyncRow) {
     await this.#store.commitSyncRow(SYNC_WRITE_SCHEMA, row as unknown as Record<string, unknown>)
+  }
+
+  /**
+   * Client wall-clock time in microseconds, strictly increasing per stream (under the documented
+   * single-writer invariant): a microsecond past the last row when two writes share a millisecond
+   * or the clock went back, and on resume past the newest stored row (`getCursor`), so a clock set
+   * back across a restart cannot order a new row below it. A tie would let the
+   * `WHERE timestamp < @cutoff` page boundary drop the boundary row in fork resolution.
+   */
+  #nextTimestamp(): number {
+    this.#lastTimestamp = Math.max(Date.now() * 1000, this.#lastTimestamp + 1)
+
+    return this.#lastTimestamp
   }
 
   /**
@@ -473,9 +491,9 @@ export class BigQuerySyncState {
     }
   }
 
-  async #fetchLatestRow(): Promise<SyncRow | undefined> {
-    const rows = await this.#store.query<SyncRow>(
-      `SELECT * FROM \`${this.#fqn}\` WHERE \`id\` = @id ORDER BY \`timestamp\` DESC LIMIT 1`,
+  async #fetchLatestRow(): Promise<StoredSyncRow | undefined> {
+    const rows = await this.#store.query<StoredSyncRow>(
+      `SELECT *, UNIX_MICROS(\`timestamp\`) AS timestamp_micros FROM \`${this.#fqn}\` WHERE \`id\` = @id ORDER BY \`timestamp\` DESC LIMIT 1`,
       { id: this.#key.value },
     )
     return rows[0]
@@ -499,9 +517,9 @@ export class BigQuerySyncState {
    * highest floor.
    *
    * Each page is bounded by the timestamp of the previous page's last row, so the same row
-   * is never yielded twice — server-assigned `CURRENT_TIMESTAMP()` gives µs precision and is
-   * unique per write within a stream. A page holds `maxRows` rows, the bound cleanup keeps,
-   * so a fork costs one BQ query unless cleanup has fallen behind.
+   * is never yielded twice — every stamp is unique within a stream (`#nextTimestamp`). A page
+   * holds `maxRows` rows, the bound cleanup keeps, so a fork costs one BQ query unless cleanup
+   * has fallen behind.
    */
   async *#streamRollbackRecords(): AsyncGenerator<RollbackRecord> {
     const pageSize = this.options.maxRows
@@ -541,28 +559,6 @@ export class BigQuerySyncState {
   #shouldCleanup(): boolean {
     return this.#saves === 1 || this.#saves % this.options.cleanupEverySaves === 0
   }
-}
-
-/**
- * Client wall-clock time in microseconds with a within-ms tie-breaker counter — wire format
- * for BQ TIMESTAMP, **strictly monotonic per process** (under the documented single-writer
- * invariant). JS `Date.now()` has only ms precision; `Date.now() * 1000` would let two
- * writes in the same ms collide on `==`, which would let `WHERE timestamp < @cutoff` page
- * boundaries silently drop the boundary row in fork resolution. Clamping to `lastMs` on
- * NTP steps backwards preserves monotonicity even if the system clock doesn't.
- */
-let lastMs = 0
-let withinMsCounter = 0
-function nowMicros(): number {
-  const ms = Math.max(Date.now(), lastMs)
-  if (ms > lastMs) {
-    lastMs = ms
-    withinMsCounter = 0
-  } else {
-    withinMsCounter += 1
-  }
-
-  return ms * 1000 + withinMsCounter
 }
 
 function encodeCursor(c: BlockCursor): string {

@@ -985,6 +985,7 @@ describe('BigQuerySyncState — crash recovery on getCursor', () => {
           range_high: latestRow.range_high,
           committed: latestRow.committed,
           timestamp: '2025-01-01T00:00:00Z',
+          timestamp_micros: 1_735_689_600_000_000,
         },
       ],
     })
@@ -1130,6 +1131,7 @@ describe('bigqueryTarget — fork lifecycle', () => {
           range_high: null,
           committed: true,
           timestamp: '2025-01-01T00:00:00Z',
+          timestamp_micros: 1_735_689_600_000_000,
         },
       ],
     })
@@ -1166,6 +1168,7 @@ describe('bigqueryTarget — fork lifecycle', () => {
           range_high: null,
           committed: true,
           timestamp: '2025-01-01T00:00:00Z',
+          timestamp_micros: 1_735_689_600_000_000,
         },
       ],
     })
@@ -1244,6 +1247,7 @@ describe('bigqueryTarget — fork lifecycle', () => {
           range_high: null,
           committed: true,
           timestamp: '2025-01-01T00:00:00Z',
+          timestamp_micros: 1_735_689_600_000_000,
         },
       ],
     })

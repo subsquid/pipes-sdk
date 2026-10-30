@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { testLogger } from '~/testing/index.js'
 
@@ -26,6 +26,7 @@ function committedRow(finalized: { number: number; hash: string } | null) {
     range_high: null,
     committed: true,
     timestamp: 1,
+    timestamp_micros: 1,
   }
 }
 
@@ -57,6 +58,64 @@ describe('BigQuerySyncState — resume state', () => {
     const resume = await state.getCursor({ logger: testLogger() })
 
     expect(resume).toEqual({ latest: block(50), finalized: null })
+  })
+})
+
+describe('BigQuerySyncState — row stamps', () => {
+  /** The stamp of a stored row 4 s ahead of the clock, as on a host whose clock went back across a restart. */
+  const withClockBehind = it.extend<{ stored: number }>({
+    stored: async ({}, use) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+
+      await use(5_000_000)
+
+      clock.mockRestore()
+    },
+  })
+
+  function resumedState(latest: Record<string, unknown>) {
+    const walRows: Record<string, unknown>[] = []
+    const store = {
+      query: async () => [latest],
+      commitSyncRow: async (_schema: unknown, row: Record<string, unknown>) => {
+        walRows.push(row)
+      },
+      executeDml: async () => ({ rowCount: 0 }),
+    }
+
+    const state = new BigQuerySyncState({
+      store: store as any,
+      bigquery: {} as any,
+      trackedTables: [],
+      options: { projectId: 'p', dataset: 'd' },
+    })
+
+    return { state, walRows }
+  }
+
+  withClockBehind('stamps a resumed run past the newest stored row, though the clock went back', async ({ stored }) => {
+    const { state, walRows } = resumedState({ ...committedRow(block(40)), timestamp_micros: stored })
+
+    await state.getCursor({ logger: testLogger() })
+    await state.saveCommitPre({
+      cursor: block(50),
+      finalized: undefined,
+      rollbackChain: [],
+      range: { low: 51, high: 60 },
+    })
+    await state.saveCommitPost({ logger: testLogger(), cursor: block(60), finalized: undefined, rollbackChain: [] })
+    const stamps = walRows.map((row) => row['timestamp'])
+
+    expect(stamps).toEqual([stored + 1, stored + 2])
+  })
+
+  withClockBehind('stamps the recovery row of an unfinished write past it', async ({ stored }) => {
+    const inFlight = { ...committedRow(block(40)), committed: false, range_low: 51, range_high: 60 }
+    const { state, walRows } = resumedState({ ...inFlight, timestamp_micros: stored })
+
+    await state.getCursor({ logger: testLogger() })
+
+    expect(walRows).toMatchObject([{ op: 'rollback', committed: true, timestamp: stored + 1 }])
   })
 })
 

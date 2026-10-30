@@ -1466,3 +1466,60 @@ describe('clickhouseTarget onRollback bounds', () => {
     },
   )
 })
+
+describe('clickhouseTarget cursor order', () => {
+  const server = {
+    url: process.env['TEST_CLICKHOUSE_URL'] || 'http://localhost:10123',
+    username: process.env['TEST_CLICKHOUSE_USERNAME'] || 'default',
+    password: process.env['TEST_CLICKHOUSE_PASSWORD'] || 'default',
+  }
+
+  /** A client on a database of the test's own, and a clock the test can set back. */
+  const withClock = withPortal.extend<{ client: ClickHouseClient; setClockBack: (ms: number) => void }>({
+    client: async ({}, use) => {
+      const admin = createClient(server)
+      const database = `cursor_order_${randomBytes(6).toString('hex')}`
+      await admin.command({ query: `CREATE DATABASE ${database}` })
+      const client = createClient({ ...server, database })
+
+      await use(client)
+
+      await client.close()
+      await admin.command({ query: `DROP DATABASE ${database} SYNC` })
+      await admin.close()
+    },
+    setClockBack: async ({}, use) => {
+      const now = Date.now
+      const clock = vi.spyOn(Date, 'now')
+
+      await use((ms) => {
+        clock.mockImplementation(() => now() - ms)
+      })
+
+      clock.mockRestore()
+    },
+  })
+
+  async function runPipe(portal: MockChainPortal, client: ClickHouseClient, to: number) {
+    await evmPortalStream({
+      id: 'cursor-order',
+      portal: portal.url,
+      outputs: blockDecoder({ from: 0, to }),
+    }).pipeTo(clickhouseTarget({ client, onData: () => {} }))
+  }
+
+  withClock(
+    'resumes from the last commit when the clock went back across a restart',
+    async ({ portal, client, setClockBack }) => {
+      const chain = await portal({ latest: 3 })
+
+      await runPipe(chain, client, 1)
+      setClockBack(60 * 60 * 1000)
+      await runPipe(chain, client, 2)
+      const thirdRun = chain.requests.length
+      await runPipe(chain, client, 3)
+
+      expect(chain.requests[thirdRun].query.fromBlock).toBe(3)
+    },
+  )
+})
