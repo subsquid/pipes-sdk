@@ -12,6 +12,8 @@ export type BusMessage = {
   data: Buffer
   attributes: Record<string, string>
   orderingKey: string
+  /** The Publish call that carried it, counting from 1. */
+  call: number
 }
 
 /**
@@ -43,6 +45,7 @@ export async function startBus({ projectId, topics }: { projectId: string; topic
   const prefix = `projects/${projectId}/topics/`
   const known = new Set(topics.map((topic) => `${prefix}${topic}`))
   const messages: BusMessage[] = []
+  let calls = 0
 
   const unknownTopic = (name: string): grpc.ServiceError =>
     Object.assign(new Error(`the bus has no topic '${name}'`), {
@@ -71,6 +74,7 @@ export async function startBus({ projectId, topics }: { projectId: string; topic
         return
       }
 
+      calls += 1
       const messageIds: string[] = []
       for (const message of published) {
         messages.push({
@@ -78,6 +82,7 @@ export async function startBus({ projectId, topics }: { projectId: string; topic
           data: Buffer.from(message.data),
           attributes: { ...message.attributes },
           orderingKey: message.orderingKey,
+          call: calls,
         })
         messageIds.push(String(messages.length))
       }

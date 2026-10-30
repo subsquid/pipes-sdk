@@ -51,7 +51,7 @@ function writeState(path: string, file: StateFile) {
 }
 
 function busMessage(body: object, attributes: Record<string, string> = {}): BusMessage {
-  return { topic: 'ct-erc20', data: Buffer.from(JSON.stringify(body)), attributes, orderingKey: '' }
+  return { topic: 'ct-erc20', data: Buffer.from(JSON.stringify(body)), attributes, orderingKey: '', call: 1 }
 }
 
 const cursor = (number: number) => ({ number, hash: `0x${number}` })
@@ -170,6 +170,20 @@ describe('readPubsubSnapshot', () => {
     )
     expect(() => readPubsubSnapshot({ path: pubsub.statePath, id: PIPE_ID, messages: [] })).toThrow(
       "the cursor column 'latest' holds",
+    )
+  })
+  it('fails on an operation code that IB-28 does not name, on the bus and in the outbox', ({ pubsub }) => {
+    const merge = busMessage({ _CHANGE_SEQUENCE_NUMBER: '1', _CHANGE_TYPE: 'MERGE', _id: 'x' })
+    writeState(pubsub.statePath, {
+      cursors: [{ latest: cursor(1) }],
+      outbox: [{ seq: 1, op: 'replace', id: 'x', attributes: '{}', payload: '{}' }],
+    })
+
+    expect(() => readPubsubSnapshot({ path: pubsub.statePath, id: PIPE_ID, messages: [merge] })).toThrow(
+      '"MERGE" is not a changelog operation',
+    )
+    expect(() => readPubsubSnapshot({ path: pubsub.statePath, id: PIPE_ID, messages: [] })).toThrow(
+      '"replace" is not a changelog operation',
     )
   })
 })

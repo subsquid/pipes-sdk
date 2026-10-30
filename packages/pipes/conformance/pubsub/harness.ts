@@ -15,7 +15,7 @@ import { type ChangelogOperation, type PubsubSnapshot, validatePubsubSnapshot } 
 import { type Observation, PIPE_ID, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
 import { type FullStreamScenario, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
-import { type Bus, startBus } from './bus.js'
+import { type Bus, type BusMessage, startBus } from './bus.js'
 import type { KillEvidence, StepJournalEntry, StepKillPoint } from './kill-switch.js'
 import { PROJECT_ID, TOPIC, streamPubsub } from './pipe.js'
 import { readPubsubSnapshot, wireOperations } from './probe.js'
@@ -215,8 +215,19 @@ export async function crashAt<Sim extends { chain: MockChainPortal }>(options: {
 }
 
 /**
+ * How many of `messages` share a Publish call with one of the first `count`: none, when those go
+ * out on their own before anything after them is published.
+ */
+export function sharingCalls(messages: readonly BusMessage[], count: number): number {
+  const calls = new Set(messages.slice(0, count).map(({ call }) => call))
+
+  return messages.slice(count).filter(({ call }) => calls.has(call)).length
+}
+
+/**
  * Restarts a scenario in-process over what a crash left. It fails unless the restart first
- * publishes the outbox the crash left, operation for operation (CN-46); then asks for the block
+ * publishes the outbox the crash left, operation for operation, and has it confirmed before it
+ * streams: no message of a later batch goes out in the same call (CN-46); then asks for the block
  * right after the recovered cursor, anchored on it (WP-1, IB-3); and the run ends as `runToEnd`
  * demands.
  */
@@ -240,11 +251,13 @@ export async function resumeToEnd<Sim extends { chain: MockChainPortal }>({
 
   await runToEnd({ scenario, simulator, pubsub, model })
 
-  const restart = wireOperations(pubsub.bus.messages.slice(published, published + store.outbox.length))
-  const drained = restart.map(({ topic, seq, op, id, attributes, row }) => ({ topic, seq, op, id, attributes, row }))
+  const restart = pubsub.bus.messages.slice(published)
+  const drain = wireOperations(restart.slice(0, store.outbox.length))
+  const drained = drain.map(({ topic, seq, op, id, attributes, row }) => ({ topic, seq, op, id, attributes, row }))
   const resumed = simulator.chain.requests[first]?.query
 
   expect(drained, 'what the restart publishes first').toEqual(store.outbox)
+  expect(sharingCalls(restart, store.outbox.length), 'later messages in the calls that publish the outbox').toBe(0)
   expect(resumed?.fromBlock, 'the first block the restart asks for').toBe(
     cursor === undefined ? scenario.range.from : cursor.number + 1,
   )
