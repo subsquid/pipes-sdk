@@ -170,13 +170,15 @@ describe('ReferenceModel', () => {
       ])
     })
 
-    it('keeps every processed block on a full stream without finality (INV-1, GAP-42)', () => {
+    it('keeps no fork history on a full stream until the first finalized head (DEF-7)', () => {
       const model = new ReferenceModel({ durability: 'T' })
 
       model.batch(chain(0, 2))
-      model.batch(chain(3, 4))
+      const beforeFloor = model.readState().rollbackChain
+      model.batch(chain(3, 4), { finalized: block(3) })
 
-      expect(numbersOf(model.readState().rollbackChain)).toEqual([0, 1, 2, 3, 4])
+      expect(beforeFloor).toEqual([])
+      expect(numbersOf(model.readState().rollbackChain)).toEqual([4])
     })
 
     it('keeps no fork history on the finalized-only route, bound or configured (WP-47)', () => {
@@ -290,12 +292,12 @@ describe('ReferenceModel', () => {
 
     it('restarts below the window when the fork reaches past it (WP-42 deep fork)', () => {
       const model = new ReferenceModel({ durability: 'T' })
-      model.batch(chain(0, 5))
+      model.batch(chain(0, 5), { finalized: block(0) })
 
       const ancestor = model.fork(chain(4, 6, 'b'))
 
       expect(ancestor).toEqual(block(3))
-      expect(model.readState()).toEqual({ current: block(3), finalized: undefined, rollbackChain: chain(0, 3) })
+      expect(model.readState()).toEqual({ current: block(3), finalized: block(0), rollbackChain: chain(1, 3) })
       expect(blocksOf(model)).toEqual([0, 1, 2, 3])
     })
 
@@ -363,8 +365,8 @@ describe('ReferenceModel', () => {
       model.batch(chain(2, 3))
       model.batch(chain(4, 5))
 
-      const tooOld = refusal(model, () => model.recover({ current: block(1), rollbackChain: chain(0, 1) }))
-      model.recover({ current: block(3), rollbackChain: chain(0, 3) })
+      const tooOld = refusal(model, () => model.recover({ current: block(1), rollbackChain: [] }))
+      model.recover({ current: block(3), rollbackChain: [] })
 
       expect(tooOld).toBe(ORACLE_ERRORS.STATE_UNCOMMITTED)
       expect(blocksOf(model)).toEqual([0, 1, 2, 3])

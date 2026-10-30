@@ -214,10 +214,12 @@ export class ReferenceModel {
       }
 
       // INV-1: the rollback chain is exactly the processed blocks above the floor. The finalized-only
-      // route takes no fork, so it keeps no fork history, with or without a floor (WP-47).
-      const floor = this.#finalized?.number ?? -1
-      const unfinalized = [...this.#rollbackChain, ...blocks].filter((block) => block.number > floor)
-      this.#rollbackChain = this.#mode === 'full' ? unfinalized : []
+      // route takes no fork, and an absent floor bounds nothing, so neither keeps fork history (WP-47).
+      const floor = this.#finalized
+      const keepsHistory = this.#mode === 'full' && floor !== undefined
+      this.#rollbackChain = keepsHistory
+        ? [...this.#rollbackChain, ...blocks].filter((block) => block.number > floor.number)
+        : []
 
       this.#data.push(...rows)
       this.#current = blocks.at(-1)
