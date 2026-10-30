@@ -88,9 +88,10 @@ network-dependent unit (DEF-1; GAP-24).
 `id String, current String (cursor JSON), finalized String (cursor JSON | '' when
 absent), rollback_chain String (JSON array), timestamp DateTime(3), sign Int8`,
 `ENGINE = CollapsingMergeTree(sign) ORDER BY (timestamp, id)`. Cursor rows append with
-`sign=+1`, each stamped at least a millisecond after the process's previous row; retention
-cancels with `sign=-1`; newest row per id = resume state *(wall-clock ordering across restarts:
-GAP-10)*. A pipe with no row appends a **start cursor** before its first batch's data:
+`sign=+1`, each stamped at least a millisecond after the process's previous row and the newest
+row stored for its id, so a clock set back across a restart cannot reorder them; retention
+cancels with `sign=-1`; newest row per id = resume state. A pipe with no row appends a **start
+cursor** before its first batch's data:
 `current` = `{"kind": "start", "number": <range start − 1>, "batchEnd": <the batch's last
 block>}`, `finalized` '', `rollback_chain` `[]`; `kind` tells it from a batch cursor. The batch's
 own cursor row supersedes it by being newer; until then a restart resumes from it like from any
@@ -150,8 +151,8 @@ row directly, and exposes no fork-resolution operation (CN-32).
 
 **IB-23 — BigQuery binding (class W).** Sync/WAL table `<dataset>.sync`:
 `id, op ('commit'|'rollback'), current (cursor JSON), finalized (cursor JSON),
-rollback_chain (JSON), range_low, range_high, committed BOOL, timestamp (client µs,
-strictly monotonic per process; across restarts ordering is wall-clock — GAP-10)`.
+rollback_chain (JSON), range_low, range_high, committed BOOL, timestamp (client µs, at
+least a microsecond after the process's previous row and the newest row stored for its id)`.
 States: in-flight-commit → committed;
 in-flight-rollback → rolled-back; recovery of an in-flight record deletes
 `[range_low, range_high]` from every tracked table and appends a rolled-back marker

@@ -185,8 +185,7 @@ table — GAP-20.)*
 **CN-45 — Cross-implementation recovery.** [MUST] Recovery reads state via the formats
 of IB-20…IB-28 only; any conforming implementation recovers state written by any other
 (G1). Clock independence: no recovery or ordering decision may depend on wall-clock
-comparability across writers *(two bindings order cursor rows by wall-clock timestamp —
-GAP-10)*.
+comparability across writers.
 
 **CN-46 — Recovery (C).** [MUST] A class-C sink's resume is: open state → drain the
 outbox → stream from the recovered cursor. No data repair runs and none is possible: the
