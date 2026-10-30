@@ -1,24 +1,20 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { evmQuery } from '~/evm/evm-query-builder.js'
 import { evmPortalStream } from '~/evm/index.js'
-import { MockPortal, mockMetricsServer, mockPortal } from '~/testing/index.js'
+import { mockMetricsServer, readAll } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
+import { StubPortalClient, stubBatch } from '~/testing/stub-portal.js'
 
-function blockOutputs(range: { from: number; to: number }) {
+function blockOutputs(range: { from: number; to?: number }) {
   return evmQuery()
     .addFields({ block: { number: true, hash: true, timestamp: true } })
     .addRange(range)
 }
 
 describe('Pipeline metrics', () => {
-  let portal: MockPortal
-
-  afterEach(async () => {
-    await portal?.close()
-  })
-
-  it('should register all expected progress-tracker metrics', async () => {
-    portal = await mockPortal([
+  withPortal('should register all expected progress-tracker metrics', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -50,8 +46,8 @@ describe('Pipeline metrics', () => {
     expect(metrics.counter('sqd_bytes_downloaded_total')).toBeDefined()
   })
 
-  it('should register all expected portal-source metrics', async () => {
-    portal = await mockPortal([
+  withPortal('should register all expected portal-source metrics', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
@@ -77,8 +73,8 @@ describe('Pipeline metrics', () => {
     expect(metrics.histogram('sqd_batch_size_bytes')).toBeDefined()
   })
 
-  it('should track portal request counts with classification and status labels', async () => {
-    portal = await mockPortal([
+  withPortal('should track portal request counts with classification and status labels', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -112,8 +108,8 @@ describe('Pipeline metrics', () => {
     }
   })
 
-  it('should update progress-tracker metrics on batch processing', async () => {
-    portal = await mockPortal([
+  withPortal('should update progress-tracker metrics on batch processing', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -145,8 +141,8 @@ describe('Pipeline metrics', () => {
     expect(metrics.counter('sqd_bytes_downloaded_total').total).toBeGreaterThan(0)
   })
 
-  it('should observe batch size metrics', async () => {
-    portal = await mockPortal([
+  withPortal('should observe batch size metrics', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -180,5 +176,36 @@ describe('Pipeline metrics', () => {
     for (const obs of batchBytes.observations) {
       expect(obs).toBeGreaterThan(0)
     }
+  })
+
+  // A 204 carries no head headers, and with no finality and no range end nothing else bounds the run.
+  it('counts a head-only batch as a request, and keeps the run end at the cursor (WP-13)', async () => {
+    const portal = new StubPortalClient(async function* () {
+      yield stubBatch([1], { latest: { number: 1 } }, { 200: 1 })
+      yield stubBatch([], {}, { 204: 1 })
+    })
+    const metrics = mockMetricsServer()
+
+    await readAll(evmPortalStream({ id: 'test', portal, outputs: blockOutputs({ from: 1 }), metrics: metrics.server }))
+
+    const statuses = metrics.counter('sqd_portal_requests_total').calls.map((call) => call.labels?.['status'])
+    expect(statuses).toEqual(['200', '204'])
+    expect(metrics.histogram('sqd_batch_size_blocks').observations).toEqual([1])
+    expect(metrics.gauge('sqd_end_block').lastValue).toBe(1)
+  })
+
+  it('counts a head-only batch that arrives before the first block (WP-13)', async () => {
+    const portal = new StubPortalClient(async function* () {
+      yield stubBatch([], {}, { 204: 1 })
+      yield stubBatch([1], { latest: { number: 1 } }, { 200: 1 })
+      yield stubBatch([], {}, { 204: 1 })
+    })
+    const metrics = mockMetricsServer()
+
+    await readAll(evmPortalStream({ id: 'test', portal, outputs: blockOutputs({ from: 1 }), metrics: metrics.server }))
+
+    const statuses = metrics.counter('sqd_portal_requests_total').calls.map((call) => call.labels?.['status'])
+    expect(statuses).toEqual(['204', '200', '204'])
+    expect(metrics.gauge('sqd_processed_block').lastValue).toBe(1)
   })
 })

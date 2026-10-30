@@ -285,7 +285,7 @@ function writeAnswer(res: ServerResponse, answer: ChainAnswer, head: WireHead) {
       break
 
     case 'at-head':
-      res.writeHead(204, headHeaders(head))
+      res.writeHead(204)
       res.end()
       break
 

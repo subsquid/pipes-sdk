@@ -34,7 +34,8 @@ renames happened SDK-side only.
 
 **IB-5 — Stream response.** **200**: NDJSON — one JSON block per `\n`-delimited line;
 lines may split across transport chunks; a trailing unterminated line flushes at
-end-of-stream. **204**: at head, no data (head-only signal; re-poll per WP-13).
+end-of-stream. **204**: at head, no data and no head headers (head-only signal; re-poll
+per WP-13).
 **200 with empty body**: range has no data upstream (range end). Compression:
 gzip/zstd, transparent to content (the reference client negotiates zstd only on
 runtimes supporting it, Node ≥ 24.4).

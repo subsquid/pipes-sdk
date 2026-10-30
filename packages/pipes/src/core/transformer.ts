@@ -2,7 +2,7 @@ import { Metrics } from '~/core/metrics-server.js'
 import { PortalClient } from '~/portal-client/client.js'
 
 import { Logger } from './logger.js'
-import { BatchContext } from './portal-source.js'
+import { BatchContext, HeadContext } from './portal-source.js'
 import { ProfilerOptions } from './profiling.js'
 import { QueryBuilder } from './query-builder.js'
 import { BlockCursor, HookContext } from './types.js'
@@ -26,6 +26,13 @@ export type TransformerOptions<In, Out> = {
    * cursor; undo any internal state above it.
    */
   rollback?: (cursor: BlockCursor, ctx: HookContext) => Promise<void> | void
+  /**
+   * Called for a head-only response: the portal has no new block yet. `ctx` carries the request
+   * counts and, once a block was handed down, the stream with that block as `state.current`.
+   *
+   * @internal
+   */
+  head?: (ctx: HeadContext) => Promise<void> | void
   stop?: (ctx: StopContext) => Promise<void> | void
 }
 
@@ -89,6 +96,16 @@ export class Transformer<In, Out> {
 
     if (this.children.length === 0) return
     await Promise.all(this.children.map((t) => t.rollback(cursor, ctx)))
+  }
+
+  /**
+   * @internal
+   */
+  async head(ctx: HeadContext) {
+    await this.options.head?.(ctx)
+
+    if (this.children.length === 0) return
+    await Promise.all(this.children.map((t) => t.head(ctx)))
   }
 
   /**

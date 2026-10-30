@@ -42,6 +42,10 @@ depth differs between chains, so no single depth is correct, and a wrong one eit
 misses the ancestor anyway or keeps undo records for a whole backfill. The pipe
 therefore halts instead of guessing.
 
+The floor moves only with a batch. A head-only (204) response carries no head headers, so
+it has no finalized head to clamp. A pipe at the head learns the new finalized head from its
+next batch.
+
 Before this decision, the ancestor search did not check the floor correctly. It
 compared each block with the floor of its own record, and the chain of a record is
 always above that floor. So the check never stopped the search, and a canonical match
