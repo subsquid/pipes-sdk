@@ -86,8 +86,7 @@ occupied. No stage may buffer unboundedly (REQ-20).
 
 **WP-13 — Head following.** [MUST] On a head-only signal the pipe emits progress
 (OB-2), then re-requests after P-HEAD-POLL-MS. Backfill/real-time is one loop, not two
-modes. *(Currently the 204's progress emission does not happen and its head report is
-discarded — the floor stalls while idle at head; GAP-23.)*
+modes. A head-only signal reports no head (IB-5), so `F` moves only with batches (ADR-3).
 
 **WP-14 — Transport retry.** [MUST] Transport-level faults (retryable statuses in
 P-RETRY-STATUS-SET, timeouts P-HTTP-TIMEOUT-MS, dropped connections) are retried with

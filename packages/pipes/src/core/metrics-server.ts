@@ -63,6 +63,8 @@ export type MetricsServer = {
   stop(): Promise<void>
   registerPipe(id: string, options?: { profiler: boolean }): void
   batchProcessed(ctx: BatchContext): void
+  /** A head-only response moved the progress: there is no batch to record, only the new stream state. */
+  headProcessed?(ctx: BatchContext): void
   metrics: Metrics
 }
 

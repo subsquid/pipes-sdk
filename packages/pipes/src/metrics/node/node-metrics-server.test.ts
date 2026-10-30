@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest'
 
 import { MetricsServer } from '~/core/index.js'
 import { evmPortalStream } from '~/evm/index.js'
-import { blockDecoder } from '~/testing/index.js'
+import { blockDecoder, readAll } from '~/testing/index.js'
+import { StubPortalClient, stubBatch } from '~/testing/stub-portal.js'
 
 import { MetricsServerOptions, metricsServer, packPreview } from './node-metrics-server.js'
 
@@ -135,6 +136,13 @@ async function profilerEnabled(url: string, id: string): Promise<boolean> {
   return body.payload.enabled
 }
 
+async function statsProgress(url: string): Promise<{ current: number; to: number }> {
+  const res = await fetch(`${url}/stats`)
+  const body = (await res.json()) as { payload: { pipes: { progress: { current: number; to: number } }[] } }
+
+  return body.payload.pipes[0].progress
+}
+
 async function scrape(url: string): Promise<string> {
   const res = await fetch(`${url}/metrics`)
 
@@ -204,6 +212,29 @@ describe('metrics server', () => {
     await server.stop()
 
     expect(client.register.getSingleMetric(foreign)).toBeDefined()
+  })
+
+  withServer('reports the progress of a head-only batch in the stats (WP-13)', async ({ serve }) => {
+    const { server, url } = await serve()
+    // The pipe stops the server when it ends, so the stats are read while it waits for the next batch.
+    const headSeen = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const portal = new StubPortalClient(async function* () {
+      yield stubBatch([1], { latest: { number: 10 } }, { 200: 1 })
+      yield stubBatch([], {}, { 204: 1 })
+      headSeen.resolve()
+      await release.promise
+    })
+
+    const run = readAll(
+      evmPortalStream({ id: 'test', portal, logger: 'silent', outputs: blockDecoder({ from: 1 }), metrics: server }),
+    )
+    await headSeen.promise
+    const progress = await statsProgress(url)
+    release.resolve()
+    await run
+
+    expect(progress).toMatchObject({ current: 1, to: 1 })
   })
 
   withServer('lets two servers in one process register the same metric', async ({ serve }) => {

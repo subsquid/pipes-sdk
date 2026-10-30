@@ -2,6 +2,7 @@ import { Counter, Gauge, Histogram } from '~/core/index.js'
 
 import { formatBlock, formatEta, formatNumber, humanBytes } from './formatters.js'
 import { Logger } from './logger.js'
+import { BatchContext } from './portal-source.js'
 import { createTransformer } from './transformer.js'
 import { BlockCursor } from './types.js'
 
@@ -302,6 +303,43 @@ export function progressTracker<T>({ onProgress, onStart, interval = 5000 }: Pro
     }
   }
 
+  const countRequests = (id: string, requests: Record<number, number>) => {
+    for (const [statusCode, count] of Object.entries(requests)) {
+      portalRequestsTotal?.inc(
+        {
+          id,
+          classification: METRIC_LABELS[mapRequestStatus(Number(statusCode))],
+          status: statusCode,
+        },
+        count,
+      )
+    }
+  }
+
+  const record = (ctx: BatchContext) => {
+    history.addState({
+      state: ctx.stream.state,
+      bytes: ctx.batch.bytesSize,
+      requests: ctx.batch.requests,
+    })
+
+    countRequests(ctx.id, ctx.batch.requests)
+
+    if (ctx.stream.state.current?.number) {
+      processedBlock?.set({ id: ctx.id }, ctx.stream.state.current.number)
+    }
+
+    lastProgress = history.calculate()
+
+    endBlock?.set({ id: ctx.id }, lastProgress.state.to)
+    progressRatio?.set({ id: ctx.id }, lastProgress.state.percent / 100)
+    etaSeconds?.set({ id: ctx.id }, lastProgress.state.etaSeconds)
+    blocksProcessedTotal?.inc({ id: ctx.id }, ctx.batch.blocksCount)
+    bytesDownloaded?.inc({ id: ctx.id }, ctx.batch.bytesSize)
+
+    ctx.stream.progress = lastProgress
+  }
+
   return createTransformer<T, T>({
     profiler: { name: 'track progress' },
     start: ({ id, metrics, state, logger }) => {
@@ -386,41 +424,23 @@ export function progressTracker<T>({ onProgress, onStart, interval = 5000 }: Pro
       processedBlock.set({ id }, -1)
     },
     transform: async (data, ctx) => {
-      history.addState({
-        state: ctx.stream.state,
-        bytes: ctx.batch.bytesSize,
-        requests: ctx.batch.requests,
-      })
-
       batchSizeBlocks?.observe({ id: ctx.id }, ctx.batch.blocksCount)
       batchSizeBytes?.observe({ id: ctx.id }, ctx.batch.bytesSize)
 
-      for (const [statusCode, count] of Object.entries(ctx.batch.requests)) {
-        portalRequestsTotal?.inc(
-          {
-            id: ctx.id,
-            classification: METRIC_LABELS[mapRequestStatus(Number(statusCode))],
-            status: statusCode,
-          },
-          count,
-        )
-      }
-
-      if (ctx.stream.state.current?.number) {
-        processedBlock?.set({ id: ctx.id }, ctx.stream.state.current.number)
-      }
-
-      lastProgress = history.calculate()
-
-      endBlock?.set({ id: ctx.id }, lastProgress.state.to)
-      progressRatio?.set({ id: ctx.id }, lastProgress.state.percent / 100)
-      etaSeconds?.set({ id: ctx.id }, lastProgress.state.etaSeconds)
-      blocksProcessedTotal?.inc({ id: ctx.id }, ctx.batch.blocksCount)
-      bytesDownloaded?.inc({ id: ctx.id }, ctx.batch.bytesSize)
-
-      ctx.stream.progress = lastProgress
+      record(ctx)
 
       return data
+    },
+    // A head-only response is no batch, so it stays out of the batch-size histograms.
+    head: (ctx) => {
+      // Before the first block there is no cursor to report progress at.
+      if (!ctx.stream) {
+        countRequests(ctx.id, ctx.batch.requests)
+
+        return
+      }
+
+      record({ ...ctx, stream: ctx.stream })
     },
     rollback: () => {
       reorgsTotal?.inc({ id: pipeId }, 1)

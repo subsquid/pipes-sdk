@@ -24,7 +24,7 @@ export type ChainRequest = {
   query: StreamQuery
   /** `undefined` while `delay` holds the request. */
   status?: number
-  /** What the portal answered, and the head it reported with it; `undefined` while `delay` holds the request. */
+  /** What the portal answered, and the head it reported with it; `undefined` while `delay` holds the request and on a 204. */
   answer?: ChainAnswer
   head?: WireHead
 }
@@ -262,7 +262,8 @@ export class PortalChain {
     const answer = this.#answer(request.endpoint, request.query)
     request.status = statusOf(answer)
     request.answer = answer
-    request.head = this.head()
+    // The portal sends no head headers with a 204.
+    request.head = answer.kind === 'at-head' ? undefined : this.head()
 
     return answer
   }

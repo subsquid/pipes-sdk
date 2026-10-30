@@ -162,12 +162,24 @@ export type BatchContext = {
   batch: BatchMetadata
 }
 
+/** A head-only response. Before the first block there is no cursor, so there is no `stream`. */
+export type HeadContext = Omit<BatchContext, 'stream'> & { stream?: StreamInfo }
+
 export type PortalBatch<T = any> = { data: T; ctx: BatchContext }
 
 type PartialBlock = { header: { number: number; hash: string; timestamp?: number } }
 
 export function cursorFromHeader(block: PartialBlock): BlockCursor {
   return { number: block.header.number, hash: block.header.hash, timestamp: block.header.timestamp }
+}
+
+function batchMetadata(batch: StreamData<any>): BatchMetadata {
+  return {
+    blocksCount: batch.blocks.length,
+    bytesSize: batch.meta.bytes,
+    requests: batch.meta.requests,
+    lastBlockReceivedAt: batch.meta.lastBlockReceivedAt,
+  }
 }
 
 /** @internal */
@@ -339,6 +351,9 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       },
     })
 
+    // The newest block handed downstream; a head-only response reports progress at it.
+    let processed = cursor
+
     for (const { range, request } of bounded) {
       // Anchor the cursor's hash only to the range that continues from it; a later disjoint range
       // doesn't border the cursor and would fault a spurious 409, so it starts unanchored (ADR-20).
@@ -369,6 +384,53 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
           })
         : portal.getStream(query, { finalized: finalizedStream })
 
+      const batchContext = async (
+        batch: StreamData<any>,
+        finalized: BlockCursor | undefined,
+        current: BlockCursor,
+        profiler: Profiler,
+      ): Promise<BatchContext> => {
+        // The last block this run can reach. A configured end bounds it, but never past the
+        // chain head: a progress denominator above the head is one the run cannot hit, so the
+        // ETA never lands. With no configured end the run just tracks the head. `??` throughout
+        // — block 0 is a valid range end and a valid head.
+        // A 204 reports no head, but it means the portal holds nothing above `current`.
+        const headOnly = batch.blocks.length === 0
+        const chainHead = batch.head.latest?.number ?? (headOnly ? current.number : undefined)
+        const runEnd = last(bounded)?.range?.to ?? chainHead ?? finalized?.number ?? Infinity
+        const lastBlockNumber = Math.max(Math.min(runEnd, chainHead ?? Infinity), current.number)
+
+        return {
+          id: this.#id,
+          profiler,
+          metrics: this.#metricServer.metrics,
+          logger: this.#logger,
+          stream: {
+            dataset: datasetMetadata,
+            head: {
+              finalized,
+              latest: batch.head.latest,
+            },
+            query: {
+              url: portal.getUrl(),
+              hash: await hashQuery(query),
+              raw: query,
+            },
+            state: {
+              initial,
+              ranges,
+              current,
+              last: lastBlockNumber,
+              rollbackChain: extractRollbackChain({
+                blocks: batch.blocks,
+                head: finalized,
+              }),
+            },
+          },
+          batch: batchMetadata(batch),
+        }
+      }
+
       let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
       let readSpan = batchSpan.start('fetch data').addLabels('core')
       try {
@@ -384,59 +446,29 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
           watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
 
           if (blocks.length > 0) {
-            // TODO WTF with any?
-            const lastBatchBlock = last(blocks as { header: { number: number } }[])
-
-            // The last block this run can reach. A configured end bounds it, but never past the
-            // chain head: a progress denominator above the head is one the run cannot hit, so the
-            // ETA never lands. With no configured end the run just tracks the head. `??` throughout
-            // — block 0 is a valid range end and a valid head.
-            const chainHead = batch.head.latest?.number
-            const runEnd = last(bounded)?.range?.to ?? chainHead ?? finalized?.number ?? Infinity
-            const lastBlockNumber = Math.max(
-              Math.min(runEnd, chainHead ?? Infinity),
-              lastBatchBlock.header?.number ?? -Infinity,
-            )
-
-            const ctx: BatchContext = {
-              id: this.#id,
-              profiler: batchSpan,
-              metrics: this.#metricServer.metrics,
-              logger: this.#logger,
-              stream: {
-                dataset: datasetMetadata,
-                head: {
-                  finalized,
-                  latest: batch.head.latest,
-                },
-                query: {
-                  url: portal.getUrl(),
-                  hash: await hashQuery(query),
-                  raw: query,
-                },
-                state: {
-                  initial,
-                  ranges,
-                  current: cursorFromHeader(lastBatchBlock as any),
-                  last: lastBlockNumber,
-                  rollbackChain: extractRollbackChain({
-                    blocks: batch.blocks,
-                    head: finalized,
-                  }),
-                },
-              },
-              batch: {
-                blocksCount: batch.blocks.length,
-                bytesSize: batch.meta.bytes,
-                requests: batch.meta.requests,
-                lastBlockReceivedAt: batch.meta.lastBlockReceivedAt,
-              },
-            }
+            const ctx = await batchContext(batch, finalized, cursorFromHeader(last(blocks)), batchSpan)
+            processed = ctx.stream.state.current
 
             const data = await this.applyTransformers(ctx, batch.blocks as T)
 
             yield { data, ctx }
           } else {
+            // A head-only response: no blocks to yield, but its head and request counts still reach
+            // the progress tracker and the stats (WP-13).
+            if (processed) {
+              const ctx = await batchContext(batch, finalized, processed, batchSpan)
+              await this.applyHead(ctx)
+              this.#metricServer.headProcessed?.(ctx)
+            } else {
+              await this.applyHead({
+                id: this.#id,
+                profiler: batchSpan,
+                metrics: this.#metricServer.metrics,
+                logger: this.#logger,
+                batch: batchMetadata(batch),
+              })
+            }
+
             // Never yielded, so batchEnd won't run.
             batchSpan.end()
           }
@@ -471,19 +503,14 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     options?: ReadOptions,
   ): AsyncIterable<{ batch: StreamData<any>; finalized?: BlockCursor }> {
     for await (const batch of source) {
-      // An empty batch reaches no consumer and leaves the floor alone (GAP-23).
-      if (batch.blocks.length === 0) {
-        yield { batch, finalized: this.#watermark.floor }
-        continue
-      }
-
       // Clamp the portal's finalized head through the monotonic watermark before it
       // reaches any consumer, so a regressed or transiently-missing finalized head can
       // never un-finalize already-committed data. The rollback chain is derived from the
       // CLAMPED head so the two stay consistent (clamp can only raise finalized).
       const finalized = this.#watermark.clamp(batch.head.finalized)
 
-      if (!options?.perBlockUnfinalized) {
+      const headOnly = batch.blocks.length === 0
+      if (headOnly || !options?.perBlockUnfinalized) {
         yield { batch, finalized }
         continue
       }
@@ -544,6 +571,12 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     }
 
     return data
+  }
+
+  private async applyHead(ctx: HeadContext) {
+    for (const transformer of this.#transformers) {
+      await transformer.head({ ...ctx, logger: this.#logger })
+    }
   }
 
   private context<T extends Record<string, any>>(span: Profiler, rest?: T) {

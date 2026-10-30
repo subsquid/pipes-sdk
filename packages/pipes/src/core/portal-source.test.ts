@@ -19,6 +19,7 @@ import {
   readAll,
 } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
+import { STUB_HEAD, StubPortalClient } from '~/testing/stub-portal.js'
 
 /**
  * Tallies span starts and ends per name. A single global total hides the interesting cases — a
@@ -1099,26 +1100,7 @@ describe('finalized-only targets', () => {
 })
 
 describe('stall reporting', () => {
-  const head = { number: 100, hash: '0x100' }
-
-  /** Portal stand-in with no I/O at all, so the test owns every timer in the pipe. */
-  class StubPortalClient extends PortalClient {
-    constructor(private readonly blocks: () => AsyncIterable<any>) {
-      super({ url: 'http://portal.invalid' })
-    }
-
-    override async getMetadata() {
-      return { dataset: 'test', aliases: [], real_time: true, start_block: 0 } as any
-    }
-
-    override async getHead() {
-      return head
-    }
-
-    override getStream(): any {
-      return this.blocks()
-    }
-  }
+  const head = STUB_HEAD
 
   function batch(number: number) {
     return {
