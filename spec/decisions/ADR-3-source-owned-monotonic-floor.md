@@ -33,6 +33,15 @@ roll back below the floor:
 A later decision can let a sink roll back below the floor when the sink declares how
 deep it can undo. Until then, the pipe halts.
 
+A full stream keeps no rollback chain while the floor is absent, so a fork that arrives
+before the first finalized header also halts with E1003, and it halts again on every
+restart until the operator resets the cursor. Every dataset reports finality, and a
+response omits the finalized header only for a short period, so this case is rare. A
+rollback chain with no floor would need a depth below the head that counts as safe. Fork
+depth differs between chains, so no single depth is correct, and a wrong one either
+misses the ancestor anyway or keeps undo records for a whole backfill. The pipe
+therefore halts instead of guessing.
+
 Before this decision, the ancestor search did not check the floor correctly. It
 compared each block with the floor of its own record, and the chain of a record is
 always above that floor. So the check never stopped the search, and a canonical match

@@ -185,7 +185,7 @@ export function extractRollbackChain({ blocks, head }: { blocks: PartialBlock[];
 /**
  * Gives every block above the finalized head its own batch, after the finalized blocks before it.
  * A target that tags its undo records with the batch's last block can then roll back to any of them.
- * With no finalized head, every block counts as finalized (GAP-42).
+ * With no finalized head, every block counts as finalized: there is no rollback chain to tag (ADR-3).
  */
 function splitByFinality<B extends PartialBlock>(batch: StreamData<B>, finalized?: BlockCursor): StreamData<B>[] {
   if (finalized == null) return [batch]

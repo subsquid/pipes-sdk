@@ -36,7 +36,8 @@ not replace the stored cursor.
 
 **DEF-7 — Rollback chain `RC`.** The ordered sequence of cursors (with hashes) of
 processed blocks strictly above `F` — the candidate ancestors for fork resolution.
-Persisted with each cursor advance; trimmed as blocks finalize.
+Persisted with each cursor advance; trimmed as blocks finalize. Empty while `F = ⊥`:
+with no floor there is no bound below which a block is safe to drop (ADR-3).
 
 **DEF-8 — Sink resume state.** `TargetState ≡ ⟨latest: Cursor, finalized: Cursor | null⟩`
 — the handshake a sink returns on resume. `finalized` is a **required key**, explicitly
