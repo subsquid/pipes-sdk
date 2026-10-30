@@ -1,0 +1,35 @@
+// The part of google/pubsub/v1/pubsub.proto that a publisher calls, with the same names and
+// field numbers, so the Google client speaks to the stand-in bus as to Pub/Sub. Fields the
+// client sends and the bus does not read are left out; protobuf skips them.
+syntax = "proto3";
+
+package google.pubsub.v1;
+
+service Publisher {
+  rpc GetTopic(GetTopicRequest) returns (Topic);
+  rpc Publish(PublishRequest) returns (PublishResponse);
+}
+
+message Topic {
+  string name = 1;
+}
+
+message GetTopicRequest {
+  string topic = 1;
+}
+
+message PubsubMessage {
+  bytes data = 1;
+  map<string, string> attributes = 2;
+  string message_id = 3;
+  string ordering_key = 5;
+}
+
+message PublishRequest {
+  string topic = 1;
+  repeated PubsubMessage messages = 2;
+}
+
+message PublishResponse {
+  repeated string message_ids = 1;
+}
