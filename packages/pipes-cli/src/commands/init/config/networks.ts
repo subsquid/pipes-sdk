@@ -789,18 +789,6 @@ export const evmNetworks = [
     details: '/en/data/evm/gnosis-mainnet/overview',
   },
   {
-    name: 'Gravity',
-    type: 'mainnet',
-    tooltip: null,
-    chainId: '1625',
-    portal: true,
-    realtime: false,
-    traces: true,
-    stateDiffs: true,
-    slug: 'galxe-gravity',
-    details: '/en/data/evm/galxe-gravity/overview',
-  },
-  {
     name: 'Hedera',
     type: 'mainnet',
     tooltip: null,
