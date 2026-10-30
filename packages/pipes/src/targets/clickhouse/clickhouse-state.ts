@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS ${table}
   ORDER BY (timestamp, id)
 `
 
-type SyncRow = { current: string; finalized: string } & Record<string, unknown>
+type SyncRow = { current: string; finalized: string; timestamp: string } & Record<string, unknown>
 
 /** The blocks a first batch covers: from the range start up to the batch's last block. */
 export type FirstBatchBlocks = { from: number; to: number }
@@ -211,6 +211,7 @@ export class ClickhouseState {
     try {
       const row = await this.#readLatestRow(this.#key.value)
       if (row) {
+        this.#continueStampsAfter(row)
         const primary = this.#stateOf(row)
         this.#resumedStart = isStartCursor(primary.latest) ? row : undefined
 
@@ -268,6 +269,12 @@ export class ClickhouseState {
     return this.#lastTimestamp
   }
 
+  // The stamps go on from the newest stored row, so a clock set back across a restart cannot order
+  // a new row below it
+  #continueStampsAfter(row: SyncRow) {
+    this.#lastTimestamp = Math.max(this.#lastTimestamp, Date.parse(row.timestamp))
+  }
+
   /**
    * Automatic one-time migration from the legacy default key. A pipe upgraded from an SDK version
    * that keyed every cursor by the static "stream" id finds its progress there — re-key those rows
@@ -292,8 +299,14 @@ export class ClickhouseState {
   async #migrateLegacyCursor(): Promise<TargetState | undefined> {
     if (this.#key.isExplicit || this.#key.value === LEGACY_DEFAULT_CURSOR_ID) return
 
-    const legacy = await this.#readLatest(LEGACY_DEFAULT_CURSOR_ID)
-    if (!legacy) return
+    const legacyRow = await this.#readLatestRow(LEGACY_DEFAULT_CURSOR_ID)
+    if (!legacyRow) {
+      return
+    }
+
+    // The re-keyed rows keep their stamps
+    this.#continueStampsAfter(legacyRow)
+    const legacy = this.#stateOf(legacyRow)
 
     this.#logger?.warn(
       `Found a ClickHouse cursor under the legacy default id "${LEGACY_DEFAULT_CURSOR_ID}" in ` +
@@ -345,12 +358,6 @@ export class ClickhouseState {
         },
       })
     }
-  }
-
-  async #readLatest(id: string): Promise<TargetState | undefined> {
-    const row = await this.#readLatestRow(id)
-
-    return row && this.#stateOf(row)
   }
 
   // As stored, timestamps in ISO, so a row can be written back as its own cancel row

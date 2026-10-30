@@ -45,7 +45,13 @@ function makeStore(persistedFinalized: { number: number; hash: string }) {
   const store = {
     client: { connectionParams: { database: 'default' } },
     query: async () => ({
-      json: async () => [{ current: JSON.stringify(block(50)), finalized: JSON.stringify(persistedFinalized) }],
+      json: async () => [
+        {
+          current: JSON.stringify(block(50)),
+          finalized: JSON.stringify(persistedFinalized),
+          timestamp: '2026-10-28T10:00:00.000Z',
+        },
+      ],
     }),
     insert: async (args: any) => {
       inserts.push(args)
@@ -152,39 +158,40 @@ describe('ClickhouseState — fork', () => {
   })
 })
 
-describe('ClickhouseState — cursor key binding & legacy migration', () => {
-  // Store whose `query` answers for the id it was queried with — as the JSON latest-row read
-  // (getCursor) and as the streaming full-row read the legacy migration uses to re-key rows.
-  function keyedStore(rowsById: Record<string, { current: string; finalized: string }>) {
-    const inserts: any[] = []
-    const removals: any[] = []
-    const store = {
-      client: { connectionParams: { database: 'default' } },
-      query: async ({ query_params }: any) => {
-        const row = rowsById[query_params?.id]
+// Store whose `query` answers for the id it was queried with — as the JSON latest-row read
+// (getCursor) and as the streaming full-row read the legacy migration uses to re-key rows.
+function keyedStore(rowsById: Record<string, { current: string; finalized: string; timestamp: string }>) {
+  const inserts: any[] = []
+  const removals: any[] = []
+  const store = {
+    client: { connectionParams: { database: 'default' } },
+    query: async ({ query_params }: any) => {
+      const row = rowsById[query_params?.id]
 
-        return {
-          json: async () => (row ? [row] : []),
-          stream: async function* () {
-            if (row) yield [{ json: () => ({ ...row, id: query_params.id }) }]
-          },
-        }
-      },
-      insert: async (args: any) => {
-        inserts.push(args)
-      },
-      removeAllRowsByQuery: async (args: any) => {
-        removals.push(args)
-      },
-      command: async () => {},
-    }
-
-    return { store, inserts, removals }
+      return {
+        json: async () => (row ? [row] : []),
+        stream: async function* () {
+          if (row) yield [{ json: () => ({ ...row, id: query_params.id }) }]
+        },
+      }
+    },
+    insert: async (args: any) => {
+      inserts.push(args)
+    },
+    removeAllRowsByQuery: async (args: any) => {
+      removals.push(args)
+    },
+    command: async () => {},
   }
 
+  return { store, inserts, removals }
+}
+
+describe('ClickhouseState — cursor key binding & legacy migration', () => {
   const row = (current: number, finalized: number) => ({
     current: JSON.stringify(block(current)),
     finalized: JSON.stringify(block(finalized)),
+    timestamp: '2026-10-28T10:00:00.000Z',
   })
 
   it('keys by the source id when no explicit settings.id is set', async () => {
@@ -267,6 +274,48 @@ describe('ClickhouseState — cursor key binding & legacy migration', () => {
 
     await expect(state.getCursor()).resolves.toBeUndefined()
     expect(removals).toHaveLength(0)
+  })
+})
+
+describe('ClickhouseState — row stamps', () => {
+  /** The stamp of a stored row 4 s ahead of the clock, as on a host whose clock went back across a restart. */
+  const withClockBehind = it.extend<{ stored: number }>({
+    stored: async ({}, use) => {
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+
+      await use(5_000)
+
+      clock.mockRestore()
+    },
+  })
+
+  const rowAt = (stamp: number) => ({
+    current: JSON.stringify(block(50)),
+    finalized: JSON.stringify(block(40)),
+    timestamp: new Date(stamp).toISOString(),
+  })
+
+  withClockBehind('stamps a resumed run past the newest stored row, though the clock went back', async ({ stored }) => {
+    const { store, inserts } = keyedStore({ 'pipe-x': rowAt(stored) })
+    const state = new ClickhouseState(store as any, {})
+    state.bindCursorKey('pipe-x')
+
+    await state.getCursor()
+    await state.saveCursor(ctxFor(block(60), block(55), []))
+
+    expect(inserts[0].values[0].timestamp).toBe(stored + 1)
+  })
+
+  withClockBehind('stamps a run past the legacy rows it migrated', async ({ stored }) => {
+    const { store, inserts } = keyedStore({ stream: rowAt(stored) })
+    const state = new ClickhouseState(store as any, {})
+    state.bindCursorKey('pipe-x', { warn: () => {} } as any)
+
+    await state.getCursor()
+    await state.saveCursor(ctxFor(block(60), block(55), []))
+    const [, cursorInsert] = inserts
+
+    expect(cursorInsert.values[0].timestamp).toBe(stored + 1)
   })
 })
 
