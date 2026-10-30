@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { OracleRow, OracleState } from './reference-model.js'
 import {
+  type Attributed,
+  type ChangelogOperation,
   type ClickhouseSnapshot,
   type PostgresSnapshot,
   type PublishedUnit,
+  type PubsubSnapshot,
   type SyncRecord,
   type Violation,
   nextInRanges,
@@ -18,6 +21,7 @@ import {
   validateOrdered,
   validateParquetSnapshot,
   validatePostgresSnapshot,
+  validatePubsubSnapshot,
   validateResidue,
   validateRouteMode,
   validateSequence,
@@ -590,6 +594,93 @@ describe('structural validators', () => {
       const violations = validateClickhouseSnapshot(snapshotOf([], {}), [])
 
       expect(messagesOf(violations)).toEqual(['the snapshot reads no table'])
+    })
+  })
+
+  describe('validatePubsubSnapshot', () => {
+    const operation = (seq: number, op: ChangelogOperation['op'] = 'upsert'): ChangelogOperation => ({
+      topic: 't',
+      seq,
+      op,
+      id: `row:${seq}`,
+      attributes: { table: 'transfers' },
+      row: { block: seq },
+    })
+    const message = (seq: number, body = `{"seq":${seq}}`) => ({
+      ...operation(seq),
+      orderingKey: '',
+      finalized: 2,
+      body,
+    })
+    const snapshotOf = (snapshot: Partial<PubsubSnapshot<Attributed>>): PubsubSnapshot<Attributed> => ({
+      state: { current: cursor(9), finalized: cursor(2), rollbackChain: [] },
+      sequence: 0,
+      outbox: [],
+      wire: [],
+      rows: [],
+      ...snapshot,
+    })
+
+    it('passes a bus and an outbox that hold every number, a republish repeated byte for byte', () => {
+      const snapshot = snapshotOf({
+        sequence: 4,
+        wire: [1, 2, 3, 2, 3].map((seq) => message(seq)),
+        outbox: [2, 3, 4].map((seq) => operation(seq)),
+        rows: rows(1, 2, 3, 9),
+      })
+
+      expect(validatePubsubSnapshot(snapshot, [{ from: 0, to: 9 }])).toEqual([])
+    })
+
+    it('refuses a republish whose body differs, and a number the bus skips (RP-45, CN-46)', () => {
+      const snapshot = snapshotOf({ sequence: 4, wire: [message(1), message(1, '{}'), message(3), message(4)] })
+
+      const violations = validatePubsubSnapshot(snapshot, [])
+
+      expect(messagesOf(violations)).toEqual([
+        "operation 1 on 't' reuses 1 for another operation",
+        "operation 2 on 't' skips from 1 to 3",
+        'neither the bus nor the outbox holds 2',
+      ])
+    })
+
+    it('refuses a lost number, a number the state never handed out, and an outbox that differs from the bus (CN-17)', () => {
+      const lost = snapshotOf({ sequence: 3, wire: [message(1)], outbox: [operation(3)] })
+      const unrecorded = snapshotOf({ sequence: 1, wire: [message(0), message(1), message(2)] })
+      const unpublished = snapshotOf({
+        sequence: 3,
+        wire: [1, 2, 3].map((seq) => message(seq)),
+        outbox: [4, 5, 6].map((seq) => operation(seq)),
+      })
+      const differs = snapshotOf({ sequence: 2, wire: [message(1), message(2)], outbox: [operation(2, 'delete')] })
+
+      expect(messagesOf(validatePubsubSnapshot(lost, []))).toEqual(['neither the bus nor the outbox holds 2'])
+      expect(messagesOf(validatePubsubSnapshot(unrecorded, []))).toEqual([
+        'the bus holds 0, 2, which the state never handed out: its last is 1',
+      ])
+      expect(messagesOf(validatePubsubSnapshot(unpublished, []))).toEqual([
+        'the outbox holds 4, 5, 6, which the state never handed out: its last is 3',
+      ])
+      expect(messagesOf(validatePubsubSnapshot(differs, []))).toEqual([
+        'the outbox holds 2 as another operation than the bus',
+      ])
+    })
+
+    it('checks the rows against the state and the range set (CN-44, INV-3, INV-5), and the state itself', () => {
+      const orphan = snapshotOf({ state: undefined, rows: rows(1) })
+      const beyond = snapshotOf({
+        state: { current: cursor(4), finalized: cursor(2), rollbackChain: [cursor(5)] },
+        rows: rows(3, 7),
+      })
+
+      expect(messagesOf(validatePubsubSnapshot(orphan, []))).toEqual([
+        'the table holds rows, but the store holds no state',
+      ])
+      expect(messagesOf(validatePubsubSnapshot(beyond, [{ from: 0, to: 5 }]))).toEqual([
+        'a row at 7 falls outside every configured range',
+        'rollback chain entry 5 is above the cursor 4',
+        'the committed data reaches 7, above the cursor 4',
+      ])
     })
   })
 })

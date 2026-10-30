@@ -707,6 +707,116 @@ export function validateClickhouseSnapshot(snapshot: ClickhouseSnapshot, ranges:
   return violations
 }
 
+/** One operation of a class-C changelog: what a consumer applies (RP-24). */
+export type ChangelogOperation = {
+  topic: string
+  seq: number
+  op: 'upsert' | 'delete'
+  id: string
+  /** The filter attributes, without the finality reference each message carries anew (RP-45). */
+  attributes: Record<string, string>
+  /** The author's columns. */
+  row: Record<string, unknown>
+}
+
+/** A changelog operation as a message on the bus carries it. */
+export type WireOperation = ChangelogOperation & {
+  orderingKey: string
+  /** The finalized head the message is stamped with (RP-45); absent on a dataset that reports none. */
+  finalized: number | undefined
+  /** The message body as published: a republish repeats it byte for byte (CN-46). */
+  body: string
+}
+
+/**
+ * One read of a class-C store: the producer's state and the bus it publishes to. Every field is
+ * required, so no check can be skipped by leaving its input out.
+ */
+export type PubsubSnapshot<Row extends Attributed = OracleRow> = {
+  /** ⟨C, F, RC⟩; `undefined` with no cursor row. */
+  state: OracleState | undefined
+  /** The last sequence number the producer handed out; 0 before the first. */
+  sequence: number
+  /** The operations recorded and not yet confirmed, in enqueue order. */
+  outbox: ChangelogOperation[]
+  /** Every operation on the bus, in the order the bus took it: a republished one is here twice. */
+  wire: WireOperation[]
+  /** The rows a consumer holds once it has applied the wire and the outbox. */
+  rows: Row[]
+}
+
+/**
+ * Every structural validator a class-C store answers to, over one snapshot of it. The outbox is
+ * the class's crash window: what the state recorded and the bus may not hold yet (CN-17).
+ */
+export function validatePubsubSnapshot(
+  snapshot: PubsubSnapshot<Attributed>,
+  ranges: readonly BlockRange[],
+): Violation[] {
+  const { state, rows } = snapshot
+  const published = snapshot.wire.map((operation) => ({
+    topic: operation.topic,
+    seq: operation.seq,
+    key: JSON.stringify([operation.body, operation.attributes, operation.orderingKey]),
+  }))
+
+  return [
+    ...validateSequence(published),
+    ...validateRecorded(snapshot),
+    ...validateAccountedFor(state, rows),
+    ...validateInRange(rows, ranges),
+    ...validateDataBound(state, rows),
+  ]
+}
+
+/**
+ * CN-17: the commit records an operation before the bus can hold it, and a confirmation removes it
+ * from the outbox only once the bus does. So the bus and the outbox together hold every number the
+ * state handed out, the outbox holds a number the bus holds only as the same operation, and neither
+ * holds a number the state never handed out.
+ */
+function validateRecorded({ sequence, outbox, wire }: PubsubSnapshot<Attributed>): Violation[] {
+  const violations: Violation[] = []
+  const report = (message: string) => {
+    violations.push({ validator: 'outbox-coherence', property: 'CN-17', message })
+  }
+
+  const recorded = new Map<number, string>()
+  for (const operation of [...wire, ...outbox]) {
+    const key = JSON.stringify([operation.topic, operation.op, operation.id, operation.attributes, operation.row])
+    const held = recorded.get(operation.seq)
+    if (held !== undefined && held !== key) {
+      report(`the outbox holds ${operation.seq} as another operation than the bus`)
+    }
+
+    recorded.set(operation.seq, key)
+  }
+
+  const holders = [
+    ['bus', wire],
+    ['outbox', outbox],
+  ] as const
+  for (const [holder, operations] of holders) {
+    const unhanded = operations.filter(({ seq }) => seq < 1 || seq > sequence).map(({ seq }) => seq)
+    if (unhanded.length) {
+      report(`the ${holder} holds ${unhanded.join(', ')}, which the state never handed out: its last is ${sequence}`)
+    }
+  }
+
+  const lost: number[] = []
+  for (let seq = 1; seq <= sequence; seq++) {
+    if (!recorded.has(seq)) {
+      lost.push(seq)
+    }
+  }
+
+  if (lost.length) {
+    report(`neither the bus nor the outbox holds ${lost.join(', ')}`)
+  }
+
+  return violations
+}
+
 /** Every sync row is a commit point, so each must be a sound state of its own; and the floor never goes down (INV-12). */
 function validateSyncRecords(sync: readonly SyncRecord[]): Violation[] {
   const violations: Violation[] = []

@@ -14,8 +14,8 @@ import { RANGES, S1, type S1Simulator, S1_ROWS, endStateOf, follow, rowsAt } fro
 import type { Observation } from './erc20.js'
 import { S3, type S3Simulator, S3_RANGES, S3_ROWS, s3EndState, s3Oracle, s3RowsUpTo } from './fork.js'
 
-/** The classes that read the full stream and commit at every batch: T and A. */
-export type FullStreamClass = Extract<DurabilityClass, 'T' | 'A'>
+/** The classes that read the full stream and commit at every batch: T, A and C. */
+export type FullStreamClass = Extract<DurabilityClass, 'T' | 'A' | 'C'>
 
 /** Feeds the oracle a run's batches and forks, as the pipe met them. */
 export type Follower = {
