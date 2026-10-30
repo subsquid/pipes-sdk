@@ -1,7 +1,7 @@
 import { describe, expect } from 'vitest'
 
 import { S3 } from '../scenarios/fork.js'
-import { S3_PUBSUB, it, runToEnd } from './harness.js'
+import { S3_PUBSUB, it, runToEnd, sharingCalls } from './harness.js'
 
 const scenario = S3_PUBSUB
 
@@ -19,7 +19,8 @@ describe('Pub/Sub (class C) · S3 one fork · one uninterrupted run (CT-1)', () 
     const requests = simulator.chain.requests
     const forks = requests.filter((request) => request.answer?.kind === 'fork')
     const afterFork = requests.at(requests.indexOf(forks[0]) + 1)?.query
-    const repairs = store.wire.slice(store.wire.findIndex((operation) => operation.op === 'delete'))
+    const firstRepair = store.wire.findIndex((operation) => operation.op === 'delete')
+    const repairs = store.wire.slice(firstRepair)
     const deleted = repairs.filter((operation) => operation.op === 'delete').map(({ id }) => id)
     const firstRewrite = repairs.findIndex((operation) => operation.op === 'upsert')
 
@@ -27,7 +28,8 @@ describe('Pub/Sub (class C) · S3 one fork · one uninterrupted run (CT-1)', () 
     expect(afterFork?.fromBlock).toBe(S3.ancestor + 1)
     // Each row the run published above the ancestor is deleted once, in no order the spec fixes.
     expect(deleted.sort()).toEqual(['approvals:28', 'transfers:27', 'transfers:28', 'transfers:29'])
-    // Compensations go out before the source re-streams the canonical blocks (CN-35).
+    // Compensations go out, and are confirmed, before the source re-streams the canonical blocks (CN-35).
     expect(firstRewrite).toBe(deleted.length)
+    expect(sharingCalls(pubsub.bus.messages.slice(firstRepair), deleted.length)).toBe(0)
   })
 })
