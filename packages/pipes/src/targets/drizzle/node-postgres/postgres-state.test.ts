@@ -152,6 +152,41 @@ describe('PostgresState — fork', () => {
 
     await expect(state.fork([block(5)])).resolves.toBeNull()
   })
+
+  it('persists the fork ancestor with the current floor and a trimmed rollback chain', async () => {
+    const state = await seededState(block(120))
+    const executed: any[] = []
+    const tx = {
+      execute: async (query: any) => {
+        executed.push(query)
+        if (executed.length === 1) {
+          return {
+            rows: [
+              {
+                current_number: '130',
+                finalized: block(120),
+                rollback_chain: [block(121), block(122), block(130)],
+              },
+            ],
+          }
+        }
+        return { rows: [] }
+      },
+    }
+
+    await state.saveForkCursor(tx as any, block(122))
+
+    expect(sqlTextOf(executed[0])).toMatch(/"current_number" >= COALESCE/i)
+    expect(paramsOf(executed[0])).toEqual(['stream', 'stream', 122])
+    expect(sqlTextOf(executed[1])).toMatch(/ON CONFLICT \(id, current_number\) DO UPDATE/i)
+    expect(paramsOf(executed[1])).toEqual([
+      'stream',
+      122,
+      '0x122',
+      JSON.stringify(block(120)),
+      JSON.stringify([block(121), block(122)]),
+    ])
+  })
 })
 
 describe('PostgresState — cursor key binding', () => {
