@@ -223,10 +223,12 @@ start, then persisted) gates publishing and recording, so a pipe may read deeper
 than it publishes. Topic administration is validate-only by default. Codes E24xx.
 
 **IB-24 — Lock declarations.** Postgres: per-batch advisory transaction lock on the
-cursor key — dual instance fails coded. ClickHouse, BigQuery, Parquet: **no lock**
-(convention/guards only; NG2 applies) *(BigQuery single-writer assumption: GAP-12)*.
-Pub/Sub: an exclusive lock on the local state file for the process lifetime — a second
-producer fails coded (E2410).
+cursor key — dual instance fails coded. ClickHouse and Parquet: **no lock** (NG2 applies).
+BigQuery: **no lock and no dual-instance detection**; exactly one writer per cursor key is
+an operator precondition because sync rows use client-assigned monotonic timestamps. Two
+writers can interleave those timestamps and corrupt fork ordering, so dual-instance execution
+is undefined under NG2, not a supported or detected configuration. Pub/Sub: an exclusive lock
+on the local state file for the process lifetime — a second producer fails coded (E2410).
 
 **IB-25 — Cache store.** SQLite table `data(query_hash TEXT, block_from INTEGER,
 block_to INTEGER, value BLOB, PRIMARY KEY(block_from, block_to, query_hash))`; `value`
@@ -249,7 +251,7 @@ is scoped to the cursor key by whoever makes it (ADR-16).
 | ClickHouse | A | none | yes | not declared — guard off; the repair hook scopes its removal to the pipe's rows (RP-42) |
 | Postgres | T | advisory, per batch | yes | not declared — guard off |
 | Parquet | K | none | no | declared per output directory; startup refuses another key's state sidecar and published data with no state (IB-22) — guard on |
-| BigQuery | W | none | no | assumed exclusive — guard on, probed table-wide *(GAP-20)* |
+| BigQuery | W | none; single writer required, no detection | no | assumed exclusive — guard on, probed table-wide *(GAP-20)* |
 | Pub/Sub | C | exclusive state-file lock, process-lifetime | no | n/a — the sink owns no tables; ids are namespaced per producer |
 
 A binding MAY expose exclusivity as operator configuration; where it does, the declared
