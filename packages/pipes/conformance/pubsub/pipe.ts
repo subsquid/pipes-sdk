@@ -13,10 +13,7 @@ export type BusAddress = { endpoint: string; projectId: string }
 /** One row of either table, as the pipe publishes it. Its id is its table and block. */
 export type ChangelogRow = { table: TableName; blockNumber: number; value: string }
 
-/**
- * Both tables in one list, in block order and, inside a block, in table order. One route carries
- * them: the sequence barrier refuses a second route on the same topic (E2429, GAP-40).
- */
+/** Both tables in one list, in block order and, inside a block, in table order. */
 function inBlockOrder(tables: Record<TableName, Erc20Row[]>): ChangelogRow[] {
   const rows = TABLE_NAMES.flatMap((table) => tables[table].map((row) => ({ table, ...row })))
 

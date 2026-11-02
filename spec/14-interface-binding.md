@@ -208,11 +208,9 @@ only on a dataset that reports no finalized head — and optional `_uid`, a cano
 tuple `[namespace, topic, orderingKey, seq]` with decimal `seq`.
 
 One producer feeds one topic: `_CHANGE_SEQUENCE_NUMBER` is producer-wide, so a second topic
-is refused (E2428) and a batch whose operations step backwards in block order is refused
-(E2429), unless `sequenceBarrier: false` declares that no consumer reads the barrier. The
-order checked is the sequencing order, which is route by route, so the barrier admits one
-multi-block route per producer — a second route on the same topic restarts at the batch's
-first block and is refused (GAP-40).
+is refused (E2428) and a route whose operations step backwards in block order is refused
+(E2429), unless `sequenceBarrier: false` declares that no consumer reads the barrier. Each
+route is checked independently, then all routes are stably sequenced together by block.
 
 `publish.messageOrdering` is false by default. When enabled, the topic name is the default
 ordering key and a draft may override it; the subscription must also enable ordered

@@ -914,22 +914,15 @@ barrier would see holes it cannot distinguish from lost messages.
 **Fix** — run one producer per topic, or set `sequenceBarrier: false` to declare that no consumer
 of this producer relies on a contiguous sequence run.
 
-Several routes may name the same topic, but with the barrier on only one of them can span more
-than one block per batch: routes are mapped one after another, so the second restarts at the
-batch's first block and is refused by E2429. Merge such streams into one route's `map`.
+Several routes may name the same topic. The target validates each route's order and then sequences
+the routes together in block order.
 
 ### E2429 · Operations step backwards in block order
 
-A batch mapped an operation for a lower block than one already sequenced. Operations take their
-numbers in the order they are mapped, and consumers read a contiguous run reaching block *N+1* as
-proof that block *N* is complete — a backwards step makes that reading wrong.
+A route mapped an operation for a lower block than one already produced, or below the previous
+batch's last block. Consumers read a contiguous run reaching block *N+1* as proof that block *N*
+is complete — a backwards step makes that reading wrong.
 
-**Fix** — emit drafts in block order. A fork's rewind is not a backwards step: the target resets
-the check when it resolves one. Set `sequenceBarrier: false` if no consumer relies on block
-boundaries.
-
-Note that the check walks the batch in sequencing order, which is route by route rather than
-block by block. A second route on the same topic therefore restarts at the batch's first block
-and lands here on any batch spanning more than one block, with no ordering the mapper can supply
-to avoid it — the barrier admits one multi-block route per producer. Merge the streams into one
-`map`, or turn the barrier off.
+**Fix** — emit drafts in block order within each route. The target sequences several routes on one
+topic together by block. A fork's rewind is not a backwards step: the target resets the check when
+it resolves one. Set `sequenceBarrier: false` if no consumer relies on block boundaries.

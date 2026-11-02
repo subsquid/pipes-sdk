@@ -1041,15 +1041,13 @@ describe('pubsubTarget', () => {
       await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
     }
 
-    /**
-     * The barrier admits one multi-block route per producer (GAP-40): operations are sequenced
-     * route after route, so the second route restarts at the batch's first block. No draft order
-     * the mapper can supply avoids it — this pins the limit the docs state.
-     */
-    it('refuses a second route on the same topic once a batch spans several blocks', async () => {
-      await expect(writeSharedTopic(new FakePublisher())).rejects.toMatchObject({
-        code: PUBSUB_ERROR_CODES.BLOCK_ORDER,
-      })
+    it('sequences several routes on one topic together in block order', async () => {
+      const publisher = new FakePublisher()
+
+      await writeSharedTopic(publisher)
+
+      expect(publisher.published.map((message) => body(message).number)).toEqual([100, 100, 101, 101])
+      expect(publisher.operations().map((operation) => operation.seq)).toEqual([1, 2, 3, 4])
     })
 
     it('takes a second route on the same topic once the barrier is declared off', async () => {
