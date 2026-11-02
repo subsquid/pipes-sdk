@@ -1,8 +1,7 @@
 import { describe, expect } from 'vitest'
 
-import { validatePostgresSnapshot } from '../oracle/validators.js'
 import { numbers } from '../scenarios/erc20.js'
-import { S3, S3_RANGES, S3_ROWS, s3EndState } from '../scenarios/fork.js'
+import { S3 } from '../scenarios/fork.js'
 import {
   COMMIT,
   CURSOR_WRITE,
@@ -13,10 +12,8 @@ import {
   crashAt,
   it,
   resumeToEnd,
-  runUnwatched,
 } from './harness.js'
 import type { StatementKillPoint } from './kill-switch.js'
-import { rowsOfPostgres } from './probe.js'
 
 /**
  * The steps of S3 that S1 never reaches: a batch above the floor, whose transaction writes the undo
@@ -152,7 +149,7 @@ describe('Postgres (class T) · S3 one fork · killed at each commit step (CT-2)
     await resumeToEnd({ scenario, simulator, database, model, store: second.store })
   })
 
-  it("GAP-43 (open): the fork's commit point keeps the ancestor's own floor and chain, and the oracle refuses it", async ({
+  it("after the fork's commit: the ancestor keeps the current floor and a trimmed chain", async ({
     simulateS3,
     database,
   }) => {
@@ -163,18 +160,9 @@ describe('Postgres (class T) · S3 one fork · killed at each commit step (CT-2)
     const chain = store.state?.rollbackChain.map((block) => block.number)
 
     expect(store.state?.current?.number).toBe(S3.ancestor)
-    // CN-34 wants the floor unchanged and the chain trimmed to the blocks above it. The binding drops
-    // the sync rows above the ancestor and writes none, so the ancestor's own row, written before
-    // the floor rose, becomes the state. Flip these three lines when GAP-43 closes.
-    expect(store.state?.finalized?.number).toBe(S3.finalized)
-    expect(chain).toEqual(numbers(S3.finalized + 1, S3.ancestor))
-    await expect(resumeToEnd({ scenario, simulator, database, model, store })).rejects.toThrow('CN-40')
+    expect(store.state?.finalized?.number).toBe(S3.raisedTo)
+    expect(chain).toEqual(numbers(S3.raisedTo + 1, S3.ancestor))
 
-    // A restart still ends in S3's end state: its first batch reports the floor again.
-    const end = await runUnwatched({ scenario, simulator, database })
-
-    expect(validatePostgresSnapshot(end, S3_RANGES)).toEqual([])
-    expect(end.state).toStrictEqual(s3EndState())
-    expect(rowsOfPostgres(end)).toEqual(S3_ROWS)
+    await resumeToEnd({ scenario, simulator, database, model, store })
   })
 })
