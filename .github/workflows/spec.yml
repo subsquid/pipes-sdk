@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - 'spec/**'
+      - 'docs/errors.md'
+      - 'packages/**/errors.ts'
       - '.github/workflows/spec.yml'
   pull_request:
     branches:
@@ -14,6 +16,8 @@ on:
       - main
     paths:
       - 'spec/**'
+      - 'docs/errors.md'
+      - 'packages/**/errors.ts'
       - '.github/workflows/spec.yml'
 
 jobs:
