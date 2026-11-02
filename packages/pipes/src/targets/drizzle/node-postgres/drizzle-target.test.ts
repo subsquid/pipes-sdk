@@ -735,6 +735,7 @@ describe('Drizzle target', () => {
             previousBlocks: [
               { number: 3, hash: '0x3' },
               { number: 4, hash: '0x4a' },
+              { number: 5, hash: '0x5a' },
             ],
           },
         },
@@ -978,6 +979,7 @@ describe('Drizzle target', () => {
             { number: 1, hash: '0x1' },
             { number: 2, hash: '0x2' },
             { number: 3, hash: '0x3a' },
+            { number: 4, hash: '0x4a' },
           ],
         },
       },

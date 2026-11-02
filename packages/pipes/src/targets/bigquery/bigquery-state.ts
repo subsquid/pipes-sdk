@@ -5,9 +5,9 @@ import {
   CursorKey,
   LEGACY_DEFAULT_CURSOR_ID,
   type Logger,
-  PortalContractViolationError,
   type RollbackRecord,
   type TargetState,
+  assertCanonicalChainCoversCursor,
   formatBlock,
   normalizeFinalized,
   resolveForkCursor,
@@ -397,16 +397,8 @@ export class BigQuerySyncState {
    * `upper` to corrupt the new chain.
    */
   async fork(canonicalBlocks: BlockCursor[]): Promise<{ safeCursor: BlockCursor | null; upper: number }> {
+    assertCanonicalChainCoversCursor(canonicalBlocks, this.#lastCommittedCursor)
     const upper = canonicalBlocks.reduce((m, b) => (b.number > m ? b.number : m), Number.NEGATIVE_INFINITY)
-    if (this.#lastCommittedCursor && upper < this.#lastCommittedCursor.number) {
-      throw new PortalContractViolationError(
-        `Portal invariant violated: max(canonicalBlocks).number=${upper} is below the persisted cursor ` +
-          `(${this.#lastCommittedCursor.number}). The portal must include every block above the safe ` +
-          `cursor in canonicalBlocks, otherwise rows in (${upper}, ${this.#lastCommittedCursor.number}] ` +
-          `would survive the fork DELETE and corrupt the new chain. Refusing to proceed — file a bug ` +
-          `against the portal contract.`,
-      )
-    }
 
     const safeCursor = await resolveForkCursor(this.#streamRollbackRecords(), canonicalBlocks)
     return { safeCursor, upper }

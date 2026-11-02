@@ -272,7 +272,7 @@ describe('Clickhouse state', () => {
       await state.saveForkCursor(block(20))
       await client.command({ query: 'OPTIMIZE TABLE sync FINAL' })
 
-      await expect(state.fork([block(19)])).resolves.toEqual(block(19))
+      await expect(state.fork([block(19), { number: 20, hash: '0x20a' }])).resolves.toEqual(block(19))
     })
 
     it('should not store chain continuity if finalized head doesnt exist', async () => {
@@ -1259,7 +1259,7 @@ describe('clickhouseTarget missing-rollback diagnostic', () => {
     // is never reached. The point is only that E2007 is not thrown here.
     const emptyRecordsClient = {
       connectionParams: { database: 'default' },
-      query: vi.fn().mockResolvedValue({ stream: async function* () {} }),
+      query: vi.fn().mockResolvedValue({ json: async () => [], stream: async function* () {} }),
       command: vi.fn().mockResolvedValue(undefined),
       insert: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),

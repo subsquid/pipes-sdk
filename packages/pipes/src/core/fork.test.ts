@@ -1,11 +1,27 @@
 import { describe, expect, it } from 'vitest'
 
-import { RollbackRecord, resolveForkCursor } from './fork.js'
+import { RollbackRecord, assertCanonicalChainCoversCursor, resolveForkCursor } from './fork.js'
 import { BlockCursor } from './types.js'
 
 function block(number: number, hash?: string) {
   return { number, hash: hash ?? `0x${number}` }
 }
+
+describe('assertCanonicalChainCoversCursor', () => {
+  it('accepts a canonical chain that reaches the persisted cursor', () => {
+    expect(() => assertCanonicalChainCoversCursor([block(8), block(10)], block(10))).not.toThrow()
+  })
+
+  it('refuses a canonical chain below the persisted cursor with E1004', () => {
+    expect(() => assertCanonicalChainCoversCursor([block(8), block(9)], block(10))).toThrow(
+      expect.objectContaining({ code: 'E1004' }),
+    )
+  })
+
+  it('does nothing without a persisted cursor', () => {
+    expect(() => assertCanonicalChainCoversCursor([], undefined)).not.toThrow()
+  })
+})
 
 describe('resolveForkCursor', () => {
   describe('single record (memory target scenario)', () => {

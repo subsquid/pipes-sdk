@@ -122,8 +122,7 @@ sink makes the exposure loud rather than silent — startup warning + coded fork
 
 **RP-43 — Portal-contract guard.** [MUST] If the canonical chain's maximum block is
 below the persisted cursor, the sink MUST refuse (coded portal-contract violation)
-rather than leave orphan rows above the new chain. *(Enforced by one binding today;
-intent is all — GAP-9.)*
+rather than leave orphan rows above the new chain.
 
 **RP-44 — Compensation obligations (class C).** [MUST] A sink that repairs by publishing
 MUST, before publishing anything that could need repair, be able to name it afterwards:

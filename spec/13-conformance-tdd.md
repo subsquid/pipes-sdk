@@ -103,7 +103,7 @@ batch(blocks, head):                                 # T-BATCH
 fork(canonical):                                     # T-FORK
   require mode = full else CODED-ERROR                # WP-45 / FM-13
   require canonical ≠ ∅ else CODED-ERROR              # WP-41
-  require max(canonical).number ≥ C.number else CODED-ERROR   # RP-43 (class W enforces today — GAP-9)
+  require max(canonical).number ≥ C.number else CODED-ERROR   # RP-43
   A ← search(R, canonical, F)                         # WP-42
   if A = ⊥ → CODED-ERROR                              # no ancestor at or above F (E1003, WP-44)
   D ← D − rows(> A.number)                            # class C compensates instead (CN-35)
@@ -235,7 +235,7 @@ known-suspect in the current implementation (see gap register).
 | RP-21, RP-22, INV-4 (coverage) | CT-7 | C | parquet coverage-naming suites: sparse stretch, trailing empty unit, disjoint-range gap, resume mid-gap |
 | RP-30…RP-32 (keying, migration) | CT-8 | P ⚠ | happy path C; concurrent migration U (GAP-7) |
 | RP-42 (delegated repair) | CT-2 | P ⚠ | with the hook, every class-A CT-2 point recovers, a crash after one table's cancel rows included; without it, the restart warns and stores the crash window a second time: the accepted deviation, pinned (ADR-15); before the first cursor write the hook is called with the start cursor and the restart converges; a hook that binds the cursor as unsigned fails at a range start of 0 with nothing removed (ADR-15) |
-| RP-43 (contract guard) | CT-3 | P ⚠ | one binding only (GAP-9) |
+| RP-43 (contract guard) | CT-3 | C | shared guard unit tests plus per-binding E1004 refusal tests for classes T, A, C and W |
 | CN-10 T atomicity | CT-2 | C | live tx tests; CT-2 on S1 kills the batch transaction before, inside and after it, with its commit unanswered too, and on S3 a batch above the floor with its undo records; every crash leaves the last commit the server acknowledged; a serialization failure is retried and commits, an integrity fault and the lock refusal (E2103) halt at the first attempt; serializable isolation is the default, and an explicit weaker level reaches Drizzle unchanged; batch commits stay atomic, but serial equivalence with other writers is not guaranteed |
 | CN-11 W protocol | CT-2 | P | unit/lifecycle C; integration gated off CI |
 | CN-12 K protocol | CT-1/2 | C | finalized-route selection plus crash-safety + recovery suites; straddle refusal asserted (E2317); CT-2 kills S1 at every protocol step, a stretched unit's straddle and the start state included |
@@ -274,7 +274,6 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 |---|---|---|---|---|
 | GAP-4 | A target driven without a source keys its state by the legacy constant key without a warning: the blank-id guard (E0001) runs in the source only, and a state whose key is never bound falls back silently | DEF-9, WP-3 | P3 | drive a target's write with no source id and no explicit key → assert a coded refusal |
 | GAP-7 | Legacy cursor migration in one binding is unlocked: concurrent first runs can both adopt legacy state and inherit a foreign monotonic floor that never self-corrects | RP-32, INV-35 | P2 | two concurrent first runs against legacy-keyed store; ≤ 1 adopts |
-| GAP-9 | Canonical-chain-below-cursor guard enforced by one binding only (E1004). The other fork-capable bindings delete everything above the ancestor without an upper bound, so no orphan rows remain, but they accept the contract violation instead of refusing it | RP-43, FM-15 | P3 | fork with max(canonical) < cursor against each class; assert coded refusal |
 | GAP-12 | Class-W binding assumes single-writer (client-assigned monotonic timestamps) with no lock and no detection; dual instance corrupts undetected | INV-15 (declaration) | P3 | document in IB-24; optional fencing probe |
 | GAP-13 | The spec check syncs the codes declared in source with `docs/errors.md` but not with the IB-50 table, so the table can drift unnoticed; CI runs the check only when `spec/**` changes, so a code-only change skips it | REQ-13, IB-50, IB-52 | P3 | diff declared codes against IB-50 in the check; run it on code changes |
 | GAP-14 | Classes K, T, A and C have kill-point matrices (CT-2 on S1, classes T, A and C also on S3 with one fork, class A with and without its repair hook, class C against a Pub/Sub stand-in in the test process). Class W has none for now, by decision: its store is reachable only in a real BigQuery project, which the harness does not use | INV-40…INV-42, CN-34 | P1 | a class-W store the harness can reach: a BigQuery stand-in, or a project the harness may use; then the class-W kill-point matrix on S1 |

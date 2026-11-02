@@ -1,9 +1,26 @@
+import { PortalContractViolationError } from './errors.js'
 import { maxFinalized, normalizeFinalized } from './finalized-watermark.js'
 import { BlockCursor } from './types.js'
 
 export type RollbackRecord = {
   rollbackChain: BlockCursor[]
   finalized?: BlockCursor
+}
+
+export function assertCanonicalChainCoversCursor(
+  canonicalBlocks: BlockCursor[],
+  cursor: BlockCursor | null | undefined,
+): void {
+  if (!cursor) return
+
+  const upper = canonicalBlocks.reduce((max, block) => Math.max(max, block.number), Number.NEGATIVE_INFINITY)
+  if (upper >= cursor.number) return
+
+  throw new PortalContractViolationError([
+    `Portal invariant violated: max(canonicalBlocks).number=${upper} is below the persisted cursor ` +
+      `(${cursor.number}). The portal must include every block above the safe cursor in canonicalBlocks.`,
+    'Refusing to proceed — file a bug against the portal contract.',
+  ])
 }
 
 /**
