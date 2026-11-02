@@ -148,10 +148,8 @@ export type PubsubTargetOptions<T> = {
    * puts a hole in both runs. Set `false` to declare that no consumer of this producer reads
    * the barrier — that, and only that, permits several topics and unordered blocks.
    *
-   * It also means one ROUTE per producer in practice. Operations are sequenced in the order
-   * they are mapped, and routes are mapped one after another, so a second route feeding the
-   * same topic restarts at the batch's first block and is refused (E2429) on any batch
-   * spanning more than one block. Merge such streams into one route's `map`.
+   * Each route must emit drafts in block order. Several routes may feed the topic: the target
+   * sequences them together by block, preserving route order within a block.
    */
   sequenceBarrier?: boolean
   /**
@@ -724,6 +722,7 @@ class WriteContext {
       if (streamData === undefined) continue
 
       const drafts = resolved.route.map({ data: streamData, ctx })
+      const routeOperations: PendingOperation[] = []
       const indexInBlock = new Map<number, number>()
       const seenIds = new Set<string>()
 
@@ -753,11 +752,17 @@ class WriteContext {
           seenIds.add(identity)
         }
 
-        operations.push(operation)
+        routeOperations.push(operation)
       }
+
+      this.#checkBlockOrder(routeOperations, this.#lastBlock)
+      for (const operation of routeOperations) operations.push(operation)
     }
 
-    this.#assertBlockOrder(operations)
+    if (this.#options.sequenceBarrier) {
+      operations.sort((a, b) => a.blockNumber - b.blockNumber)
+    }
+    this.#lastBlock = this.#checkBlockOrder(operations, this.#lastBlock)
 
     return operations
   }
@@ -765,32 +770,29 @@ class WriteContext {
   /**
    * Forward operations take their numbers in block order, which is what turns a contiguous run
    * into a block boundary: reaching the first operation of block N+1 proves the producer's
-   * output for block N is whole. A mapper that steps backwards would silently retire that
-   * reading for every consumer, so the batch is refused instead.
-   *
-   * The check walks the batch in sequencing order, which is route by route. A second route on
-   * the same topic therefore restarts at the batch's first block and trips this — the barrier
-   * admits one multi-block route per producer.
+   * output for block N is whole. Each route is checked before the routes are stably sorted into
+   * one block-ordered batch, so sorting cannot hide a mapper's own backwards step.
    */
-  #assertBlockOrder(operations: PendingOperation[]): void {
-    if (!this.#options.sequenceBarrier) return
+  #checkBlockOrder(operations: PendingOperation[], initialBlock: number): number {
+    if (!this.#options.sequenceBarrier) return initialBlock
 
+    let lastBlock = initialBlock
     for (const operation of operations) {
-      if (operation.blockNumber < this.#lastBlock) {
+      if (operation.blockNumber < lastBlock) {
         throw new PubsubTargetError(PUBSUB_ERROR_CODES.BLOCK_ORDER, [
           `Route "${operation.route}" produced an operation for block ${formatBlock(operation.blockNumber)} ` +
-            `after one for block ${formatBlock(this.#lastBlock)}.`,
-          'Operations are sequenced in the order they are mapped, and consumers read a contiguous ' +
-            'sequence run as a block boundary — a backwards step makes that reading wrong.',
-          'Emit drafts in block order. Routes are mapped one after another, so a second route on ' +
-            'this topic restarts at the batch’s first block and lands here too — merge such streams ' +
-            'into one `map`.',
+            `after one for block ${formatBlock(lastBlock)}.`,
+          'Operations are sequenced in block order, and consumers read a contiguous sequence run as ' +
+            'a block boundary — a backwards step makes that reading wrong.',
+          'Emit drafts in block order within each route. The target sequences the routes together by block.',
           'Set `sequenceBarrier: false` if no consumer relies on the block boundary.',
         ])
       }
 
-      this.#lastBlock = operation.blockNumber
+      lastBlock = operation.blockNumber
     }
+
+    return lastBlock
   }
 
   #assertDraftBlock(draft: MessageDraft, resolved: ResolvedRoute): void {

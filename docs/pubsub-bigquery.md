@@ -338,9 +338,8 @@ Two rules rest on the same counter:
 - **forward operations are sequenced in block order**, checked per batch rather than assumed.
   A run that reaches the first operation of block *N+1* proves the producer's output for block
   *N* is whole — and it is the only way to tell a block that produced no rows from one whose
-  rows have not arrived. Operations are sequenced in the order the producer maps them, route
-  after route, so the barrier admits **one multi-block route**: a second route on the same
-  topic restarts at the batch's first block and is refused. Merge such streams into one route;
+  rows have not arrived. Each route must emit drafts in block order; the target then sequences
+  all routes on the topic together by block, preserving their order within a block;
 - **a compensation is sequenced ahead of the operation that replaces it.** The cursor rewind
   and the fork's compensations are one transaction, and the replacement branch comes from later
   batches. That is what lets a consumer folding rows into state undo a reorg from the row
