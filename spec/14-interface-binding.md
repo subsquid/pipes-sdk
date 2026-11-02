@@ -335,8 +335,8 @@ are retryable in addition to IB-7's statuses; the body-stall timeout is currentl
 authors.
 
 **IB-52 — Registry sync.** The set of codes an implementation can emit MUST equal this
-registry; CI SHOULD enforce it *(the reference check syncs source with `docs/errors.md`,
-not with this table — GAP-13)*.
+registry; CI enforces the source ↔ `docs/errors.md` ↔ IB-50 sync on specification,
+error-source and error-document changes.
 
 ## Input-side binding (simulator obligations)
 

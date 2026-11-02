@@ -6,9 +6,8 @@
  * defined somewhere; range references (WP-10…WP-16) may span banded gaps by design,
  * but their band prefix must exist. Also validates every relative markdown link: the
  * target file must exist, and an anchor must match a heading there. Finally, checks that
- * docs/errors.md stays in sync with the codes the SDK actually throws — every thrown
- * E-code has a documented section, and every documented code is still thrown. Exit 1 on
- * any dangling reference, broken link, or errors.md drift.
+ * docs/errors.md and the IB-50 table stay in sync with the codes the SDK actually throws.
+ * Exit 1 on any dangling reference, broken link, or error-registry drift.
  *
  * Run: node spec/check-spec.mjs
  */
@@ -216,6 +215,36 @@ for (const c of [...documentedCodes].sort()) {
   }
 }
 
+// IB-50 uses band rows with inclusive ranges and explicit unassigned/retired exceptions.
+const registryCodes = new Set()
+const excludedRegistryCodes = new Set()
+const interfaceBinding = text.get(join(SPEC, '14-interface-binding.md')) ?? ''
+const registrySection = interfaceBinding.split('**IB-50 —')[1]?.split('**IB-51 —')[0] ?? ''
+const addRange = (target, from, to) => {
+  for (let n = Number(from); n <= Number(to); n++) target.add(`E${String(n).padStart(4, '0')}`)
+}
+
+for (const row of registrySection.matchAll(/^\|\s*E\S+\s*\|[^\n]+$/gm)) {
+  const cell = row[0].split('|')[3] ?? ''
+  for (const m of cell.matchAll(/\bE(\d{4})\s*[–…-]\s*E(\d{4})\s+(?:retired|unassigned)\b/g)) {
+    addRange(excludedRegistryCodes, m[1], m[2])
+  }
+  for (const m of cell.matchAll(/\bE(\d{4})\s+(?:retired|unassigned)\b/g)) {
+    excludedRegistryCodes.add(`E${m[1]}`)
+  }
+  for (const m of cell.matchAll(/\bE(\d{4})\s*[–…-]\s*E(\d{4})\b/g)) addRange(registryCodes, m[1], m[2])
+  for (const m of cell.matchAll(/\bE(\d{4})\b/g)) registryCodes.add(`E${m[1]}`)
+}
+for (const c of excludedRegistryCodes) registryCodes.delete(c)
+
+if (registryCodes.size === 0) errors.push('IB-50 sync: no registry codes parsed from 14-interface-binding.md')
+for (const c of [...thrownCodes].sort()) {
+  if (!registryCodes.has(c)) errors.push(`IB-50 missing ${c}: thrown in code but absent from the registry`)
+}
+for (const c of [...registryCodes].sort()) {
+  if (!thrownCodes.has(c)) errors.push(`IB-50 stale ${c}: registered but no source throws it`)
+}
+
 let total = 0
 const parts = []
 for (const kind of [...definedByKind.keys()].sort()) {
@@ -226,7 +255,9 @@ for (const kind of [...definedByKind.keys()].sort()) {
 console.log(`spec IDs defined: ${total} (${parts.join(' ')})`)
 console.log(`individual references checked: ${individual.size}; range references: ${rangeRefs.length}`)
 console.log(`relative links checked: ${linkCount}`)
-console.log(`error codes: ${thrownCodes.size} thrown, ${documentedCodes.size} documented`)
+console.log(
+  `error codes: ${thrownCodes.size} thrown, ${documentedCodes.size} documented, ${registryCodes.size} registered`,
+)
 
 if (errors.length) {
   console.error(`\n${errors.length} error(s):`)

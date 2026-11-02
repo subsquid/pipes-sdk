@@ -30,5 +30,4 @@ never ends the process; it throws a coded error the author can handle.
 ## Consequences
 
 Stable programmatic error handling across versions and languages (REQ-13, INV-31,
-IB-50). Obligation: the emitted set must stay in sync with the registry — currently
-unenforced by CI (GAP-13).
+IB-50). Obligation: the emitted set stays in sync with the registry, enforced by CI.
