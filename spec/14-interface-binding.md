@@ -117,9 +117,11 @@ an accepted deviation, ADR-15)*.
 **IB-21 — Postgres binding (class T).** Sync table (default `public.sync`):
 `id text, current_number numeric, current_hash text, "current_timestamp" timestamptz,
 finalized jsonb ('{}' when absent), rollback_chain jsonb, PRIMARY KEY (id,
-current_number)`. Data + cursor in one transaction, serializable by default
-*(operator-downgradable — weaker levels void CN-10's lost-update protection; GAP-26)*.
-Undo log: per tracked
+current_number)`. Data + cursor commit in one transaction, serializable by default.
+The operator MAY choose a weaker level. The batch commit stays atomic at every level.
+A weaker level does not guarantee serial equivalence with other writers. Statements in
+one batch can observe different snapshots. Concurrent updates can be lost. The undo log
+can then record a history that has no serial equivalent. Undo log: per tracked
 table a `<table>__snapshots` before/after-image table + row trigger, gated per
 transaction to unfinalized blocks; fork replays images newest-first. Retention:
 P-PG-UNFINALIZED-RETENTION blocks of snapshots. Legacy migration: single guarded

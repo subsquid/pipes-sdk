@@ -2,8 +2,9 @@ import { eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { integer, jsonb, numeric, pgTable, timestamp, varchar } from 'drizzle-orm/pg-core'
 import { Pool, QueryResultRow } from 'pg'
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { MockInstance, afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { defaultLogger } from '~/core/logger.js'
 import { evmPortalStream } from '~/evm/index.js'
 import { MockPortal, MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
@@ -1499,6 +1500,165 @@ describe('Drizzle target', () => {
 
       expect(restored?.id).toEqual(1)
       expect(restored?.amount).toEqual(10)
+    })
+  })
+
+  describe('class-T batch transaction retry', () => {
+    const rows = pgTable('retried', { id: integer().primaryKey() })
+
+    const test = withPortal.extend<{ transactions: MockInstance; pipeLockHeldElsewhere: void }>({
+      transactions: async ({}, use) => {
+        const spy = vi.spyOn(db, 'transaction')
+        await use(spy)
+        spy.mockRestore()
+      },
+      pipeLockHeldElsewhere: async ({}, use) => {
+        const client = await pool.connect()
+        await client.query(`SELECT pg_advisory_lock(hashtext('test')::bigint)`)
+        await use()
+        await client.query('SELECT pg_advisory_unlock_all()')
+        client.release()
+      },
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE retried (id integer PRIMARY KEY);
+      `)
+    })
+
+    test('halts on an integrity fault without a retry', async ({ portal: serve }) => {
+      const portal = await serve({ latest: 1 })
+      let calls = 0
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [rows],
+          onData: async ({ tx }) => {
+            calls++
+            await tx.insert(rows).values([{ id: 1 }, { id: 1 }])
+          },
+        }),
+      )
+
+      await expect(run).rejects.toMatchObject({ cause: { code: '23505' } })
+      expect(calls).toBe(1)
+    })
+
+    test('retries a serialization failure, commits, and warns', async ({ portal: serve }) => {
+      const portal = await serve({ latest: 1 })
+      const logger = defaultLogger({ level: 'silent' })
+      const warn = vi.spyOn(logger, 'warn')
+      let calls = 0
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [rows],
+          onData: async ({ tx }) => {
+            calls++
+            if (calls === 1) {
+              throw Object.assign(new Error('could not serialize access'), { code: '40001' })
+            }
+
+            await tx.insert(rows).values({ id: 1 })
+          },
+        }),
+      )
+
+      expect(calls).toBe(2)
+      expect(await db.select().from(rows)).toEqual([{ id: 1 }])
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'postgres batch insert transaction succeeded after 1 retry' }),
+      )
+    })
+
+    test('retries a pool acquisition timeout without an error code', async ({ portal: serve, transactions }) => {
+      const portal = await serve({ latest: 1 })
+      transactions.mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'))
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
+
+      expect(transactions).toHaveBeenCalledTimes(2)
+    })
+
+    test('retries a temporary DNS failure while acquiring a connection', async ({ portal: serve, transactions }) => {
+      const portal = await serve({ latest: 1 })
+      transactions.mockRejectedValueOnce(
+        Object.assign(new Error('getaddrinfo EAI_AGAIN postgres'), { code: 'EAI_AGAIN' }),
+      )
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
+
+      expect(transactions).toHaveBeenCalledTimes(2)
+    })
+
+    test('refuses at once when another session holds the pipe lock', async ({
+      portal: serve,
+      transactions,
+      pipeLockHeldElsewhere,
+    }) => {
+      const portal = await serve({ latest: 1 })
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
+
+      await expect(run).rejects.toMatchObject({ code: 'E2103' })
+      expect(transactions).toHaveBeenCalledOnce()
+    })
+
+    test('uses serializable isolation by default', async ({ portal: serve, transactions }) => {
+      const portal = await serve({ latest: 1 })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
+
+      expect(transactions).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'serializable' })
+    })
+
+    test('passes an explicitly configured isolation level to drizzle', async ({ portal: serve, transactions }) => {
+      const portal = await serve({ latest: 1 })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        outputs: blockDecoder({ from: 0, to: 1 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [],
+          settings: { transaction: { isolationLevel: 'read committed' } },
+          onData: async () => {},
+        }),
+      )
+
+      expect(transactions).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'read committed' })
     })
   })
 })
