@@ -753,7 +753,7 @@ describe('pubsubTarget', () => {
         }
       }
 
-      await expect(target.write({ read: read as never, logger: testLogger() })).rejects.toMatchObject({
+      await expect(target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })).rejects.toMatchObject({
         code: PUBSUB_ERROR_CODES.MISSING_BLOCK_HASH,
       })
     })

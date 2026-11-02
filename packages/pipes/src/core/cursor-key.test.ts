@@ -19,11 +19,17 @@ describe('CursorKey', () => {
     expect(key.isExplicit).toBe(true)
   })
 
-  it('falls back to the legacy default when bind never runs or gets no id', () => {
+  it('exposes the legacy default only until the key is bound', () => {
     const key = new CursorKey(undefined)
-    key.bind(undefined)
 
     expect(key.value).toBe(LEGACY_DEFAULT_CURSOR_ID)
+  })
+
+  it('refuses to bind without a source id', () => {
+    const key = new CursorKey(undefined)
+
+    expect(() => key.bind(undefined)).toThrow(expect.objectContaining({ code: 'E0001' }))
+    expect(() => key.bind('  ')).toThrow(expect.objectContaining({ code: 'E0001' }))
   })
 
   it('honours a custom default', () => {

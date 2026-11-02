@@ -46,10 +46,9 @@ at `C.number + 1`.
 
 **DEF-9 — Cursor key.** The identifier under which a sink stores resume state:
 an explicit per-sink key if configured, else the pipe id. The legacy constant key
-(`stream`) survives only as a migration source (RP-31): WP-3 makes a source-connected
-pipe without an id a startup error, so no new state is written under it; a target driven
-without a source currently falls back to it silently (GAP-4). Binding rules and
-one-time legacy migration: RP-30…RP-32; ADR-2.
+(`stream`) survives only as a migration source (RP-31): WP-3 makes a pipe without an id
+a startup error, including a directly driven target with no explicit key, so no new state
+is written under it. Binding rules and one-time legacy migration: RP-30…RP-32; ADR-2.
 
 **DEF-10 — Canonical chain.** The portal's list of canonical cursors delivered with a
 fork signal (wire name `previousBlocks`), newest-last. The ground truth against which

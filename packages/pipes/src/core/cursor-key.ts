@@ -1,3 +1,5 @@
+import { DefaultPipeIdError } from './errors.js'
+
 /**
  * The static id every target keyed its persisted cursor by before the SDK started keying cursors
  * by the pipe's source `id`. Also the key a state falls back to when `bind` never runs (e.g. unit
@@ -8,8 +10,8 @@ export const LEGACY_DEFAULT_CURSOR_ID = 'stream'
 
 /**
  * Resolves the id a target keys its persisted state by. One rule, shared by every target:
- * an explicit per-target id always wins, else the pipe's source id once `bind` runs, else the
- * legacy default (when `bind` never runs).
+ * an explicit per-target id always wins, else the pipe's non-empty source id. The legacy default
+ * is visible only before binding; a target write without either id is refused with E0001.
  *
  * `bind` is called once by the target's `write()` before any read, so getCursor, the cursor
  * writes, fork resolution and cleanup all key by the same value.
@@ -25,7 +27,8 @@ export class CursorKey {
 
   /** Adopt the pipe's source id, unless an explicit id was given (explicit always wins). */
   bind(sourceId: string | undefined): void {
-    if (this.#explicit || !sourceId) return
+    if (this.#explicit) return
+    if (!sourceId?.trim()) throw new DefaultPipeIdError()
 
     this.#value = sourceId
   }
