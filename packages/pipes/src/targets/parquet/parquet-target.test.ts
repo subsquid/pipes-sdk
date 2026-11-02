@@ -1681,6 +1681,14 @@ describe('before the first commit', () => {
     },
   )
 
+  withDir('refuses a direct write without a source id or an explicit cursor key', async ({ dir }) => {
+    const target = parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks })
+
+    await expect(target.write({ read: async function* () {}, logger: testLogger() })).rejects.toMatchObject({
+      code: 'E0001',
+    })
+  })
+
   withDir(
     'refuses published files with no state file, before touching any file (CN-44)',
     async ({ portal: open, dir }) => {

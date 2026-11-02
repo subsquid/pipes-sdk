@@ -295,7 +295,7 @@ describe.skipIf(!RUN)('bigquery target — integration', () => {
       async function* read() {
         yield { data: scalarRow, ctx: makeBatchContext({ number: 1, hash: '0x1' }) }
       }
-      await target.write({ read: read as never, logger: testLogger() })
+      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
 
       const [rows] = await bigquery.query({
         query: `SELECT ${SCALAR_SELECT} FROM \`${projectId}.${DATASET}.${localEvents}\` WHERE block_number = 1`,
@@ -373,7 +373,7 @@ describe.skipIf(!RUN)('bigquery target — integration', () => {
       async function* read() {
         yield { data: row, ctx: makeBatchContext({ number: 1, hash: '0x1' }) }
       }
-      await target.write({ read: read as never, logger: testLogger() })
+      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
 
       const [rows] = await bigquery.query({
         query: `
@@ -448,7 +448,7 @@ describe.skipIf(!RUN)('bigquery target — integration', () => {
           ctx: makeBatchContext({ number: 2, hash: '0x2' }),
         }
       }
-      await target.write({ read: read as never, logger: testLogger() })
+      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
 
       const [rows] = await bigquery.query({
         query: `SELECT block_number, col_string_nullable, col_int64_nullable, CAST(col_numeric_nullable AS STRING) AS num

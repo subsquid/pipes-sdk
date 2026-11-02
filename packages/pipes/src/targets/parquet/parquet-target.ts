@@ -162,7 +162,8 @@ export function parquetTarget<T>(options: {
       // Lazy: registered on the first batch from `ctx.metrics`.
       let metrics: ParquetTargetMetrics | undefined
 
-      const state = new ParquetState({ dir, tables: tables.map((t) => t.table), id: settings.id ?? id, logger })
+      const state = new ParquetState({ dir, tables: tables.map((t) => t.table), id: settings.id, logger })
+      state.bindCursorKey(id)
 
       // Tracks checkpoint progress; the closure below mutates it.
       let lastCheckpointMs = Date.now()

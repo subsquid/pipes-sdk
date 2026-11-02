@@ -24,14 +24,14 @@ export class PipeError extends Error {
 // ─── Source errors (E0xxx) ────────────────────────────────────────────────────
 
 /**
- * E0001: Thrown when a pipe is created with an empty or blank id.
+ * E0001: Thrown when a pipe has an empty or blank id, or a directly driven target has no cursor key.
  * Targets need a stable, unique ID to persist cursor state across restarts.
  */
 export class DefaultPipeIdError extends PipeError {
   constructor() {
     super('E0001', SdkErrorName.PipeConfiguration, [
       'Pipe requires a non-empty id: targets persist progress under it.',
-      'Set a stable, unique id in your pipe source options:',
+      'Set a stable, unique id in your pipe source options, or an explicit cursor id on a directly driven target:',
       '',
       '  evmPortalStream({ portal: "...", id: "my-pipe", outputs })',
     ])

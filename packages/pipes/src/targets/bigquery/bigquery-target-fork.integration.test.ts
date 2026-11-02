@@ -72,7 +72,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
         }
       }
 
-      await target.write({ read: read as never, logger: testLogger() })
+      await target.write({ read: read as never, logger: testLogger(), id: 'test-pipe' })
 
       const [rows] = await bigquery.query({
         query: `SELECT block_number FROM \`${projectId}.${DATASET}.${localEvents}\` WHERE block_number = 1`,
@@ -104,7 +104,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
         }
       }
 
-      await target.write({ read: write1To10 as never, logger: testLogger() })
+      await target.write({ read: write1To10 as never, logger: testLogger(), id: 'test-pipe' })
 
       const [pre] = await bigquery.query({
         query: `SELECT COUNT(*) AS n FROM \`${projectId}.${DATASET}.${localEvents}\` WHERE block_number BETWEEN 1 AND 10`,

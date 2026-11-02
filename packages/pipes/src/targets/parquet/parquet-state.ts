@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
-import { type BlockCursor, type Logger, type TargetState, formatBlock } from '~/core/index.js'
+import { type BlockCursor, CursorKey, type Logger, type TargetState, formatBlock } from '~/core/index.js'
 
 import { PARQUET_ERROR_CODES, ParquetTargetError } from './errors.js'
 import { fsyncDir, fsyncFile } from './fs-durable.js'
@@ -51,10 +51,7 @@ export type ParquetStateOptions = {
   dir: string
   /** Declared table names; their sub-directories are created on startup. */
   tables: string[]
-  /**
-   * Cursor key, which names the state file. The target passes the pipe's source id unless an
-   * explicit `settings.id` pins it.
-   */
+  /** Explicit cursor key (`settings.id`), which names the state file; else the bound pipe id. */
   id?: string
   logger: Logger
 }
@@ -78,8 +75,8 @@ export type ParquetStateOptions = {
 export class ParquetState {
   readonly #baseDir: string
   readonly #tables: string[]
-  readonly #id: string | undefined
-  readonly #statePath: string
+  // Unbound, the key is empty: the id-less state file, which the state unit tests drive directly.
+  readonly #key: CursorKey
   readonly #logger: Logger
 
   #coverage: Record<string, number> | undefined
@@ -87,12 +84,20 @@ export class ParquetState {
   constructor(options: ParquetStateOptions) {
     this.#baseDir = options.dir
     this.#tables = options.tables
-    this.#id = options.id
+    this.#key = new CursorKey(options.id, '')
     this.#logger = options.logger
-    this.#statePath = path.join(
-      options.dir,
-      options.id ? `${STATE_BASENAME}.${options.id}.json` : `${STATE_BASENAME}.json`,
-    )
+  }
+
+  /** Called once by the target's `write()` before any read (see {@link CursorKey}). */
+  bindCursorKey(sourceId: string | undefined): void {
+    this.#key.bind(sourceId)
+  }
+
+  get #statePath(): string {
+    const id = this.#key.value
+    const basename = id ? `${STATE_BASENAME}.${id}.json` : `${STATE_BASENAME}.json`
+
+    return path.join(this.#baseDir, basename)
   }
 
   /**
@@ -175,7 +180,8 @@ export class ParquetState {
   }
 
   async #write(payload: PersistedState): Promise<void> {
-    const record = this.#id ? { id: this.#id, ...payload } : payload
+    const id = this.#key.value
+    const record = id ? { id, ...payload } : payload
     const tmpPath = path.join(this.#baseDir, `${TMP_PREFIX}state-${path.basename(this.#statePath)}`)
 
     await writeFile(tmpPath, JSON.stringify(record))
