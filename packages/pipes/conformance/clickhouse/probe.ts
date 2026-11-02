@@ -108,8 +108,8 @@ export function rowsOfClickhouse<Table extends string>(snapshot: ClickhouseSnaps
 /**
  * ⟨C, F, RC⟩ as the binding reads its sync rows (DEF-7): C and F from the newest row, the one it
  * resumes from; RC from the fragment each row committed, the newest row of each block winning, as
- * the WP-42 search walks them. A fork writes no row and deletes none (GAP-21), so the fragments of a
- * forked branch stay beside the ones that replaced it.
+ * the WP-42 search walks them. A fork appends a trimmed record; older fragments stay available
+ * for later ancestor searches.
  */
 function stateOf(sync: SyncRecord[]): OracleState | undefined {
   const newest = sync.at(-1)

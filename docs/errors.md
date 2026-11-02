@@ -325,6 +325,13 @@ the same run were already executed.
 **Fix** — correct the statement in the named file. Write statements that can run again
 (`CREATE TABLE IF NOT EXISTS`), because a restart executes the files from the start.
 
+### E2010 · Rollback table metadata unavailable
+
+Rollback cannot determine the table engine and columns from `system.tables` and `system.columns`.
+The target refuses to guess because the wrong cancel mechanism can duplicate or corrupt rows.
+
+**Fix** — grant `SELECT` on `system.tables` and `system.columns`, then run the pipe again.
+
 ---
 
 ## Postgres (Drizzle) target

@@ -56,7 +56,7 @@ function makeStore(persistedFinalized: { number: number; hash: string }) {
     insert: async (args: any) => {
       inserts.push(args)
     },
-    removeAllRowsByQuery: async () => {},
+    removeAllRowsByNettingQuery: async () => {},
     command: async () => {},
   }
 
@@ -93,6 +93,39 @@ describe('ClickhouseState — resume state & cursor persistence', () => {
     expect(row.current).toBe(JSON.stringify(block(130)))
     expect(row.finalized).toBe(JSON.stringify(block(120)))
     expect(row.rollback_chain).toBe(JSON.stringify([block(121)]))
+  })
+
+  it('persists a fork ancestor with the current floor and a trimmed rollback chain', async () => {
+    const inserts: any[] = []
+    const row = {
+      current: JSON.stringify(block(130)),
+      finalized: JSON.stringify(block(120)),
+      rollback_chain: JSON.stringify([block(121), block(122), block(130)]),
+      timestamp: '2026-10-28T10:00:00.000Z',
+    }
+    const store = {
+      client: { connectionParams: { database: 'default' } },
+      query: async () => ({
+        json: async () => [row],
+        stream: async function* () {
+          yield [{ json: () => row }]
+        },
+      }),
+      insert: async (args: any) => {
+        inserts.push(args)
+      },
+      removeAllRowsByNettingQuery: async () => {},
+    }
+    const state = new ClickhouseState(store as any, {})
+
+    await state.saveForkCursor(block(122))
+
+    expect(inserts[0].values[0]).toMatchObject({
+      current: JSON.stringify(block(122)),
+      finalized: JSON.stringify(block(120)),
+      rollback_chain: JSON.stringify([block(121), block(122)]),
+      sign: 1,
+    })
   })
 
   it('persists the empty sentinel when there is no finalized head', async () => {
@@ -171,14 +204,14 @@ function keyedStore(rowsById: Record<string, { current: string; finalized: strin
       return {
         json: async () => (row ? [row] : []),
         stream: async function* () {
-          if (row) yield [{ json: () => ({ ...row, id: query_params.id }) }]
+          if (row) yield [{ json: () => ({ ...row, id: query_params.id, _sqd_net: 1 }) }]
         },
       }
     },
     insert: async (args: any) => {
       inserts.push(args)
     },
-    removeAllRowsByQuery: async (args: any) => {
+    removeAllRowsByNettingQuery: async (args: any) => {
       removals.push(args)
     },
     command: async () => {},

@@ -1,32 +1,17 @@
-import { isDeepStrictEqual } from 'node:util'
-
 import { describe, expect } from 'vitest'
 
-import type { OracleRow } from '../oracle/reference-model.js'
-import { validateClickhouseSnapshot } from '../oracle/validators.js'
-import { TABLE_NAMES } from '../scenarios/erc20.js'
-import { S3, S3_RANGES, S3_ROWS, s3EndState } from '../scenarios/fork.js'
-import {
-  type ClickhouseStore,
-  S3_CLICKHOUSE,
-  crashAt,
-  cursorOf,
-  it,
-  readClickhouseStore,
-  resumeToEnd,
-  rowsBetween,
-  runKilled,
-  runUnwatched,
-} from './harness.js'
+import type { BlockCursor } from '~/core/index.js'
+
+import type { Observation } from '../scenarios/erc20.js'
+import { S3 } from '../scenarios/fork.js'
+import { type ClickhouseStore, S3_CLICKHOUSE, crashAt, cursorOf, it, resumeToEnd, rowsBetween } from './harness.js'
 import type { RequestKillPoint } from './kill-switch.js'
-import { rowsOfClickhouse } from './probe.js'
 
 /**
  * The steps of S3 that S1 never reaches: a batch above the floor, and the fork. A batch is a portal
  * answer: the one from 21 to 27 lies above the floor at 19. The fork comes once the pipe has reached
- * the head: the target reads its sync rows for the ancestor, then the repair hook cancels the rows
- * above it, both tables at once, each after a netting read. Nothing is written to the sync table
- * (GAP-21).
+ * the head: the target reads its sync rows for the ancestor, persists it, then the repair hook
+ * cancels the rows above it, both tables at once, each after a netting read.
  */
 const POINTS = {
   aboveFloor: {
@@ -36,8 +21,15 @@ const POINTS = {
     at: 1,
     when: 'before',
   },
+  forkBeforeCursor: {
+    name: 'inside the fork, before the ancestor cursor write',
+    request: '^insert sync$',
+    inFork: true,
+    at: 1,
+    when: 'before',
+  },
   forkBeforeCancel: {
-    name: 'inside the fork, before any cancel row',
+    name: 'inside the fork, after the ancestor cursor write and before any cancel row',
     request: '^cancel ',
     inFork: true,
     at: 1,
@@ -69,31 +61,19 @@ const POINTS = {
 
 const scenario = S3_CLICKHOUSE
 
-const ofTable = (rows: OracleRow[], table: string) => rows.filter((row) => row.table === table)
+function expectForkState(store: ClickhouseStore, batches: Observation[], forks: BlockCursor[][]) {
+  const finalized = batches.at(-1)?.finalized
+  const canonical = forks.at(-1) ?? []
+  const ancestor = canonical.find((block) => block.number === S3.ancestor)
 
-/**
- * Where the store's rows of each table stand against the forked branch its cursor is on: all of
- * the branch, rolled back to the ancestor, or neither.
- */
-function standingOf(store: ClickhouseStore): string[] {
-  const branch = scenario.rowsUpTo(cursorOf(store))
-  const rows = rowsOfClickhouse(store)
-
-  return TABLE_NAMES.map((table) => {
-    const held = ofTable(rows, table)
-    const forked = ofTable(branch, table)
-    const rolledBack = forked.filter((row) => row.block <= S3.ancestor)
-
-    if (isDeepStrictEqual(held, rolledBack)) {
-      return 'rolled back'
-    }
-
-    if (isDeepStrictEqual(held, forked)) {
-      return 'forked'
-    }
-
-    return 'neither'
-  })
+  expect(ancestor).toBeDefined()
+  expect(store.state?.current).toStrictEqual(ancestor)
+  expect(store.state?.finalized).toStrictEqual(finalized)
+  expect(store.state?.rollbackChain.map(({ number, hash }) => ({ number, hash }))).toStrictEqual(
+    canonical
+      .filter((block) => block.number > (finalized?.number ?? -1) && block.number <= S3.ancestor)
+      .map(({ number, hash }) => ({ number, hash })),
+  )
 }
 
 /**
@@ -126,7 +106,7 @@ describe('ClickHouse (class A) · S3 one fork · killed at each commit step (CT-
     await resumeToEnd({ scenario, simulator, database, model, store })
   })
 
-  it('inside the fork, before any cancel row: the store keeps the forked branch, and the restart forks again', async ({
+  it('inside the fork, before the ancestor cursor write: the store keeps the last batch commit', async ({
     simulateS3,
     database,
   }) => {
@@ -138,12 +118,10 @@ describe('ClickHouse (class A) · S3 one fork · killed at each commit step (CT-
       simulator,
       database,
       model,
-      point: POINTS.forkBeforeCancel,
+      point: POINTS.forkBeforeCursor,
     })
 
-    // The ancestor search reads the sync rows; each table's cancel follows its own netting read.
     expect(killed.sent[0]).toBe('select sync')
-    expect(killed.sent).toContain(killed.request.replace('cancel', 'net'))
     expect(forks).toHaveLength(1)
     expect(cursorOf(store)).toStrictEqual(batches.at(-1)?.current)
     expect(window).toEqual([])
@@ -151,15 +129,15 @@ describe('ClickHouse (class A) · S3 one fork · killed at each commit step (CT-
     await resumeToEnd({ scenario, simulator, database, model, store })
   })
 
-  it('a second crash inside the fork: the restart forks again, and converges (WP-46)', async ({
+  it('a second crash before the ancestor cursor write: the restart forks again, and converges (WP-46)', async ({
     simulateS3,
     database,
   }) => {
     const simulator = await simulateS3()
     const model = scenario.oracle()
 
-    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.forkBeforeCancel })
-    const second = await crashAt({ scenario, simulator, database, model, point: POINTS.forkBeforeCancel })
+    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.forkBeforeCursor })
+    const second = await crashAt({ scenario, simulator, database, model, point: POINTS.forkBeforeCursor })
 
     expect(second.forks).toHaveLength(1)
     expect(second.batches).toEqual([])
@@ -168,60 +146,77 @@ describe('ClickHouse (class A) · S3 one fork · killed at each commit step (CT-
     await resumeToEnd({ scenario, simulator, database, model, store: second.store })
   })
 
-  it('GAP-21 (open): inside the fork rollback, the cursor stays on the forked branch above a table rolled back', async ({
+  it('after the ancestor cursor write but before repair: only the forked rows are above the cursor', async ({
     simulateS3,
     database,
   }) => {
     const simulator = await simulateS3()
     const model = scenario.oracle()
 
-    // CN-34 wants the ancestor persisted. The binding persists nothing, so the store reads as the
-    // forked branch's head over rows partly rolled back: a state no commit wrote.
-    const crash = crashAt({ scenario, simulator, database, model, point: POINTS.forkMidRollback })
-    await expect(crash).rejects.toThrow('the committed rows')
+    const { store, batches, forks, window } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.forkBeforeCancel,
+    })
 
-    const store = await readClickhouseStore(database)
-    const standing = standingOf(store)
-
-    // Whether the other table's cancel went out before the kill is free.
-    expect(cursorOf(store)?.number).toBe(S3.latest)
-    expect(standing).toContain('rolled back')
-    expect(standing).not.toContain('neither')
-    // A fix that persists the ancestor once the rollback ends leaves this point as it is: the
-    // ancestor must be persisted before the hook removes rows, so a crash leaves only the class's
-    // own window above the cursor (CN-13).
+    expectForkState(store, batches, forks)
+    expect(window).toEqual(rowsBetween(scenario, store.state?.current, batches.at(-1)!.current))
 
     await resumeToEnd({ scenario, simulator, database, model, store })
   })
 
-  it('GAP-21 (open): after the fork, the cursor stays on the forked branch above rows rolled back to the ancestor', async ({
+  it('inside the fork rollback: the cursor stays on the ancestor and any remaining rows are crash residue', async ({
     simulateS3,
     database,
   }) => {
     const simulator = await simulateS3()
     const model = scenario.oracle()
 
-    const crash = crashAt({ scenario, simulator, database, model, point: POINTS.forkAfterRollback })
-    await expect(crash).rejects.toThrow('the committed rows')
+    const { store, batches, forks, window } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.forkMidRollback,
+    })
 
-    const store = await readClickhouseStore(database)
+    expectForkState(store, batches, forks)
+    expect(window.every((row) => row.block > S3.ancestor && row.block <= S3.latest)).toBe(true)
 
-    // Flip to a passing `crashAt` when GAP-21 closes: the cursor at the ancestor, over its rows.
-    expect(cursorOf(store)?.number).toBe(S3.latest)
-    expect(standingOf(store)).toEqual(['rolled back', 'rolled back'])
-
-    // A restart still ends in S3's end state: its first request meets the fork again.
     await resumeToEnd({ scenario, simulator, database, model, store })
   })
 
-  it('GAP-21 (open): in the first batch after the fork, rows of the new branch sit under the forked cursor', async ({
+  it('after the fork rollback: the cursor and rows are fully rewound to the ancestor', async ({
     simulateS3,
     database,
   }) => {
     const simulator = await simulateS3()
     const model = scenario.oracle()
 
-    const { store, batches, forks } = await runKilled({
+    const { store, batches, forks, window } = await crashAt({
+      scenario,
+      simulator,
+      database,
+      model,
+      point: POINTS.forkAfterRollback,
+    })
+
+    expectForkState(store, batches, forks)
+    expect(window).toEqual([])
+
+    await resumeToEnd({ scenario, simulator, database, model, store })
+  })
+
+  it('in the first batch after the fork: its rows sit above the ancestor cursor until its own commit', async ({
+    simulateS3,
+    database,
+  }) => {
+    const simulator = await simulateS3()
+    const model = scenario.oracle()
+
+    const { store, batches, forks, window } = await crashAt({
       scenario,
       simulator,
       database,
@@ -232,17 +227,9 @@ describe('ClickHouse (class A) · S3 one fork · killed at each commit step (CT-
 
     expect(forks).toHaveLength(1)
     expect(batch.current.number).toBe(POINTS.afterForkBatch.inBatch)
-    expect(cursorOf(store)?.number).toBe(S3.latest)
-    expect(rowsOfClickhouse(store)).toEqual(rowsBetween(scenario, undefined, batch.current))
-    // The oracle's last two commits are the fork and the batch; the store recovers to neither.
-    await expect(resumeToEnd({ scenario, simulator, database, model, store })).rejects.toThrow('CN-40')
+    expectForkState(store, batches.slice(0, -1), forks)
+    expect(window).toEqual(rowsBetween(scenario, store.state?.current, batch.current))
 
-    // A restart still ends in S3's end state: recovery removes the rows above the stale cursor, and
-    // the first request meets the fork again.
-    const end = await runUnwatched({ scenario, simulator, database })
-
-    expect(validateClickhouseSnapshot(end, S3_RANGES)).toEqual([])
-    expect(end.state).toStrictEqual(s3EndState())
-    expect(rowsOfClickhouse(end)).toEqual(S3_ROWS)
+    await resumeToEnd({ scenario, simulator, database, model, store })
   })
 })
