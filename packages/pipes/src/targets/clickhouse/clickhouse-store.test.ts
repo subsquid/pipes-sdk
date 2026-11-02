@@ -458,16 +458,17 @@ describe('Clickhouse store', () => {
       expect(await selectFinal(store, 'decimals')).toHaveLength(0)
     })
 
-    it('falls back to the FINAL cancel-row rollback when table metadata is unreadable', async () => {
+    it('refuses rollback without cancelling duplicates when system metadata is denied', async () => {
       const setupStore = new ClickhouseStore(client)
       await createEventsTable(setupStore, 'meta_denied')
-      await insertEvents(setupStore, [{ block_number: 10, account: 'alice', value: 100, sign: 1 }], 'meta_denied')
+      const row = { block_number: 10, account: 'alice', value: 100, sign: 1 }
+      await insertEvents(setupStore, [row], 'meta_denied')
+      await insertEvents(setupStore, [row], 'meta_denied')
 
-      // Simulates a locked-down server where the client has no access to system.tables
       const restrictedClient = {
         query: (params: any) => {
           if (params.query.includes('system.')) {
-            throw new Error('Not enough privileges')
+            throw Object.assign(new Error('Not enough privileges'), { type: 'ACCESS_DENIED' })
           }
 
           return client.query(params)
@@ -477,18 +478,15 @@ describe('Clickhouse store', () => {
       } as any
 
       const store = new ClickhouseStore(restrictedClient)
-      const warn = vi.fn()
-      store.bindLogger({ warn } as any)
-
-      const res = await store.removeAllRows({
+      const rollback = store.removeAllRows({
         tables: 'meta_denied',
         where: 'block_number > {latest:UInt32}',
         params: { latest: 5 },
       })
-      expect(res).toEqual([{ table: 'meta_denied', count: 1 }])
 
-      expect(warn).toHaveBeenCalledOnce()
-      expect(await selectFinal(setupStore, 'meta_denied')).toHaveLength(0)
+      await expect(rollback).rejects.toMatchObject({ code: 'E2010' })
+      expect(await rawBalance(setupStore, 'meta_denied')).toEqual({ rows: 2, balance: 2 })
+      expect(await selectFinal(setupStore, 'meta_denied')).toHaveLength(1)
     })
   })
 

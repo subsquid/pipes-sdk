@@ -174,11 +174,16 @@ export function clickhouseTarget<T>({
       const cursor = await state.fork(canonicalBlocks)
       if (!cursor) return cursor
 
+      await state.saveForkCursor(cursor)
+
+      const previousCommit = lastCommit
       await onRollback({
         reason: 'fork',
         store,
-        safeCursor: lastCommit ? { ...cursor, upTo: lastCommit.number } : cursor,
+        safeCursor: previousCommit ? { ...cursor, upTo: previousCommit.number } : cursor,
       })
+      lastCommit = cursor
+
       return cursor
     },
   })

@@ -8,6 +8,7 @@ import { evmPortalStream } from '~/evm/index.js'
 import { MockChainPortal, MockPortal, MockResponse, blockDecoder, mockPortal, testLogger } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
+import { ClickhouseState } from './clickhouse-state.js'
 import { ClickhouseStore, type RollbackCursor } from './clickhouse-store.js'
 import { clickhouseTarget } from './clickouse-target.js'
 
@@ -29,7 +30,7 @@ async function getAllFromSyncTable() {
 }
 
 describe('Clickhouse state', () => {
-  let portal: MockPortal
+  let portal: MockPortal | undefined
 
   afterEach(async () => {
     await portal?.close()
@@ -37,6 +38,7 @@ describe('Clickhouse state', () => {
   })
 
   beforeEach(async () => {
+    portal = undefined
     // Ensure DB is empty before each test
     await client.query({ query: 'DROP DATABASE IF EXISTS default SYNC' })
     await client.query({ query: 'CREATE DATABASE default' })
@@ -213,7 +215,7 @@ describe('Clickhouse state', () => {
       // so a prototype spy can catch calls from unrelated stores in other tests.
       // Filter by `instance.client === client` to count only calls on the store
       // that wraps our test client.
-      const removeSpy = vi.spyOn(ClickhouseStore.prototype, 'removeAllRowsByQuery')
+      const removeSpy = vi.spyOn(ClickhouseStore.prototype, 'removeAllRowsByNettingQuery')
 
       const responses = Array.from(
         { length: 26 },
@@ -250,6 +252,27 @@ describe('Clickhouse state', () => {
       } finally {
         removeSpy.mockRestore()
       }
+    })
+
+    it('keeps the trimmed fork history after retention cleanup and a merge', async () => {
+      const block = (number: number): BlockCursor => ({ number, hash: `0x${number}` })
+      const blocks = (from: number, to: number) =>
+        Array.from({ length: to - from + 1 }, (_, index) => block(from + index))
+      const span = { measure: (_name: unknown, fn: () => unknown) => fn() }
+      const state = new ClickhouseState(new ClickhouseStore(client), { id: 'test', maxRows: 2 })
+      const save = (current: BlockCursor, rollbackChain: BlockCursor[]) =>
+        state.saveCursor(
+          { stream: { state: { current, rollbackChain }, head: { finalized: block(10) } } } as any,
+          span as any,
+        )
+
+      await state.getCursor()
+      await save(block(20), blocks(11, 20))
+      await save(block(30), blocks(21, 30))
+      await state.saveForkCursor(block(20))
+      await client.command({ query: 'OPTIMIZE TABLE sync FINAL' })
+
+      await expect(state.fork([block(19)])).resolves.toEqual(block(19))
     })
 
     it('should not store chain continuity if finalized head doesnt exist', async () => {
@@ -924,6 +947,13 @@ describe('Clickhouse state', () => {
             "sign": 1,
           },
           {
+            "current": "{"hash":"0x1","number":1}",
+            "finalized": "{"hash":"0x1","number":1}",
+            "id": "test",
+            "rollback_chain": "[]",
+            "sign": 1,
+          },
+          {
             "current": "{"number":3,"hash":"0x3a","timestamp":3000}",
             "finalized": "{"hash":"0x2a","number":2}",
             "id": "test",
@@ -1193,19 +1223,22 @@ describe('clickhouseTarget missing-rollback diagnostic', () => {
     })
   })
 
-  it('passes the fork ancestor with no upper bound when the run has saved no cursor', async () => {
-    // Rollback records that resolve the fork to block 5, read without write() ever running
+  it('passes the fork ancestor with no upper bound before any batch commit in this run', async () => {
     const row = {
+      current: '{"number":6,"hash":"0x6"}',
       rollback_chain: JSON.stringify([5, 6].map((n) => ({ number: n, hash: `0x${n}` }))),
       finalized: '{"number":4,"hash":"0x4"}',
+      timestamp: '2026-10-28T10:00:00.000Z',
     }
     const recordsClient = {
       connectionParams: { database: 'default' },
       query: vi.fn().mockResolvedValue({
+        json: async () => [row],
         stream: async function* () {
           yield [{ json: () => row }]
         },
       }),
+      insert: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     } as any
     const onRollback = vi.fn()

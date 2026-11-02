@@ -103,8 +103,7 @@ the cursor the fork rolls back from. The documented removal, `store.removeRowsAf
 block condition itself and, given `upTo`, removes no block past it. Rollback mechanism by engine
 family:
 Collapsing-family engines → net-cancel rows computed via `sum(sign)` grouping (with
-insert-dedup and pre-merge-collapse disabled on those inserts; with the table catalog
-unreadable, and in retention, a `FINAL` read-back instead — GAP-45); other engines →
+insert-dedup and pre-merge-collapse disabled on those inserts); other engines →
 lightweight DELETE (materialized views keep rolled-back rows — warned);
 `Distributed` engines → refused (coded). A minmax skip index on the block-number
 column is auto-created for rollback pruning. Repair (recovery + fork) is delegated to
@@ -321,7 +320,7 @@ consumers MUST NOT read it as a block number.
 |---|---|---|
 | E0xxx | pipe configuration | E0001 blank pipe id, E0002 invalid range/date (a bound that is not a block number, an invalid date, a date after the dataset's head), E0003 unusable instruction set (an instruction outside the decoder's `program`, a `program` with no address, mixed widths across the decoder, shared discriminator, or an instruction with none or several), E0004 event-decoder entries that can match one log |
 | E1xxx | fork handling, portal contract | E1001 sink lacks fork support, E1002 empty or absent canonical chain, E1003 ancestor unresolvable, E1004 portal contract violation (canonical below cursor), E1005 fork reported on the finalized-only route, E1006 block outside the request window (duplicate, out of order or out of range), E1007 unreadable stream line (invalid JSON, no block number, a second cut at one block), E1008 block violating the schema of the selected fields |
-| E20xx | ClickHouse binding | E2001–E2009 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler, rollback of a missing table, failed SQL file statement) |
+| E20xx | ClickHouse binding | E2001–E2010 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler, rollback of a missing table, failed SQL file statement, unavailable rollback-table metadata) |
 | E21xx | Postgres binding | E2101–E2107 (client, config, advisory lock, untracked table, missing PK, FK cycle, unresolved column name) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
 | E23xx | Parquet binding | E2301–E2317 and E2320–E2322 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused; E2321 output directory claimed by another cursor key; E2322 published data with no state). E2318–E2319 retired, unassigned |

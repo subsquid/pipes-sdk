@@ -29,7 +29,12 @@ CREATE TABLE IF NOT EXISTS ${table}
   ORDER BY (timestamp, id)
 `
 
-type SyncRow = { current: string; finalized: string; timestamp: string } & Record<string, unknown>
+type SyncRow = {
+  current: string
+  finalized: string
+  rollback_chain: string
+  timestamp: string
+} & Record<string, unknown>
 
 /** The blocks a first batch covers: from the range start up to the batch's last block. */
 export type FirstBatchBlocks = { from: number; to: number }
@@ -182,29 +187,91 @@ export class ClickhouseState {
 
     this.#saves++
 
-    // Debounce cleanup for large retention windows, but enforce small limits
-    // eagerly so `maxRows` stays an effective per-id bound after each save.
-    // For maxRows < 25 we clean every save (overshoot is only 1 row); for the
-    // common maxRows=10_000 case we clean every 25 saves (overshoot ≤ 0.25%).
+    if (this.#shouldCleanupCursors()) {
+      await parentSpan.measure({ name: 'cleanup cursors', labels: 'db' }, () => this.#cleanupCursors())
+    }
+  }
+
+  async saveForkCursor(cursor: BlockCursor): Promise<void> {
+    const row = await this.#readLatestRow(this.#key.value)
+    if (!row) {
+      throw new Error(`Cannot persist fork ancestor ${cursor.number} without a current cursor row`)
+    }
+
+    const finalized = normalizeFinalized(row.finalized ? this.decodeCursor(row.finalized) : undefined)
+    const rollbackChain = await this.#readTrimmedRollbackChain(cursor, finalized)
+
+    await this.store.insert({
+      table: this.#qualifiedName,
+      values: [
+        {
+          id: this.#key.value,
+          current: this.encodeCursor(cursor),
+          finalized: row.finalized,
+          rollback_chain: JSON.stringify(rollbackChain),
+          sign: 1,
+          timestamp: this.#nextTimestamp(),
+        },
+      ],
+      format: 'JSONEachRow',
+    })
+
+    this.#saves++
+    if (this.#shouldCleanupCursors()) {
+      await this.#cleanupCursors()
+    }
+  }
+
+  async #readTrimmedRollbackChain(cursor: BlockCursor, finalized?: BlockCursor): Promise<BlockCursor[]> {
+    const res = await this.store.query({
+      query: `
+        SELECT rollback_chain, timestamp, sum(sign) AS _sqd_net
+        FROM ${this.#qualifiedName}
+        WHERE id = {id:String}
+        GROUP BY rollback_chain, timestamp
+        HAVING _sqd_net != 0
+        ORDER BY timestamp ASC
+      `,
+      format: 'JSONEachRow',
+      query_params: { id: this.#key.value },
+    })
+
+    const byBlock = new Map<number, BlockCursor>()
+    for await (const rows of res.stream<{ rollback_chain: string }>()) {
+      for (const row of rows) {
+        for (const block of JSON.parse(row.json().rollback_chain) as BlockCursor[]) {
+          byBlock.set(block.number, block)
+        }
+      }
+    }
+
+    return [...byBlock.values()]
+      .filter((block) => block.number <= cursor.number && block.number > (finalized?.number ?? -1))
+      .sort((a, b) => a.number - b.number)
+  }
+
+  #shouldCleanupCursors(): boolean {
+    // Small retention bounds stay effective after every save. Large bounds clean every 25 saves.
     const cleanupInterval = this.options.maxRows < 25 ? 1 : 25
 
-    if (this.#saves === 1 || this.#saves % cleanupInterval === 0) {
-      await parentSpan.measure({ name: 'cleanup cursors', labels: 'db' }, async () => {
-        // Filter by id so cleanup of one stream cannot evict another stream's rows
-        // when multiple streams share the same offset table.
-        await this.store.removeAllRowsByQuery({
-          table: this.#qualifiedName,
-          query: `
-            SELECT *
-            FROM ${this.#qualifiedName} FINAL
-            WHERE id = {id:String}
-            ORDER BY "timestamp" DESC
-            OFFSET ${this.options.maxRows}
-          `,
-          params: { id: this.#key.value },
-        })
-      })
-    }
+    return this.#saves === 1 || this.#saves % cleanupInterval === 0
+  }
+
+  async #cleanupCursors(): Promise<void> {
+    await this.store.removeAllRowsByNettingQuery({
+      table: this.#qualifiedName,
+      query: `
+        SELECT id, current, finalized, rollback_chain, timestamp, sum(sign) AS _sqd_net
+        FROM ${this.#qualifiedName}
+        WHERE id = {id:String}
+        GROUP BY id, current, finalized, rollback_chain, timestamp
+        HAVING _sqd_net != 0
+        ORDER BY "timestamp" DESC
+        OFFSET ${this.options.maxRows}
+      `,
+      netAlias: '_sqd_net',
+      params: { id: this.#key.value },
+    })
   }
 
   async getCursor(): Promise<TargetState | undefined> {
@@ -331,7 +398,13 @@ export class ClickhouseState {
    */
   async #rekeyLegacyRows(): Promise<void> {
     const res = await this.store.query({
-      query: `SELECT * FROM ${this.#qualifiedName} FINAL WHERE id = {id:String}`,
+      query: `
+        SELECT id, current, finalized, rollback_chain, timestamp, sum(sign) AS _sqd_net
+        FROM ${this.#qualifiedName}
+        WHERE id = {id:String}
+        GROUP BY id, current, finalized, rollback_chain, timestamp
+        HAVING _sqd_net > 0
+      `,
       format: 'JSONEachRow',
       query_params: { id: LEGACY_DEFAULT_CURSOR_ID },
       clickhouse_settings: {
@@ -345,16 +418,20 @@ export class ClickhouseState {
       await this.store.insert({
         table: this.#qualifiedName,
         values: rows.flatMap((r) => {
-          const row = r.json() as Record<string, unknown>
+          const { _sqd_net: rawNet, ...row } = r.json() as Record<string, unknown>
+          const values: Record<string, unknown>[] = []
 
-          return [
-            { ...row, id: this.#key.value },
-            { ...row, sign: -1 },
-          ]
+          for (let i = 0; i < Number(rawNet); i++) {
+            values.push({ ...row, id: this.#key.value, sign: 1 }, { ...row, sign: -1 })
+          }
+
+          return values
         }),
         format: 'JSONEachRow',
         clickhouse_settings: {
           date_time_input_format: 'best_effort',
+          insert_deduplicate: 0,
+          optimize_on_insert: 0,
         },
       })
     }

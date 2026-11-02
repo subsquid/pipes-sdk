@@ -60,6 +60,10 @@ type TableMeta = {
 
 const PLAIN_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+function isAccessDenied(error: unknown): boolean {
+  return error instanceof Error && 'type' in error && error.type === 'ACCESS_DENIED'
+}
+
 /**
  * A safe cursor as `onRollback` gets it. `upTo`, when set, is the highest block whose rows may be
  * stored above it: after a crash in the first batch, that batch's last block; on a fork, the
@@ -149,48 +153,63 @@ export class ClickhouseStore {
   }
 
   async #fetchTableMeta(table: string): Promise<TableMeta> {
-    const { database, name } = this.#parseTableName(table)
+    try {
+      const { database, name } = this.#parseTableName(table)
 
-    const tableRes = await this.client.query({
-      query: `
-        SELECT database, name, engine, engine_full
-        FROM system.tables
-        WHERE database = coalesce({database:Nullable(String)}, currentDatabase()) AND name = {name:String}
-      `,
-      format: 'JSON',
-      query_params: { database, name },
-    })
-    const tables = (await tableRes.json()).data as {
-      database: string
-      name: string
-      engine: string
-      engine_full: string
-    }[]
-    if (!tables.length) {
-      throw new ClickhouseTargetError(CLICKHOUSE_ERROR_CODES.ROLLBACK_TABLE_NOT_FOUND, [
-        `Table "${table}" does not exist, so the rollback cannot remove its rows.`,
-        'Check the table names passed to `removeRowsAfter` in `onRollback`.',
-      ])
-    }
+      const tableRes = await this.client.query({
+        query: `
+          SELECT database, name, engine, engine_full
+          FROM system.tables
+          WHERE database = coalesce({database:Nullable(String)}, currentDatabase()) AND name = {name:String}
+        `,
+        format: 'JSON',
+        query_params: { database, name },
+      })
+      const tables = (await tableRes.json()).data as {
+        database: string
+        name: string
+        engine: string
+        engine_full: string
+      }[]
+      if (!tables.length) {
+        throw new ClickhouseTargetError(CLICKHOUSE_ERROR_CODES.ROLLBACK_TABLE_NOT_FOUND, [
+          `Table "${table}" does not exist, so the rollback cannot remove its rows.`,
+          'Check the table names passed to `removeRowsAfter` in `onRollback`.',
+        ])
+      }
 
-    const columnsRes = await this.client.query({
-      query: `
-        SELECT name, default_kind
-        FROM system.columns
-        WHERE database = {database:String} AND table = {name:String}
-        ORDER BY position
-      `,
-      format: 'JSON',
-      query_params: { database: tables[0].database, name },
-    })
-    const columns = (await columnsRes.json()).data as { name: string; default_kind: string }[]
+      const columnsRes = await this.client.query({
+        query: `
+          SELECT name, default_kind
+          FROM system.columns
+          WHERE database = {database:String} AND table = {name:String}
+          ORDER BY position
+        `,
+        format: 'JSON',
+        query_params: { database: tables[0].database, name },
+      })
+      const columns = (await columnsRes.json()).data as { name: string; default_kind: string }[]
 
-    return {
-      database: tables[0].database,
-      name: tables[0].name,
-      engine: tables[0].engine,
-      engineFull: tables[0].engine_full,
-      columns: columns.map((c) => ({ name: c.name, defaultKind: c.default_kind })),
+      return {
+        database: tables[0].database,
+        name: tables[0].name,
+        engine: tables[0].engine,
+        engineFull: tables[0].engine_full,
+        columns: columns.map((c) => ({ name: c.name, defaultKind: c.default_kind })),
+      }
+    } catch (error) {
+      if (error instanceof ClickhouseTargetError || !isAccessDenied(error)) {
+        throw error
+      }
+
+      throw new ClickhouseTargetError(
+        CLICKHOUSE_ERROR_CODES.ROLLBACK_METADATA_UNAVAILABLE,
+        [
+          `Cannot read the engine and columns of "${table}" from system.tables and system.columns.`,
+          'Rollback refuses to guess the table shape. Grant SELECT on system.tables and system.columns.',
+        ],
+        { cause: error },
+      )
     }
   }
 
@@ -300,8 +319,7 @@ export class ClickhouseStore {
    * - Any other engine: falls back to a lightweight `DELETE` with a warning — the table
    *   itself is cleaned, but materialized views built on it keep the removed data (MVs
    *   fire on INSERT only).
-   * - If table metadata cannot be read (e.g. no access to `system.tables` on a
-   *   locked-down server), falls back to the legacy `FINAL` read-back with cancel rows.
+   * - If access to the system tables is denied, rollback refuses to guess the table shape.
    */
   async removeRowsAfter(
     cursor: RollbackCursor,
@@ -365,29 +383,7 @@ export class ClickhouseStore {
 
     return Promise.all(
       tables.map(async (table) => {
-        let meta: TableMeta
-        try {
-          meta = await this.#fetchTableMeta(table)
-        } catch (error) {
-          // A coded refusal (no such table, unparseable name) is not a reason to read the table blind.
-          if (error instanceof ClickhouseTargetError) {
-            throw error
-          }
-
-          this.#logger?.warn(
-            { error, table },
-            `Failed to read table metadata for "${table}" (no access to system.tables/system.columns?); ` +
-              `assuming a CollapsingMergeTree table and falling back to the FINAL-based cancel-row rollback`,
-          )
-
-          const count = await this.removeAllRowsByQuery({
-            table,
-            query: `SELECT * FROM ${table} FINAL WHERE ${where}`,
-            params,
-          })
-
-          return { table, count }
-        }
+        const meta = await this.#fetchTableMeta(table)
 
         this.#assertNotDistributed(table, meta)
 
@@ -535,6 +531,15 @@ export class ClickhouseStore {
     }
 
     return count
+  }
+
+  async removeAllRowsByNettingQuery(options: {
+    table: string
+    query: string
+    netAlias: string
+    params?: Record<string, unknown>
+  }): Promise<number> {
+    return this.#removeNettedRows(options)
   }
 
   /**

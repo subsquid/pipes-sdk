@@ -35,4 +35,6 @@ export const CLICKHOUSE_ERROR_CODES = {
   ROLLBACK_TABLE_NOT_FOUND: 'E2008',
   /** A statement from a file `executeFiles` runs failed. */
   SQL_FILE_STATEMENT_FAILED: 'E2009',
+  /** System tables cannot describe a rollback target because access is denied. */
+  ROLLBACK_METADATA_UNAVAILABLE: 'E2010',
 } as const
