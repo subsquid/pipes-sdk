@@ -11,6 +11,7 @@ import { doWithRetry } from '~/internal/function.js'
 import { DrizzleTracker } from './drizzle-tracker.js'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
 import { PostgresState, StateOptions } from './postgres-state.js'
+import { isTransientPgError } from './retry.js'
 import { orderTablesForDelete } from './rollback.js'
 
 export type Transaction = PgTransaction<NodePgQueryResultHKT, any, any>
@@ -26,6 +27,10 @@ export type Transaction = PgTransaction<NodePgQueryResultHKT, any, any>
  * @param options.onBeforeRollback - Optional callback that runs before a rollback is performed
  * @param options.onAfterRollback - Optional callback that runs after a rollback is performed
  * @param options.settings - Optional settings for state management and transaction configuration
+ * @param options.settings.transaction.isolationLevel - Serializable by default. Weaker levels keep
+ * each batch atomic but do not guarantee a serial order with other writers. Statements in one batch
+ * can observe different snapshots, concurrent updates can be lost, and the undo log can record a
+ * history that could not occur in any serial execution.
  * @returns Target implementation that can be used with pipe()
  * @example
  * ```ts
@@ -72,7 +77,7 @@ export function drizzleTarget<T>({
   const state = new PostgresState(client, settings?.state)
   const sortedTables = orderTablesForDelete(Array.isArray(tables) ? tables : Object.values(tables))
   const config: PgTransactionConfig = {
-    isolationLevel: settings?.transaction?.isolationLevel || 'serializable',
+    isolationLevel: settings?.transaction?.isolationLevel ?? 'serializable',
   }
 
   return createTarget<T>({
@@ -104,6 +109,8 @@ export function drizzleTarget<T>({
             title: 'postgres triggers configuration',
             retries: 3,
             delayMs: 100,
+            shouldRetry: isTransientPgError,
+            logger,
           },
         )
       }
@@ -160,6 +167,8 @@ export function drizzleTarget<T>({
               title: 'postgres batch insert transaction',
               retries: 3,
               delayMs: 100,
+              shouldRetry: isTransientPgError,
+              logger,
             },
           )
         } finally {
