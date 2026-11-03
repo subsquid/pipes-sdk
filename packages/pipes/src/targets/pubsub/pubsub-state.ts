@@ -263,6 +263,8 @@ export class SqlitePubsubState implements PubsubState {
   /** In-memory copy of META_FOLDED_THROUGH; -1 until the first fold. */
   #foldedThrough = -1
   #compaction?: NodeJS.Immediate
+  /** The last sequence number handed out in the open write transaction, not yet stored. */
+  #stagedSeq?: number
 
   constructor(options: SqlitePubsubStateOptions) {
     this.#options = options
@@ -412,6 +414,9 @@ export class SqlitePubsubState implements PubsubState {
     try {
       db.exec(begin)
       const result = body()
+      if (this.#stagedSeq !== undefined) {
+        this.setMetaSync(META_SEQUENCE, String(this.#stagedSeq))
+      }
       db.exec('COMMIT')
 
       return result
@@ -419,6 +424,8 @@ export class SqlitePubsubState implements PubsubState {
       this.#unwound = rollbackQuietly(db)
 
       throw this.#storageError(e, rolledBack)
+    } finally {
+      this.#stagedSeq = undefined
     }
   }
 
@@ -595,9 +602,13 @@ export class SqlitePubsubState implements PubsubState {
 
   // ─── sequencing ─────────────────────────────────────────────────────────────
 
-  /** One producer-wide version counter, independent of topics and ordering keys. */
+  /**
+   * One producer-wide version counter, independent of topics and ordering keys. Counted in
+   * memory and stored once, just before the transaction commits, so a rollback discards it.
+   * Call only inside a #transaction body: only #transaction stores the counter.
+   */
   #nextSeq(context: { route: string; topic: string }): number {
-    const current = Number(this.getMetaSync(META_SEQUENCE) ?? '0')
+    const current = this.#stagedSeq ?? Number(this.getMetaSync(META_SEQUENCE) ?? '0')
     if (!Number.isSafeInteger(current) || current < 0 || current >= MAX_SEQUENCE_VALUE) {
       throw new PubsubTargetError(PUBSUB_ERROR_CODES.SEQUENCE_EXHAUSTED, [
         `The PubSub change sequence cannot advance past ${String(current)} for route "${context.route}" ` +
@@ -606,10 +617,9 @@ export class SqlitePubsubState implements PubsubState {
       ])
     }
 
-    const next = current + 1
-    this.setMetaSync(META_SEQUENCE, String(next))
+    this.#stagedSeq = current + 1
 
-    return next
+    return this.#stagedSeq
   }
 
   #enqueue(operation: PendingOperation, seq: number): void {
