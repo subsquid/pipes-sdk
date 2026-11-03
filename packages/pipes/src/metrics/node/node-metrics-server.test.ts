@@ -1,7 +1,9 @@
+import { readFile } from 'node:fs/promises'
 import net from 'node:net'
+import { fileURLToPath } from 'node:url'
 
 import client from 'prom-client'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { MetricsServer } from '~/core/index.js'
 import { evmPortalStream } from '~/evm/index.js'
@@ -235,6 +237,93 @@ describe('metrics server', () => {
     await run
 
     expect(progress).toMatchObject({ current: 1, to: 1 })
+  })
+
+  withServer('matches the golden stats, metrics and transformation preview for one scripted run', async ({ serve }) => {
+    const { server, url } = await serve()
+    const release = Promise.withResolvers<void>()
+    const portal = new StubPortalClient(async function* () {
+      yield stubBatch([1, 2], { latest: { number: 2 }, finalized: { number: 2, hash: '0x2' } }, { 200: 1 })
+      await release.promise
+    })
+    const run = readAll(
+      evmPortalStream({
+        id: 'golden',
+        portal,
+        logger: 'silent',
+        outputs: blockDecoder({ from: 1, to: 2 }),
+        metrics: server,
+        profiler: true,
+      }),
+    )
+
+    try {
+      await vi.waitFor(async () => {
+        const res = await fetch(`${url}/preview/transformation?id=golden`)
+        const body = (await res.json()) as { payload: { transformation?: unknown; batch?: unknown } }
+        expect(body.payload.transformation).toBeDefined()
+        expect(body.payload.batch).toBeDefined()
+      })
+
+      const stats = (await (await fetch(`${url}/stats`)).json()) as any
+      // An unconditional assignment would also create a field the endpoint stopped sending,
+      // so prove the shape first, then mask only the environment-dependent values.
+      expect(stats.payload.sdk.version).toBeTypeOf('string')
+      expect(stats.payload.runtime.version).toBeTypeOf('string')
+      expect(stats.payload.entrypoint).toBeTypeOf('string')
+      expect(stats.payload.usage.memory).toBeTypeOf('number')
+
+      stats.payload.sdk.version = '<sdk-version>'
+      stats.payload.runtime.version = '<runtime-version>'
+      stats.payload.entrypoint = '<entrypoint>'
+      stats.payload.usage.memory = 0
+
+      for (const pipe of stats.payload.pipes) {
+        // Zero the fields in place: a replaced object would hide a renamed or extra key.
+        expect(pipe.speed?.blocksPerSecond).toBeTypeOf('number')
+        expect(pipe.speed?.bytesPerSecond).toBeTypeOf('number')
+        pipe.speed.blocksPerSecond = 0
+        pipe.speed.bytesPerSecond = 0
+      }
+
+      const preview = (await (await fetch(`${url}/preview/transformation?id=golden`)).json()) as any
+      const normalizeTimings = (node: any) => {
+        if (!node) return
+        if (node.elapsed !== undefined) node.elapsed = 0
+        if (node.startOffset !== undefined) node.startOffset = 0
+        for (const child of node.children ?? []) normalizeTimings(child)
+      }
+      normalizeTimings(preview.payload.transformation)
+
+      const requiredMetrics = new Set([
+        'sqd_processed_block',
+        'sqd_end_block',
+        'sqd_progress_ratio',
+        'sqd_eta_seconds',
+        'sqd_blocks_processed_total',
+        'sqd_bytes_downloaded_total',
+        'sqd_forks_total',
+        'sqd_portal_requests_total',
+        'sqd_batch_size_blocks',
+        'sqd_batch_size_bytes',
+      ])
+      const metrics = (await scrape(url))
+        .split('\n')
+        .filter((line) => {
+          const name = line.match(/sqd_[a-z0-9_]+/)?.[0]
+          if (!name) return false
+          return requiredMetrics.has(name.replace(/_(?:bucket|sum|count)$/, ''))
+        })
+        .join('\n')
+
+      const fixture = (name: string) => fileURLToPath(new URL(`./__fixtures__/${name}`, import.meta.url))
+      expect(stats).toEqual(JSON.parse(await readFile(fixture('golden-stats.json'), 'utf8')))
+      expect(preview).toEqual(JSON.parse(await readFile(fixture('golden-preview.json'), 'utf8')))
+      expect(metrics + '\n').toBe(await readFile(fixture('golden-metrics.prom'), 'utf8'))
+    } finally {
+      release.resolve()
+      await run
+    }
   })
 
   withServer('lets two servers in one process register the same metric', async ({ serve }) => {

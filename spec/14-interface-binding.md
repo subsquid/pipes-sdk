@@ -311,7 +311,8 @@ is a pre-serialized JSON **string**; `dataSize` is its length.
 **IB-46 — Sentinels.** `sqd_processed_block = −1` means "no batch processed yet";
 consumers MUST NOT read it as a block number.
 
-*(This whole surface currently lacks golden fixtures and version markers — GAP-16.)*
+Golden scrapes pin `/stats`, the IB-42 Prometheus families and `/preview/transformation`
+against one scripted run; timings and process-local values are normalized.
 
 ## Error registry
 
