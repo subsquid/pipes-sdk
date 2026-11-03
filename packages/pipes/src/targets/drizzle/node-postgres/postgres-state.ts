@@ -9,7 +9,6 @@ import {
   Profiler,
   RollbackRecord,
   TargetState,
-  assertCanonicalChainCoversCursor,
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
@@ -301,9 +300,6 @@ export class PostgresState {
   }
 
   async fork(canonicalBlocks: BlockCursor[]): Promise<BlockCursor | null> {
-    const persisted = await this.#readLatest()
-    assertCanonicalChainCoversCursor(canonicalBlocks, persisted?.latest)
-
     const PAGE_SIZE = 1000
     const client = this.client
     const fqnName = this.#sync.fqnName

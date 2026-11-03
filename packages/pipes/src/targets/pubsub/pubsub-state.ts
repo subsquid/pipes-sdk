@@ -4,7 +4,6 @@ import {
   Logger,
   RollbackRecord,
   TargetState,
-  assertCanonicalChainCoversCursor,
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
@@ -1044,7 +1043,6 @@ export class SqlitePubsubState implements PubsubState {
     const db = this.#db!
 
     const persisted = await this.getCursor()
-    assertCanonicalChainCoversCursor(canonicalBlocks, persisted?.latest)
     const finalized = persisted?.finalized ?? undefined
     const safe = await resolveForkCursor(this.#records(finalized), canonicalBlocks)
 

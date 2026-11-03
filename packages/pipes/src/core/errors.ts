@@ -121,7 +121,7 @@ export class ForkCursorMissingError extends PipeError {
 
 /**
  * E1004: Thrown when the portal breaks its fork contract — it delivered a canonicalBlocks set whose
- * highest block is below the target's persisted cursor. Rows above it would survive the fork
+ * highest block is below the last block handed to the target. Rows above it would survive the fork
  * rollback and corrupt the new chain, so the pipe refuses to proceed rather than write bad data.
  */
 export class PortalContractViolationError extends PipeError {

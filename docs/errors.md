@@ -204,9 +204,9 @@ the fork.
 
 ### E1004 · Portal contract violation
 
-The portal delivered a `canonicalBlocks` set whose highest block is below the target's persisted
-cursor. Rows above it would survive the fork rollback and corrupt the new chain, so the pipe refuses
-to proceed. Any target that tracks a cursor can raise this.
+The portal delivered a `canonicalBlocks` set whose highest block is below the last block the pipe
+handed to the target. Rows above it would survive the fork rollback and corrupt the new chain, so the
+pipe stops before the target rolls anything back. Any target can see this, custom targets included.
 
 **Fix** — none in user code; please
 [report it as a bug](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal contract.

@@ -52,13 +52,6 @@ describe('BigQuerySyncState — resume state', () => {
     expect(resume).toEqual({ latest: block(50), finalized: block(100) })
   })
 
-  it('refuses a canonical chain below the persisted cursor with E1004', async () => {
-    const state = stateWith(committedRow(block(100)))
-    await state.getCursor({ logger: testLogger() })
-
-    await expect(state.fork([block(49)])).rejects.toMatchObject({ code: 'E1004' })
-  })
-
   it('returns finalized: null when no finalized head was persisted', async () => {
     const state = stateWith(committedRow(null))
 

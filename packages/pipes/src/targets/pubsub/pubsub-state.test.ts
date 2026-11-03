@@ -372,21 +372,6 @@ describe('SqlitePubsubState', () => {
   })
 
   describe('fork compensation', () => {
-    withStateFile('refuses a canonical chain below the persisted cursor before compensating', async ({ openState }) => {
-      const { state } = await openState()
-      await commit(state, {
-        operations: [operation({ id: 'evt-1', blockNumber: 101 })],
-        ledger: [block(100), block(101)],
-        cursor: block(101),
-        finalized: block(90),
-      })
-      await state.confirm((await state.pending()).map((row) => row.rowId))
-
-      await expect(state.fork([block(100)])).rejects.toMatchObject({ code: 'E1004' })
-      expect(await state.pending()).toEqual([])
-      expect((await state.getCursor())?.latest).toEqual(block(101))
-    })
-
     withStateFile('deletes an orphaned write-once event, inheriting its attributes', async ({ openState }) => {
       const { state } = await openState()
 
@@ -674,7 +659,7 @@ describe('SqlitePubsubState', () => {
       })
       await state.confirm((await state.pending()).map((row) => row.rowId))
 
-      const safe = await state.fork([{ number: 50, hash: '0xdead' }, block(101, 'b'), block(102, 'b')])
+      const safe = await state.fork([{ number: 50, hash: '0xdead' }])
 
       expect(safe).toBeNull()
       expect((await state.pending()).map((row) => [row.id, row.op])).toEqual([

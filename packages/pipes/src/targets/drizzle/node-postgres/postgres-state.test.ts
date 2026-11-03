@@ -124,23 +124,10 @@ describe('PostgresState — resume state & cursor persistence', () => {
 describe('PostgresState — fork', () => {
   function forkState(rows: { rollback_chain: unknown; finalized: unknown }[]) {
     let call = 0
-    const withCurrent = (row: (typeof rows)[number]) => {
-      const chain = Array.isArray(row.rollback_chain) ? row.rollback_chain : []
-      const current = Math.max(0, ...chain.map((block) => Number(block.number)))
-      return {
-        ...row,
-        id: 'stream',
-        current_number: String(current),
-        current_hash: `0x${current}`,
-        current_timestamp: null,
-      }
-    }
     const client = {
       // fork() paginates; serve the rows on the first page, then an empty page to terminate.
-      query: async (text: string) => {
-        if (/\bLIMIT 1\b/.test(text)) return { rows: rows.length ? [withCurrent(rows[0])] : [] }
-
-        const page = call === 0 ? rows.map(withCurrent) : []
+      query: async () => {
+        const page = call === 0 ? rows : []
         call++
 
         return { rows: page }
@@ -149,12 +136,6 @@ describe('PostgresState — fork', () => {
 
     return new PostgresState(client as any, {})
   }
-
-  it('refuses a canonical chain below the persisted cursor with E1004', async () => {
-    const state = await seededState(block(100))
-
-    await expect(state.fork([block(49)])).rejects.toMatchObject({ code: 'E1004' })
-  })
 
   it('resolves the safe cursor from the persisted rollback chains', async () => {
     const state = forkState([{ rollback_chain: [block(5), block(6)], finalized: block(4) }])

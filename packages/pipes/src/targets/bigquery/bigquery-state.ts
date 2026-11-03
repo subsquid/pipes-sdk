@@ -7,7 +7,6 @@ import {
   type Logger,
   type RollbackRecord,
   type TargetState,
-  assertCanonicalChainCoversCursor,
   formatBlock,
   normalizeFinalized,
   resolveForkCursor,
@@ -102,8 +101,7 @@ export type BigQueryStateOptions = {
  *     across tables, since BQ DML is exact (unlike ClickHouse CollapsingMergeTree).
  *
  *   - `fork` — pages sync rows newest-first from BigQuery to find the common ancestor with
- *     `canonicalBlocks`. Asserts the portal invariant `upper >= cursor.number` to refuse
- *     silently dropping orphan rows above a truncated `canonicalBlocks`.
+ *     `canonicalBlocks`, and returns `upper`, the bound of the fork DELETE.
  *
  *   - `cleanupOldRows` — periodic maintenance to keep the sync table small, gated on save
  *     count to avoid running every batch.
@@ -391,13 +389,10 @@ export class BigQuerySyncState {
    * Pages committed sync rows newest-first from BigQuery (`ORDER BY timestamp DESC`) and
    * walks them through `resolveForkCursor` to find the common ancestor with `canonicalBlocks`.
    *
-   * Asserts the portal invariant `upper >= currentCursor.number`. If violated — the portal
-   * sent a canonicalBlocks set whose highest block is below our persisted cursor — we throw
-   * rather than silently DELETE only part of the divergence range and leave orphan rows above
-   * `upper` to corrupt the new chain.
+   * `upper` bounds the fork DELETE. The source has already checked that it reaches the persisted
+   * cursor (RP-43), so no orphan rows stay above it.
    */
   async fork(canonicalBlocks: BlockCursor[]): Promise<{ safeCursor: BlockCursor | null; upper: number }> {
-    assertCanonicalChainCoversCursor(canonicalBlocks, this.#lastCommittedCursor)
     const upper = canonicalBlocks.reduce((m, b) => (b.number > m ? b.number : m), Number.NEGATIVE_INFINITY)
 
     const safeCursor = await resolveForkCursor(this.#streamRollbackRecords(), canonicalBlocks)

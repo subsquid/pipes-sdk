@@ -121,8 +121,10 @@ sink makes the exposure loud rather than silent — startup warning + coded fork
 *(the no-hook recovery window is warned, not repaired: an accepted deviation, ADR-15)*.
 
 **RP-43 — Portal-contract guard.** [MUST] If the canonical chain's maximum block is
-below the persisted cursor, the sink MUST refuse (coded portal-contract violation)
-rather than leave orphan rows above the new chain.
+below the last block delivered to the sink, the pipe MUST refuse (coded portal-contract
+violation) before it dispatches the fork, rather than leave orphan rows above the new
+chain. A sink holds no rows above the last delivered block, and its persisted cursor is
+never above it, so one check in the pipe covers every sink, custom sinks included.
 
 **RP-44 — Compensation obligations (class C).** [MUST] A sink that repairs by publishing
 MUST, before publishing anything that could need repair, be able to name it afterwards:

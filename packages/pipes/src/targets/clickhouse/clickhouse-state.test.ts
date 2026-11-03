@@ -74,13 +74,6 @@ describe('ClickhouseState — options', () => {
 })
 
 describe('ClickhouseState — resume state & cursor persistence', () => {
-  it('refuses a canonical chain below the persisted cursor with E1004', async () => {
-    const { store } = makeStore(block(100))
-    const state = new ClickhouseState(store as any, {})
-
-    await expect(state.fork([block(49)])).rejects.toMatchObject({ code: 'E1004' })
-  })
-
   it('returns the persisted cursor and finalized head as TargetState', async () => {
     const { store } = makeStore(block(100))
     const state = new ClickhouseState(store as any, {})
@@ -155,7 +148,6 @@ describe('ClickhouseState — fork', () => {
       query: async (args: any) => {
         queries.push(args)
         return {
-          json: async () => [],
           stream: async function* () {
             yield rows.map((r) => ({ json: () => r }))
           },

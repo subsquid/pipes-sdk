@@ -1373,6 +1373,63 @@ describe('Portal stream block order', () => {
   )
 })
 
+describe('Portal stream canonical chain guard', () => {
+  function blocks(numbers: number[]): MockResponse {
+    return {
+      statusCode: 200,
+      data: numbers.map((number) => ({ header: { number, hash: `0x${number}`, timestamp: number * 1000 } })),
+      head: { finalized: { number: 0, hash: '0x0' } },
+    }
+  }
+
+  function fork(numbers: number[]): MockResponse {
+    return { statusCode: 409, data: { previousBlocks: numbers.map((number) => ({ number, hash: `0x${number}b` })) } }
+  }
+
+  function forkTarget(state?: TargetState) {
+    const resolveFork = vi.fn(async (): Promise<null> => {
+      throw new Error('resolveFork reached')
+    })
+    const target = createTarget({
+      write: async ({ read }) => {
+        for await (const _ of read(state)) {
+        }
+      },
+      resolveFork,
+    })
+
+    return { target, resolveFork }
+  }
+
+  function stream(url: string) {
+    return evmPortalStream({ id: 'test', portal: url, logger: 'silent', outputs: blockDecoder({ from: 1, to: 10 }) })
+  }
+
+  withPortal('refuses a chain below the delivered block with E1004', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3, 4]), fork([1, 2, 3])])
+    const { target, resolveFork } = forkTarget()
+
+    await expect(stream(portal.url).pipeTo(target)).rejects.toMatchObject({ code: 'E1004' })
+    expect(resolveFork).not.toHaveBeenCalled()
+  })
+
+  withPortal('refuses a chain below the resumed cursor with E1004', async ({ portal: serve }) => {
+    const portal = await serve([fork([1, 2, 3])])
+    const { target, resolveFork } = forkTarget({ latest: { number: 4, hash: '0x4' }, finalized: null })
+
+    await expect(stream(portal.url).pipeTo(target)).rejects.toMatchObject({ code: 'E1004' })
+    expect(resolveFork).not.toHaveBeenCalled()
+  })
+
+  withPortal('hands a chain that reaches the delivered block to the target', async ({ portal: serve }) => {
+    const portal = await serve([blocks([1, 2, 3, 4]), fork([1, 2, 3, 4])])
+    const { target, resolveFork } = forkTarget()
+
+    await expect(stream(portal.url).pipeTo(target)).rejects.toThrow('resolveFork reached')
+    expect(resolveFork).toHaveBeenCalledOnce()
+  })
+})
+
 describe('Portal stream fork below the finalized floor', () => {
   function blocks(numbers: number[], finalized: number): MockResponse {
     return {

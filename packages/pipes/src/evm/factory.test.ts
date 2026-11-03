@@ -360,7 +360,10 @@ describe('Factory', () => {
       {
         statusCode: 409,
         data: {
-          previousBlocks: [{ number: 1, hash: '0x1' }],
+          previousBlocks: [
+            { number: 1, hash: '0x1' },
+            { number: 2, hash: '0x2a' },
+          ],
         },
       },
       {
@@ -413,7 +416,7 @@ describe('Factory', () => {
             }
           }
         },
-        resolveFork: async (canonicalBlocks) => canonicalBlocks.at(-1) ?? null,
+        resolveFork: async () => ({ number: 1, hash: '0x1' }),
       }),
     )
 

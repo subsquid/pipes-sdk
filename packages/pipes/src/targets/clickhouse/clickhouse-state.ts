@@ -7,7 +7,6 @@ import {
   Profiler,
   RollbackRecord,
   TargetState,
-  assertCanonicalChainCoversCursor,
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
@@ -463,9 +462,6 @@ export class ClickhouseState {
   }
 
   async fork(canonicalBlocks: BlockCursor[]): Promise<BlockCursor | null> {
-    const persisted = await this.#readLatestRow(this.#key.value)
-    assertCanonicalChainCoversCursor(canonicalBlocks, persisted ? this.decodeCursor(persisted.current) : undefined)
-
     // Only the pipe's own rows participate: getCursor migrated any legacy-keyed rows to the
     // current key before the first read, so by fork time no other key can hold our chain.
     return resolveForkCursor(this.#records(this.#key.value), canonicalBlocks)

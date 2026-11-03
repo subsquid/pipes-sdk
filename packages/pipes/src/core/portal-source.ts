@@ -20,6 +20,7 @@ import {
   TargetForkNotSupportedError,
 } from './errors.js'
 import { FinalizedWatermark } from './finalized-watermark.js'
+import { assertCanonicalChainCoversCursor } from './fork.js'
 import { formatBlock, formatDuration } from './formatters.js'
 import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
@@ -694,9 +695,13 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     options: ReadOptions | undefined,
     forceFinalized: boolean,
   ): AsyncIterable<PortalBatch<T>> {
+    // The newest block handed to the target: it holds no rows above it.
+    let delivered = state?.latest ?? undefined
+
     while (true) {
       try {
         for await (const batch of this.read(state, options, forceFinalized)) {
+          delivered = batch.ctx.stream.state.current
           yield batch as PortalBatch<T>
           this.batchEnd(batch.ctx)
         }
@@ -705,7 +710,8 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       } catch (e) {
         if (!isForkException(e)) throw e
 
-        const ancestor = await this.rollbackFork(target, e.canonicalBlocks, forceFinalized)
+        const ancestor = await this.rollbackFork(target, e.canonicalBlocks, delivered, forceFinalized)
+        delivered = ancestor
 
         // The finalized floor persists in #watermark across read() calls, so re-seeding it with
         // the same state.finalized is a harmless monotonic no-op.
@@ -715,7 +721,12 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
   }
 
   /** Rolls the target, then the transformers, back to the common ancestor, and returns it. */
-  private async rollbackFork(target: Target<T>, canonicalBlocks: BlockCursor[], forceFinalized: boolean) {
+  private async rollbackFork(
+    target: Target<T>,
+    canonicalBlocks: BlockCursor[],
+    delivered: BlockCursor | undefined,
+    forceFinalized: boolean,
+  ) {
     // A fork on `/finalized-stream` contradicts the route's contract. Never dispatch it to
     // a target rollback handler: that could delete data already committed as finalized.
     if (this.#portal.finalized || forceFinalized) {
@@ -725,6 +736,9 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     if (!canonicalBlocks.length) {
       throw new MissingForkAncestorError()
     }
+
+    // RP-43: a chain that ends below `delivered` would leave the target's rows above it in place.
+    assertCanonicalChainCoversCursor(canonicalBlocks, delivered)
 
     if (!target.resolveFork) {
       throw new TargetForkNotSupportedError()
