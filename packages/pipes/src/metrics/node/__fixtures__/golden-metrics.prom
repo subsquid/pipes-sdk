@@ -1,0 +1,51 @@
+# HELP sqd_processed_block Highest block number processed so far
+# TYPE sqd_processed_block gauge
+sqd_processed_block{id="golden"} 2
+# HELP sqd_end_block End of the indexed range: the configured `to` bound, or the chain head when unbounded
+# TYPE sqd_end_block gauge
+sqd_end_block{id="golden"} 2
+# HELP sqd_progress_ratio Indexing progress as a ratio from 0 to 1
+# TYPE sqd_progress_ratio gauge
+sqd_progress_ratio{id="golden"} 1
+# HELP sqd_eta_seconds Estimated time to full sync in seconds
+# TYPE sqd_eta_seconds gauge
+sqd_eta_seconds{id="golden"} 0
+# HELP sqd_blocks_processed_total Total number of blocks processed
+# TYPE sqd_blocks_processed_total counter
+sqd_blocks_processed_total{id="golden"} 2
+# HELP sqd_bytes_downloaded_total Total bytes downloaded from portal
+# TYPE sqd_bytes_downloaded_total counter
+sqd_bytes_downloaded_total{id="golden"} 2
+# HELP sqd_forks_total Total number of chain forks detected
+# TYPE sqd_forks_total counter
+# HELP sqd_portal_requests_total Total number of requests to the portal
+# TYPE sqd_portal_requests_total counter
+sqd_portal_requests_total{id="golden",classification="success",status="200"} 1
+# HELP sqd_batch_size_blocks Number of blocks per batch
+# TYPE sqd_batch_size_blocks histogram
+sqd_batch_size_blocks_bucket{le="1",id="golden"} 0
+sqd_batch_size_blocks_bucket{le="5",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="10",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="50",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="100",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="500",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="1000",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="2000",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="3000",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="5000",id="golden"} 1
+sqd_batch_size_blocks_bucket{le="+Inf",id="golden"} 1
+sqd_batch_size_blocks_sum{id="golden"} 2
+sqd_batch_size_blocks_count{id="golden"} 1
+# HELP sqd_batch_size_bytes Size of each batch in bytes
+# TYPE sqd_batch_size_bytes histogram
+sqd_batch_size_bytes_bucket{le="1024",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="10240",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="102400",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="524288",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="1048576",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="5242880",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="10485760",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="11534336",id="golden"} 1
+sqd_batch_size_bytes_bucket{le="+Inf",id="golden"} 1
+sqd_batch_size_bytes_sum{id="golden"} 2
+sqd_batch_size_bytes_count{id="golden"} 1

@@ -1,0 +1,76 @@
+{
+  "payload": {
+    "transformation": {
+      "name": "batch",
+      "data": null,
+      "elapsed": 0,
+      "startOffset": 0,
+      "labels": [
+        "core"
+      ],
+      "children": [
+        {
+          "name": "fetch data",
+          "data": null,
+          "elapsed": 0,
+          "startOffset": 0,
+          "labels": [
+            "core"
+          ],
+          "children": []
+        },
+        {
+          "name": "apply transformers",
+          "data": null,
+          "elapsed": 0,
+          "startOffset": 0,
+          "labels": [
+            "core"
+          ],
+          "children": [
+            {
+              "name": "track progress",
+              "data": "[{\"header\":{\"number\":1,\"hash\":\"0x1\",\"timestamp\":1000}},{\"header\":{\"number\":2,\"hash\":\"0x2\",\"timestamp\":2000}}]",
+              "elapsed": 0,
+              "startOffset": 0,
+              "dataSize": 109,
+              "children": []
+            },
+            {
+              "name": "normalize data",
+              "data": "[{\"header\":{\"number\":1,\"hash\":\"0x1\",\"timestamp\":1000},\"logs\":[],\"transactions\":[],\"traces\":[],\"stateDiffs\":[]},{\"header\":{\"number\":2,\"hash\":\"0x2\",\"timestamp\":2000},\"logs\":[],\"transactions\":[],\"traces\":[],\"stateDiffs\":[]}]",
+              "elapsed": 0,
+              "startOffset": 0,
+              "dataSize": 221,
+              "children": []
+            },
+            {
+              "name": "anonymous",
+              "data": "[{\"number\":1,\"hash\":\"0x1\",\"timestamp\":1000},{\"number\":2,\"hash\":\"0x2\",\"timestamp\":2000}]",
+              "elapsed": 0,
+              "startOffset": 0,
+              "dataSize": 87,
+              "children": []
+            }
+          ]
+        },
+        {
+          "name": "metrics processing",
+          "data": null,
+          "elapsed": 0,
+          "startOffset": 0,
+          "labels": [
+            "core"
+          ],
+          "children": []
+        }
+      ]
+    },
+    "batch": {
+      "from": 1,
+      "to": 2,
+      "blocksCount": 2,
+      "bytesSize": 2
+    }
+  }
+}

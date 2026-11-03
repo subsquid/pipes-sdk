@@ -1,0 +1,52 @@
+{
+  "payload": {
+    "sdk": {
+      "version": "<sdk-version>"
+    },
+    "runtime": {
+      "name": "node",
+      "version": "<runtime-version>"
+    },
+    "usage": {
+      "memory": 0
+    },
+    "entrypoint": "<entrypoint>",
+    "pipes": [
+      {
+        "id": "golden",
+        "dataset": {
+          "dataset": "test",
+          "aliases": [],
+          "real_time": true,
+          "start_block": 0
+        },
+        "portal": {
+          "url": "http://portal.invalid/",
+          "query": {
+            "type": "evm",
+            "fields": {
+              "block": {
+                "hash": true,
+                "number": true,
+                "timestamp": true
+              }
+            },
+            "fromBlock": 1,
+            "toBlock": 2
+          }
+        },
+        "progress": {
+          "from": 1,
+          "current": 2,
+          "to": 2,
+          "percent": 100,
+          "etaSeconds": 0
+        },
+        "speed": {
+          "blocksPerSecond": 0,
+          "bytesPerSecond": 0
+        }
+      }
+    ]
+  }
+}
