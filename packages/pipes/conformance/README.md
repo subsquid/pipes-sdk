@@ -12,6 +12,7 @@ scenarios/    the chains the tests play (spec/11) and the ERC-20 pipe every scen
 kill/         spawns a pipe in a child process that kills itself with SIGKILL
 parquet/      class K: the Parquet sink
 postgres/     class T: the Postgres sink
+bigquery/     class W: the BigQuery sink, into a dataset of the test's own in a real project
 clickhouse/   class A: the ClickHouse sink, with and without the author's repair hook
 pubsub/       class C: the Pub/Sub sink, publishing to a stand-in bus in the test process
 ```
@@ -22,7 +23,7 @@ Each store folder holds the same files:
 |---|---|
 | `pipe.ts` | the ERC-20 pipe into this store |
 | `probe.ts` | reads the store back: state, rows, residue |
-| `kill-switch.ts` | stops the child at one step of this store's commit protocol: a file operation for Parquet, an SQL statement for Postgres, an HTTP request for ClickHouse, a statement on the state file or a publish call for Pub/Sub |
+| `kill-switch.ts` | stops the child at one step of this store's commit protocol: a file operation for Parquet, an SQL statement for Postgres, a Storage Write append or a query job for BigQuery, an HTTP request for ClickHouse, a statement on the state file or a publish call for Pub/Sub |
 | `killed-run.ts` | the child process: the pipe with the kill switch armed |
 | `harness.ts` | fixtures, and `runToEnd`, `runKilled`, `crashAt`, `resumeToEnd` |
 | `<scenario>.test.ts` | one uninterrupted run (CT-1) |
@@ -68,6 +69,8 @@ The Pub/Sub tests need no server: the bus runs in the test process. Each test ha
 
 The ClickHouse tests need a server too: `TEST_CLICKHOUSE_URL`, by default `http://localhost:10123`, with `TEST_CLICKHOUSE_USERNAME` and `TEST_CLICKHOUSE_PASSWORD` (both `default`). Each test makes a database of its own and drops it. Merges are stopped on its tables, and the pipe's client inserts with `optimize_on_insert` off, so a row the pipe stored twice reads twice, whether it came in two inserts or in one.
 
+The BigQuery tests need a real project the tests may write to: `BIGQUERY_TEST_PROJECT`. Without it the whole class-W suite skips. Each test makes a dataset of its own (`ctw_*`) and drops it, tables included. Authentication is the Google client's own (`GOOGLE_APPLICATION_CREDENTIALS` or the ADC of the host); nothing project-related is committed to the repo. A DML job a killed child created runs on whatever the child does, so the parent waits for every job the child journaled before it reads the store. One point restarts at once and re-reads the store once the killed run's jobs finish; a controlled test runs the restart's recovery alone and then executes the killed run's rollback DELETE after it — by then the range is empty, so it must take nothing.
+
 ## What a second implementation can reuse
 
-The mock portal speaks HTTP, the stand-in bus speaks the Pub/Sub Publisher protocol over gRPC (`bus.proto`), and the probes read the stores in the formats of spec/14, so `oracle/`, `scenarios/`, the bus and the probes do not depend on TypeScript. Three parts do: building the pipe (`pipe.ts`), the journal of batches and forks (an in-process hook), and the kill switches, which patch the file system, the `pg` client, the ClickHouse client's HTTP connection, and the SQLite statements and Pub/Sub client calls in the child process.
+The mock portal speaks HTTP, the stand-in bus speaks the Pub/Sub Publisher protocol over gRPC (`bus.proto`), and the probes read the stores in the formats of spec/14, so `oracle/`, `scenarios/`, the bus and the probes do not depend on TypeScript. Three parts do: building the pipe (`pipe.ts`), the journal of batches and forks (an in-process hook), and the kill switches, which patch the file system, the `pg` client, the BigQuery client's job creation and Storage Write appends, the ClickHouse client's HTTP connection, and the SQLite statements and Pub/Sub client calls in the child process.

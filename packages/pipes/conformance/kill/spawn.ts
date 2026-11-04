@@ -21,18 +21,21 @@ export async function killChild<Entry extends object>({
   point,
   options,
   diagnose,
+  timeoutMs,
 }: {
   script: string
   point: { name: string }
   options: Record<string, unknown>
   /** On a timeout, what the child's surroundings show while it still hangs: the store's view of it. */
   diagnose?: () => Promise<string>
+  /** How long the child may take to reach the point. A store behind a wide network needs more. */
+  timeoutMs?: number
 }): Promise<Entry[]> {
   const scratch = await mkdtemp(path.join(tmpdir(), 'sqd-ct2-journal-'))
   const journal = path.join(scratch, 'journal.ndjson')
 
   try {
-    const exit = await spawnRun(script, point.name, { ...options, point, journal }, diagnose)
+    const exit = await spawnRun(script, point.name, { ...options, point, journal }, diagnose, timeoutMs)
     const entries = await readJournal<Entry>(journal)
 
     requireKilled(point, exit, entries)
@@ -48,6 +51,7 @@ function spawnRun(
   pointName: string,
   options: Record<string, unknown>,
   diagnose?: () => Promise<string>,
+  timeoutMs = TIMEOUT_MS,
 ): Promise<Exit> {
   return new Promise((resolve, reject) => {
     // The child loads TypeScript itself; options meant for the test process are not its own.
@@ -69,8 +73,8 @@ function spawnRun(
     const timer = setTimeout(async () => {
       const diagnosis = diagnose === undefined ? '' : await diagnose().catch((error) => `no diagnosis: ${error}`)
       child.kill('SIGKILL')
-      reject(new Error(`the run passed ${TIMEOUT_MS} ms without reaching '${pointName}':\n${output}\n${diagnosis}`))
-    }, TIMEOUT_MS)
+      reject(new Error(`the run passed ${timeoutMs} ms without reaching '${pointName}':\n${output}\n${diagnosis}`))
+    }, timeoutMs)
 
     child.on('error', (error) => {
       clearTimeout(timer)
