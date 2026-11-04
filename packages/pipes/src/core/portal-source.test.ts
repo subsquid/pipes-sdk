@@ -1225,12 +1225,17 @@ describe('stall reporting', () => {
     release()
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.stringContaining('recovered: processing block 1 took'),
-        phase: 'processing block 1',
-      }),
-    )
+    // Carrying the pull from the target back to the source spans several event-loop turns
+    // under load, so wait for the recovery line instead of demanding it in this turn.
+    // The 50 ms polls advance fake time by at most ~1 s — far from the next stall report at 600 s.
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('recovered: processing block 1 took'),
+          phase: 'processing block 1',
+        }),
+      )
+    })
   })
 })
 
