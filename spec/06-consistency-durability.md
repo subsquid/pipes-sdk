@@ -148,9 +148,7 @@ rebuild (ADR-3).
 
 **CN-34 — Ancestor persistence.** [MUST] After any fork-capable class's fork completes,
 persisted state reads ⟨C = ancestor, F unchanged, RC trimmed⟩ — even if the process
-crashes immediately after (fork completion is itself a commit point). *(The
-transactional binding persists the ancestor's own commit, whose floor and chain
-predate the fork — GAP-43.)*
+crashes immediately after (fork completion is itself a commit point).
 
 ## Recovery contract
 

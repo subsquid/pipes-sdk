@@ -170,11 +170,10 @@ describe('BigQuerySyncState — cursor key binding', () => {
     expect(state.cursorKey).toBe('pinned')
   })
 
-  it('falls back to the default key when no source id is bound', () => {
+  it('refuses to bind without a source id or an explicit key', () => {
     const { state } = keyedState()
-    state.bindCursorKey(undefined)
 
-    expect(state.cursorKey).toBe('stream')
+    expect(() => state.bindCursorKey(undefined)).toThrow(expect.objectContaining({ code: 'E0001' }))
   })
 })
 

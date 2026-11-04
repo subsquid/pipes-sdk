@@ -66,8 +66,11 @@ const POINTS = {
   },
 } satisfies Record<string, StepKillPoint>
 
-/** The transaction of the batch that ends at 13, up to its cursor write: a number and an outbox row for each of its three rows. */
-const BATCH_13_WRITES = ['begin', ...Array.from({ length: 3 }, () => ['insert meta', 'insert outbox']).flat()]
+/** The transaction of the batch that ends at 13, up to its cursor write: an outbox row for each of its three rows. */
+const BATCH_13_WRITES = ['begin', ...Array.from({ length: 3 }, () => 'insert outbox')]
+
+/** The rest of that transaction: the cursor, then the sequence counter its rows advanced, stored once. */
+const BATCH_13_COMMIT = ['insert cursor', 'insert meta', 'commit']
 
 /** S1's first batch holds the rows numbered 1 to 3, its second 4 to 6; S1 has a number for each of its rows. */
 const FIRST = numbers(1, 3)
@@ -124,7 +127,7 @@ describe('Pub/Sub (class C) · S1 backfill · killed at each commit step (CT-2)'
 
     const { store, batches, killed } = await crashAt({ scenario, simulator, pubsub, model, point: POINTS.afterCommit })
 
-    expect(killed).toEqual({ step: 'commit', sent: [...BATCH_13_WRITES, 'insert cursor', 'commit'] })
+    expect(killed).toEqual({ step: 'commit', sent: [...BATCH_13_WRITES, ...BATCH_13_COMMIT] })
     expect(store.state?.current).toStrictEqual(batches[1].current)
     expect(seqsOf(store.outbox)).toEqual(SECOND)
     expect(seqsOf(store.wire)).toEqual(FIRST)
@@ -143,7 +146,7 @@ describe('Pub/Sub (class C) · S1 backfill · killed at each commit step (CT-2)'
 
     const { store, batches, killed } = await crashAt({ scenario, simulator, pubsub, model, point: POINTS.published })
 
-    expect(killed).toEqual({ step: PUBLISH, sent: [...BATCH_13_WRITES, 'insert cursor', 'commit', PUBLISH] })
+    expect(killed).toEqual({ step: PUBLISH, sent: [...BATCH_13_WRITES, ...BATCH_13_COMMIT, PUBLISH] })
     expect(store.state?.current).toStrictEqual(batches[1].current)
     expect(seqsOf(store.outbox)).toEqual(SECOND)
     expect(seqsOf(store.wire)).toEqual([...FIRST, ...SECOND])

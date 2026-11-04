@@ -183,6 +183,7 @@ export function drizzleTarget<T>({
       await db.transaction(async (tx) => {
         await onBeforeRollback?.({ tx, cursor })
         await tracker.fork(tx, cursor)
+        await state.saveForkCursor(tx, cursor)
         // Drop the now-dead sync rows above the safe cursor so the resume row stays the last write
         // and reprocessing can re-insert those block numbers without a primary-key collision.
         await state.removeForkedRows(tx, cursor)

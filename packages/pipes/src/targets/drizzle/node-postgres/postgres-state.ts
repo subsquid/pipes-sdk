@@ -25,14 +25,15 @@ type DeleteResult = {
 type SelectResult<T> = {
   rows: T[]
 }
-type StateSelect = SelectResult<{
+type StateRow = {
   rollback_chain: BlockCursor[]
   finalized: BlockCursor
   current_number: string
   current_hash: string
   current_timestamp: Date
   id: string
-}>
+}
+type StateSelect = SelectResult<StateRow>
 
 interface PgClient {
   query<T = any>(query: string, params?: any[]): Promise<T>
@@ -283,6 +284,59 @@ export class PostgresState {
     )
 
     return this.#readLatest()
+  }
+
+  /** Persist the fork commit point; each sync row holds only the chain fragment since the previous row. */
+  async saveForkCursor(tx: Transaction, cursor: BlockCursor): Promise<void> {
+    const table = sql.raw(this.#sync.fqnName)
+    const id = this.#key.value
+
+    // Rows below the last row under the cursor hold only blocks the new fragment never needs.
+    const { rows } = await tx.execute<StateRow>(sql`
+      SELECT * FROM ${table}
+      WHERE "id" = ${id} AND "current_number" >= COALESCE(
+        (SELECT MAX("current_number") FROM ${table} WHERE "id" = ${id} AND "current_number" < ${cursor.number}),
+        0
+      )
+      ORDER BY "current_number" DESC
+    `)
+    const latest = rows[0]
+    if (!latest) {
+      throw new Error(`Cannot persist fork ancestor ${cursor.number} without a current cursor row`)
+    }
+
+    const finalized = normalizeFinalized(latest.finalized)
+    const previous = rows.find((row) => Number(row.current_number) < cursor.number)
+    const fragmentStart = Math.max(finalized?.number ?? -1, Number(previous?.current_number ?? -1))
+
+    const byBlock = new Map<number, BlockCursor>()
+    for (const row of rows) {
+      for (const block of row.rollback_chain || []) {
+        byBlock.set(block.number, block)
+      }
+    }
+    const rollbackChain = [...byBlock.values()]
+      .filter((block) => block.number <= cursor.number && block.number > fragmentStart)
+      .sort((a, b) => a.number - b.number)
+
+    await tx.execute(sql`
+      INSERT INTO ${sql.raw(this.#sync.fqnName)} (
+        id, current_number, current_hash, "current_timestamp", finalized, rollback_chain
+      )
+      VALUES (
+        ${this.#key.value},
+        ${cursor.number},
+        ${cursor.hash},
+        ${cursor.timestamp ? new Date(cursor.timestamp * 1000) : sql.raw('NULL')},
+        ${JSON.stringify(finalized || {})},
+        ${JSON.stringify(rollbackChain)}
+      )
+      ON CONFLICT (id, current_number) DO UPDATE SET
+        current_hash = EXCLUDED.current_hash,
+        "current_timestamp" = EXCLUDED."current_timestamp",
+        finalized = EXCLUDED.finalized,
+        rollback_chain = EXCLUDED.rollback_chain
+    `)
   }
 
   /**

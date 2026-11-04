@@ -219,6 +219,47 @@ describe('SqlitePubsubState', () => {
     expect(await state.getMeta('sequence')).toBe(String(Number.MAX_SAFE_INTEGER))
   })
 
+  withStateFile('keeps no sequence numbers from a commit that rolled back', async ({ openState }) => {
+    const driver = new FaultyDriver()
+    const { state } = await openState({ driver: driver.load })
+
+    const commitRows = (blockNumber: number, ...ids: string[]) =>
+      commit(state, {
+        operations: ids.map((id) => operation({ id, blockNumber })),
+        ledger: [],
+        cursor: block(blockNumber),
+        finalized: null,
+      })
+
+    await commitRows(100, 'row-1')
+
+    // The fault kills the manifest insert of row-3, the second row of the batch. Row-2 has
+    // already taken seq 2 by then, so the rollback has a handed-out number to discard.
+    let manifestInserts = 0
+    const failTheSecondManifestInsert = (sql: string): Fault | undefined => {
+      if (!sql.startsWith('INSERT INTO manifest')) return undefined
+
+      manifestInserts++
+      if (manifestInserts !== 2) return undefined
+
+      return { error: new Error('constraint failed'), selfRollback: false }
+    }
+    driver.faultOn = failTheSecondManifestInsert
+
+    await expect(commitRows(101, 'row-2', 'row-3')).rejects.toThrow()
+    expect(await state.getMeta('sequence')).toBe('1')
+
+    driver.faultOn = undefined
+    await commitRows(101, 'row-2')
+
+    // Row-2 takes 2 again: a leaked staged counter would hand out 4 and leave the sequence at 3.
+    expect((await state.pending()).map((row) => [row.id, row.seq])).toEqual([
+      ['row-1', 1],
+      ['row-2', 2],
+    ])
+    expect(await state.getMeta('sequence')).toBe('2')
+  })
+
   withStateFile('keeps one id source for every materialized route', async ({ openState }) => {
     const { state } = await openState()
 

@@ -45,10 +45,12 @@ are stable. Codes are grouped by where they originate:
 
 ### E0001 · Pipe requires a unique id
 
-A pipe was created with an empty or blank `id`. Targets persist their resume cursor under the pipe's
-`id`, so a missing id would let two pipes silently overwrite each other's progress.
+A pipe was created with an empty or blank `id`, or a target was driven directly without either a
+source id or an explicit cursor id. Targets persist their resume cursor under that key, so a missing
+key would let two pipes silently overwrite each other's progress.
 
-**Fix** — set a stable, globally unique, non-empty `id`:
+**Fix** — set a stable, globally unique, non-empty source `id`, or configure the target's explicit
+cursor id when driving it directly:
 
 ```ts
 evmPortalStream({ id: 'eth-transfers', portal: '...', outputs })

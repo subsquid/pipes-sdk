@@ -311,7 +311,8 @@ is a pre-serialized JSON **string**; `dataSize` is its length.
 **IB-46 — Sentinels.** `sqd_processed_block = −1` means "no batch processed yet";
 consumers MUST NOT read it as a block number.
 
-*(This whole surface currently lacks golden fixtures and version markers — GAP-16.)*
+Golden scrapes pin `/stats`, the IB-42 Prometheus families and `/preview/transformation`
+against one scripted run; timings and process-local values are normalized.
 
 ## Error registry
 
@@ -335,8 +336,8 @@ are retryable in addition to IB-7's statuses; the body-stall timeout is currentl
 authors.
 
 **IB-52 — Registry sync.** The set of codes an implementation can emit MUST equal this
-registry; CI SHOULD enforce it *(the reference check syncs source with `docs/errors.md`,
-not with this table — GAP-13)*.
+registry; CI enforces the source ↔ `docs/errors.md` ↔ IB-50 sync on specification,
+error-source and error-document changes.
 
 ## Input-side binding (simulator obligations)
 
