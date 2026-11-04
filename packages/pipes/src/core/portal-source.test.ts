@@ -1373,6 +1373,59 @@ describe('Portal stream block order', () => {
   )
 })
 
+describe('Portal stream restart with a fork below the request start', () => {
+  for (const from of [1, 5]) {
+    withPortal(`replays the replacement block after restart with request start ${from}`, async ({ portal: serve }) => {
+      const block = (number: number, suffix = '') => ({ number, hash: `0x${number}${suffix}` })
+      const resume = { latest: block(4, 'a'), finalized: block(2) }
+      const records: RollbackRecord[] = [{ rollbackChain: [block(3), resume.latest], finalized: resume.finalized }]
+      const portal = await serve({
+        blocks: [1, 2, 3, 4, 5, 6].map((number) => ({
+          header: { ...block(number, number >= 4 ? 'b' : ''), timestamp: number * 1000 },
+        })),
+        finalized: 2,
+        latest: 6,
+        blocksPerResponse: 1,
+      })
+      const seen: { number: number; hash: string }[] = []
+      let committedCursor = resume.latest
+      const resolveFork = vi.fn((canonical: Parameters<typeof resolveForkCursor>[1]) =>
+        resolveForkCursor(records, canonical),
+      )
+
+      // Start from durable state left by a terminated run. The reason it stopped is irrelevant:
+      // block 4 is now orphaned, and recovery must replay its canonical replacement.
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger: 'silent',
+        outputs: blockDecoder({ from, to: 6 }),
+      }).pipeTo(
+        createTarget({
+          write: async ({ read }) => {
+            for await (const { data, ctx } of read(resume)) {
+              seen.push(...data.map(({ number, hash }) => ({ number, hash })))
+              committedCursor = ctx.stream.state.current
+            }
+          },
+          resolveFork,
+        }),
+      )
+
+      await expect(run).resolves.toBeUndefined()
+      expect(portal.requests[0]).toMatchObject({
+        status: 409,
+        query: { fromBlock: 5, parentBlockHash: resume.latest.hash },
+      })
+      expect(resolveFork).toHaveBeenCalledOnce()
+      expect(await resolveFork.mock.results[0]!.value).toEqual(block(3))
+      expect(committedCursor).toMatchObject(block(6, 'b'))
+      expect(seen).toEqual([block(4, 'b'), block(5, 'b'), block(6, 'b')])
+      expect(portal.requests[1]?.query).toMatchObject({ fromBlock: 4, parentBlockHash: block(3).hash })
+    })
+  }
+})
+
 describe('Portal stream fork below the finalized floor', () => {
   function blocks(numbers: number[], finalized: number): MockResponse {
     return {
