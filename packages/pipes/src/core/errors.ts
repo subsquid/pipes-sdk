@@ -120,17 +120,6 @@ export class ForkCursorMissingError extends PipeError {
 }
 
 /**
- * E1004: Thrown when the portal breaks its fork contract — it delivered a canonicalBlocks set whose
- * highest block is below the target's persisted cursor. Rows above it would survive the fork
- * rollback and corrupt the new chain, so the pipe refuses to proceed rather than write bad data.
- */
-export class PortalContractViolationError extends PipeError {
-  constructor(message: string | string[]) {
-    super('E1004', SdkErrorName.ForkHandling, message)
-  }
-}
-
-/**
  * E1005: Thrown when a fork is reported on `/finalized-stream`. Every block that stream delivers is
  * final, so a 409 there means the portal contradicted its own finality. The pipe stops without
  * rolling anything back — a finalized-only target has no rollback path by design.

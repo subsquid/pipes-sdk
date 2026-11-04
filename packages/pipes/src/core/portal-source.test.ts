@@ -1415,3 +1415,122 @@ describe('Portal stream fork below the finalized floor', () => {
     await expect(run).rejects.toMatchObject({ code: 'E1003', name: 'ForkHandling' })
   })
 })
+
+describe('Portal stream fork with a partial canonical window', () => {
+  function blocks(numbers: number[]): MockResponse {
+    return {
+      statusCode: 200,
+      data: numbers.map((number) => ({ header: { number, hash: `0x${number}`, timestamp: number * 1000 } })),
+      head: { finalized: { number: 0, hash: '0x0' } },
+    }
+  }
+
+  function forkedBlocks(numbers: number[], suffix: string): MockResponse {
+    return {
+      statusCode: 200,
+      data: numbers.map((number) => ({ header: { number, hash: `0x${number}${suffix}`, timestamp: number * 1000 } })),
+      head: { finalized: { number: 0, hash: '0x0' } },
+    }
+  }
+
+  withPortal(
+    'rolls the target back and continues when the window ends below the delivered block',
+    async ({ portal: serve }) => {
+      // Block 4 was delivered; the window ends at the forked block 3, one below it.
+      const portal = await serve([
+        blocks([1, 2, 3, 4]),
+        {
+          statusCode: 409,
+          data: {
+            previousBlocks: [
+              { number: 1, hash: '0x1' },
+              { number: 2, hash: '0x2' },
+              { number: 3, hash: '0x3b' },
+            ],
+          },
+        },
+        forkedBlocks([3, 4, 5, 6], 'b'),
+      ])
+
+      const records: RollbackRecord[] = []
+      const seen: number[][] = []
+      const resolveFork = vi.fn((canonical: Parameters<typeof resolveForkCursor>[1]) =>
+        resolveForkCursor(records, canonical),
+      )
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger: 'silent',
+        outputs: blockDecoder({ from: 1, to: 6 }),
+      }).pipeTo(
+        createTarget({
+          write: async ({ read }) => {
+            for await (const { data, ctx } of read()) {
+              if (data.length > 0) seen.push(data.map((block: { number: number }) => block.number))
+              // Newest first, as a store reads its records back.
+              records.unshift({ rollbackChain: ctx.stream.state.rollbackChain, finalized: ctx.stream.head.finalized })
+            }
+          },
+          resolveFork,
+        }),
+      )
+
+      await expect(run).resolves.toBeUndefined()
+      expect(resolveFork).toHaveBeenCalledOnce()
+      expect(seen).toEqual([
+        [1, 2, 3, 4],
+        [3, 4, 5, 6],
+      ])
+    },
+  )
+
+  withPortal(
+    'rolls a resumed target back when the window ends below the persisted cursor',
+    async ({ portal: serve }) => {
+      // No batch is delivered in this run: the cursor resumes at block 4, the window ends at 3.
+      const portal = await serve([
+        {
+          statusCode: 409,
+          data: {
+            previousBlocks: [
+              { number: 1, hash: '0x1' },
+              { number: 2, hash: '0x2' },
+              { number: 3, hash: '0x3b' },
+            ],
+          },
+        },
+        forkedBlocks([3, 4, 5, 6], 'b'),
+      ])
+
+      // Loaded from the store on resume, newest first.
+      const chain = (top: number) =>
+        Array.from({ length: top }, (_, i) => ({ number: i + 1, hash: `0x${i + 1}` })).reverse()
+      const records: RollbackRecord[] = [{ rollbackChain: chain(4), finalized: undefined }]
+      const seen: number[][] = []
+      const resolveFork = vi.fn((canonical: Parameters<typeof resolveForkCursor>[1]) =>
+        resolveForkCursor(records, canonical),
+      )
+
+      const run = evmPortalStream({
+        id: 'test',
+        portal: portal.url,
+        logger: 'silent',
+        outputs: blockDecoder({ from: 1, to: 6 }),
+      }).pipeTo(
+        createTarget({
+          write: async ({ read }) => {
+            for await (const { data } of read({ latest: { number: 4, hash: '0x4' }, finalized: null })) {
+              if (data.length > 0) seen.push(data.map((block: { number: number }) => block.number))
+            }
+          },
+          resolveFork,
+        }),
+      )
+
+      await expect(run).resolves.toBeUndefined()
+      expect(resolveFork).toHaveBeenCalledOnce()
+      expect(seen).toEqual([[3, 4, 5, 6]])
+    },
+  )
+})

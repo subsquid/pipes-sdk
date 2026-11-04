@@ -50,7 +50,6 @@ export const ORACLE_ERRORS = {
   NOT_FINALIZED: 'ORACLE_NOT_FINALIZED',
   FORK_ON_FINALIZED_ROUTE: 'ORACLE_FORK_ON_FINALIZED_ROUTE',
   EMPTY_CANONICAL: 'ORACLE_EMPTY_CANONICAL',
-  CANONICAL_BELOW_CURSOR: 'ORACLE_CANONICAL_BELOW_CURSOR',
   NO_ANCESTOR: 'ORACLE_NO_ANCESTOR',
   FINALITY_CONFLICT: 'ORACLE_FINALITY_CONFLICT',
   INVARIANT: 'ORACLE_INVARIANT',
@@ -250,14 +249,8 @@ export class ReferenceModel {
       )
     }
 
-    const top = Math.max(...canonical.map((block) => block.number))
-    if (this.#current && top < this.#current.number) {
-      throw new OracleError(
-        ORACLE_ERRORS.CANONICAL_BELOW_CURSOR,
-        `RP-43: the canonical chain ends at ${top}, below the cursor ${this.#current.number}`,
-      )
-    }
-
+    // RP-43: the model tolerates a partial canonical window; the WP-42 search picks the
+    // resume cursor, including its restart below an exhausted window.
     const { ancestor, reachedFloor } = searchAncestor(this.#records, canonical, this.#finalized)
     if (!ancestor && reachedFloor) {
       throw new OracleError(

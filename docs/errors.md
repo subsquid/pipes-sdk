@@ -172,7 +172,7 @@ Raised while unwinding a chain reorganization (fork), or when the portal sends d
 use. Targets that read the hot stream — ClickHouse, Postgres, BigQuery — handle forks themselves, so
 E1001 and E1003 mostly surface in **custom** targets. The finalized-only targets (Parquet, memory) read
 `/finalized-stream`, where a fork cannot occur; they raise E1005 instead if one is reported anyway.
-E1006–E1008 guard the blocks of every stream, forks or not. E1002 and E1004–E1007 mean the portal broke
+E1006–E1008 guard the blocks of every stream, forks or not. E1002 and E1005–E1007 mean the portal broke
 its contract: report them against the portal.
 
 ### E1001 · Target does not support fork handling
@@ -203,15 +203,6 @@ finalized block. Finalized data is never rolled back, so the pipe stops instead.
 target, the fork is deeper than the target's retained history or reaches finalized blocks:
 [report it](https://github.com/subsquid-labs/pipes-sdk/issues), then index again from a block below
 the fork.
-
-### E1004 · Portal contract violation
-
-The portal delivered a `canonicalBlocks` set whose highest block is below the target's persisted
-cursor. Rows above it would survive the fork rollback and corrupt the new chain, so the pipe refuses
-to proceed. Any target that tracks a cursor can raise this.
-
-**Fix** — none in user code; please
-[report it as a bug](https://github.com/subsquid-labs/pipes-sdk/issues) against the portal contract.
 
 ### E1005 · Fork reported on the finalized stream
 

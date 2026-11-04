@@ -189,17 +189,29 @@ describe('BigQuerySyncState — fork records', () => {
   // Newest first: the match, block 5, comes before the record that holds the highest floor.
   const rows = [syncRow([block(5), block(7)], block(4), 2), syncRow([], block(6), 1)]
 
+  // A floor low enough that a match at block 5 stays above it.
+  const lowFloorRows = [syncRow([block(5), block(7)], block(4), 2), syncRow([], block(4), 1)]
+
   /** Answers like BigQuery: newest first, below the cutoff, at most `limit` rows. */
-  function pagedState(maxRows?: number) {
+  function pagedState({
+    maxRows,
+    records = rows,
+    commitSyncRow = async () => {},
+  }: {
+    maxRows?: number
+    records?: ReturnType<typeof syncRow>[]
+    commitSyncRow?: (schema: unknown, row: Record<string, unknown>) => Promise<void>
+  } = {}) {
     const queries: Record<string, unknown>[] = []
     const store = {
       query: async (_sql: string, params: Record<string, unknown>) => {
         queries.push(params)
         const cutoff = params['cutoff'] as number | undefined
-        const page = rows.filter((row) => cutoff === undefined || row.timestamp < cutoff)
+        const page = records.filter((row) => cutoff === undefined || row.timestamp < cutoff)
 
         return page.slice(0, params['limit'] as number)
       },
+      commitSyncRow,
     }
 
     const state = new BigQuerySyncState({
@@ -213,7 +225,7 @@ describe('BigQuerySyncState — fork records', () => {
   }
 
   it('reads the floor from a later page before it resolves the fork', async () => {
-    const { state, queries } = pagedState(1)
+    const { state, queries } = pagedState({ maxRows: 1 })
 
     const { safeCursor } = await state.fork([block(5), block(6, '0x6b'), block(7, '0x7b')])
 
@@ -228,5 +240,80 @@ describe('BigQuerySyncState — fork records', () => {
 
     expect(safeCursor).toBeNull()
     expect(queries).toHaveLength(1)
+  })
+
+  it('bounds the delete by the retained top when the canonical set ends below it', async () => {
+    const { state } = pagedState({ records: lowFloorRows })
+
+    // The window ends at 6, the records hold block 7: rows in (6, 7] must still go.
+    const { safeCursor, upper } = await state.fork([block(5), block(6, '0x6b')])
+
+    expect(safeCursor).toEqual(block(5))
+    expect(upper).toBe(7)
+  })
+
+  it('counts the committed cursor in the delete bound', async () => {
+    const { state } = pagedState({ records: lowFloorRows })
+
+    await state.saveCommitPost({
+      logger: testLogger(),
+      cursor: block(9),
+      finalized: block(4),
+      rollbackChain: [block(9)],
+    })
+
+    const { upper } = await state.fork([block(5), block(6, '0x6b')])
+
+    expect(upper).toBe(9)
+  })
+
+  it('rides the own top through the rollback WAL, so recovery re-deletes to it after a crash', async () => {
+    const walRows: Record<string, unknown>[] = []
+    const live = pagedState({
+      records: lowFloorRows,
+      commitSyncRow: async (_schema: unknown, row: Record<string, unknown>) => {
+        walRows.push(row)
+      },
+    })
+
+    await live.state.saveCommitPost({
+      logger: testLogger(),
+      cursor: block(9),
+      finalized: block(4),
+      rollbackChain: [block(9)],
+    })
+
+    // A crash between the rollback WAL row and the per-table DELETEs leaves the row in flight.
+    const { safeCursor, upper } = await live.state.fork([block(5), block(6, '0x6b')])
+    await live.state.saveRollbackPre({
+      cursor: safeCursor!,
+      finalized: undefined,
+      rollbackChain: [],
+      range: { low: safeCursor!.number + 1, high: upper },
+    })
+
+    const inFlight = walRows.at(-1)
+    expect(inFlight).toMatchObject({ op: 'rollback', committed: false, range_low: 6, range_high: 9 })
+
+    // The restart sees the unfinished rollback and must delete every row up to the own top, 9.
+    const deletes: Record<string, unknown>[] = []
+    const restarted = new BigQuerySyncState({
+      store: {
+        query: async () => [inFlight],
+        commitSyncRow: async () => {},
+        executeDml: async (_sql: string, params: Record<string, unknown>) => {
+          deletes.push(params)
+          return { rowCount: 0 }
+        },
+      } as any,
+      bigquery: {} as any,
+      trackedTables: [{ fqn: 'p.d.events', blockNumberColumn: 'block_number' }] as any,
+      options: { projectId: 'p', dataset: 'd' },
+    })
+
+    const resume = await restarted.getCursor({ logger: testLogger() })
+
+    expect(deletes).toEqual([{ low: 6, high: 9 }])
+    expect(resume).toEqual({ latest: block(5), finalized: null })
   })
 })

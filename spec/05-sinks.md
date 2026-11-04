@@ -120,10 +120,11 @@ binding cannot supply it itself (schema-blind by design), so where it is omitted
 sink makes the exposure loud rather than silent — startup warning + coded fork refusal
 *(the no-hook recovery window is warned, not repaired: an accepted deviation, ADR-15)*.
 
-**RP-43 — Portal-contract guard.** [MUST] If the canonical chain's maximum block is
-below the persisted cursor, the sink MUST refuse (coded portal-contract violation)
-rather than leave orphan rows above the new chain. *(Enforced by one binding today;
-intent is all — GAP-9.)*
+**RP-43 — Rollback completeness.** [MUST] A sink that rolls back MUST remove or compensate
+every row above the cursor it resumes from, by the mechanism of its class; the bound reaches
+the sink's own top, never only the canonical chain's. The SDK MUST tolerate a partial
+canonical window — one that ends below the cursor — and select the resume cursor per WP-42
+instead of refusing.
 
 **RP-44 — Compensation obligations (class C).** [MUST] A sink that repairs by publishing
 MUST, before publishing anything that could need repair, be able to name it afterwards:

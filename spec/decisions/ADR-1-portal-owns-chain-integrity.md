@@ -29,5 +29,5 @@ stays legal, since the portal skips blocks with no matching data.
 
 Simpler, chain-agnostic core; single source of chain truth. The portal is fully trusted
 (trust model in 01); portal contract violations must be *detected as inconsistencies*
-and halt (WP-41, RP-43, FM-14…FM-16) rather than be repaired. Shapes NG1, NG5, WP-10,
+and halt (WP-41, FM-14, FM-16) rather than be repaired. Shapes NG1, NG5, WP-10,
 WP-15, WP-40, IB-3, IB-4.
