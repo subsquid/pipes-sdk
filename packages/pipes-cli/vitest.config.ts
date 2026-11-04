@@ -5,8 +5,9 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     watch: false,
-    maxWorkers: 4,
-    fileParallelism: true,
+    // vitest 3 ran this suite in a single non-isolated fork (`singleFork`); vitest 4 spells it:
+    maxWorkers: 1,
+    isolate: false,
     testTimeout: 30_000,
     teardownTimeout: 1_000,
     slowTestThreshold: 10_000,
@@ -21,12 +22,6 @@ export default defineConfig({
       exclude: ['src/tests'],
     },
     pool: 'forks',
-    poolOptions: {
-      forks: {
-        isolate: false,
-        singleFork: true,
-      },
-    },
   },
   resolve: {
     alias: {
