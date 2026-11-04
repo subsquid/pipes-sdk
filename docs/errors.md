@@ -60,10 +60,19 @@ evmPortalStream({ id: 'eth-transfers', portal: '...', outputs })
 
 A `range` (on the stream or a decoder) is misconfigured — an inverted range (`from` after `to`), a
 bound that is not a block number (a word, a fraction, a negative number, `NaN`), an invalid date or
-`Date` object, or a date after the newest block of the dataset. The message names the exact problem.
+`Date` object, or a date after the newest block of the dataset. A resumed pipe also fails if its
+earliest configured request starts above the block following its saved cursor, including after a
+fork rolls that cursor back. Continuing would skip blocks and lose the parent-hash anchor. The
+message names the exact problem.
 
 **Fix** — ensure `from ≤ to` and use a resolvable bound: `'latest'`, a block number (`'12,000,000'`),
 an ISO date (`'2024-01-01'`), or a `Date`.
+
+For a resumed pipe, keep the request start at or below every block a fork may replay. Do not derive
+it from the latest saved cursor: the SDK already clips requests to the resume position and adjusts
+that position after a rollback. Use a stable historical start or the supported `'latest'` bound,
+which is clipped to the resume position when ranges are resolved. The SDK stops rather than
+silently expand an explicit request range. Intentional gaps between configured ranges remain allowed.
 
 ### E0003 · Unusable instruction set
 
