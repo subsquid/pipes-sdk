@@ -12,6 +12,7 @@ import {
   type Violation,
   nextInRanges,
   nextOutsideRanges,
+  validateBigqueryWindow,
   validateClickhouseSnapshot,
   validateCoverage,
   validateDecodable,
@@ -519,6 +520,44 @@ describe('structural validators', () => {
       const violations = validatePostgresSnapshot(snapshotOf([], {}), [])
 
       expect(messagesOf(violations)).toEqual(['the snapshot reads no table'])
+    })
+  })
+
+  describe('validateBigqueryWindow', () => {
+    const snapshotOf = (
+      tables: Record<string, number[]>,
+      inFlight: { op: 'commit' | 'rollback'; range: { low: number; high: number } } | undefined,
+      current = 20,
+    ) => ({
+      sync: [],
+      inFlight: inFlight === undefined ? undefined : { ...inFlight, current: cursor(current) },
+      state: { current: cursor(current), rollbackChain: [] },
+      tables: Object.fromEntries(Object.entries(tables).map(([table, blocks]) => [table, { rows: rows(...blocks) }])),
+    })
+
+    it('passes the rows the in-flight row names, and none below the cursor', () => {
+      const inside = snapshotOf(
+        { transfers: [18, 20, 21, 27], approvals: [25] },
+        { op: 'commit', range: { low: 21, high: 27 } },
+      )
+
+      expect(validateBigqueryWindow(inside)).toEqual([])
+    })
+
+    it('reports a row above the cursor that lies outside the in-flight range', () => {
+      const stray = snapshotOf({ transfers: [21, 28] }, { op: 'rollback', range: { low: 21, high: 27 } })
+
+      expect(messagesOf(validateBigqueryWindow(stray))).toEqual([
+        'a row at 28 is above the cursor 20 and outside the in-flight rollback range [21, 27]',
+      ])
+    })
+
+    it('reports every row above the cursor when no write is in flight', () => {
+      const residue = snapshotOf({ transfers: [21] }, undefined)
+
+      expect(messagesOf(validateBigqueryWindow(residue))).toEqual([
+        'a row at 21 is above the cursor 20 with no write in flight',
+      ])
     })
   })
 

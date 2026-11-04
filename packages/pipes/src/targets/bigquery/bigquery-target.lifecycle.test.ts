@@ -1206,6 +1206,65 @@ describe('bigqueryTarget — fork lifecycle', () => {
     expect(events).toEqual(['before', 'after'])
   })
 
+  it("a fork keeps the last commit's floor in its rollback rows (INV-12)", async () => {
+    // getCursor seeds the source's monotonic watermark from the latest WAL row, so a rollback
+    // row with a null floor loses the floor across a crash between saveRollbackPost and the
+    // next saveCommitPost. The committed row holds the floor at 3; the fork must carry it.
+    bqSetup = makeBigQuery({
+      queryRows: [
+        {
+          id: 'stream',
+          op: 'commit',
+          current: JSON.stringify(cursor(10, '0x10')),
+          finalized: JSON.stringify(cursor(3, '0x3')),
+          rollback_chain: JSON.stringify([
+            cursor(5, '0x5'),
+            cursor(6, '0x6'),
+            cursor(7, '0x7'),
+            cursor(8, '0x8'),
+            cursor(9, '0x9'),
+            cursor(10, '0x10'),
+          ]),
+          range_low: null,
+          range_high: null,
+          committed: true,
+          timestamp: '2025-01-01T00:00:00Z',
+          timestamp_micros: 1_735_689_600_000_000,
+        },
+      ],
+    })
+
+    const syncRows: Record<string, unknown>[] = []
+    const target = bigqueryTarget<unknown>({
+      client: { bigquery: bqSetup.bq, writer: writerSetup.writer },
+      dataset: 'd',
+      tables: TABLES,
+      settings: {
+        protoWriterFactory: ({ protoDescriptor }) => ({
+          appendRows: ({ serializedRows }) => {
+            for (const row of decodeProtoRows(serializedRows, protoDescriptor)) {
+              if ('op' in row) syncRows.push(row)
+            }
+            return { getResult: async () => ({}) }
+          },
+          close: () => {},
+        }),
+      },
+      onData: () => {},
+    })
+
+    // The pipe's order: write() runs getCursor — which adopts the persisted floor — before
+    // any fork can arrive, so an empty read stands in for the batches before the fork.
+    await writeAll(target, async function* () {})
+    await target.resolveFork!([cursor(5, '0x5'), cursor(6, '0xB6'), cursor(7, '0xB7')])
+
+    const rollbacks = syncRows.filter((row) => row['op'] === 'rollback')
+    expect(rollbacks).toHaveLength(2)
+    for (const row of rollbacks) {
+      expect(row['finalized']).toBe(JSON.stringify(cursor(3, '0x3')))
+    }
+  })
+
   it('does not call onAfterRollback if state.fork returns null', async () => {
     const onAfterRollback = vi.fn()
     const target = bigqueryTarget<unknown>({

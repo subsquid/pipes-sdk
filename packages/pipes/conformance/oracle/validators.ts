@@ -673,6 +673,124 @@ export type ClickhouseSnapshot<Table extends string = string, Row extends Attrib
   tables: Record<Table, ClickhouseTableSnapshot<Row>>
 }
 
+/** One table of a class-W store, as one snapshot read it. */
+export type BigqueryTableSnapshot<Row extends Attributed = OracleRow> = {
+  rows: Row[]
+}
+
+/** The WAL row a class-W crash leaves in flight: the write or rollback a restart must finish. */
+export type InFlightRow = {
+  op: 'commit' | 'rollback'
+  /** The cursor a restart recovers to: the row's own `current`, not the last commit's. */
+  current: Cursor | undefined
+  /** The block range the in-flight write covers, or the in-flight rollback deletes. */
+  range: { low: number; high: number }
+}
+
+/**
+ * One read of a class-W store: the pipe's committed WAL rows, the state a restart recovers to, and
+ * every declared table. Every field is required, so no check can be skipped by leaving its input out.
+ */
+export type BigquerySnapshot<Table extends string = string, Row extends Attributed = OracleRow> = {
+  /** The pipe's committed WAL rows, oldest first: its commits, without the start cursor. */
+  sync: SyncRecord[]
+  /** The newest WAL row when it is in flight; `undefined` once its batch or rollback finished. */
+  inFlight: InFlightRow | undefined
+  /** ⟨C, F, RC⟩ a restart recovers to; `undefined` only with no WAL row at all. */
+  state: OracleState | undefined
+  /** Every declared table, by name, in declaration order. */
+  tables: Record<Table, BigqueryTableSnapshot<Row>>
+}
+
+/**
+ * Every structural validator a class-W store answers to, over one snapshot of it. Rows above the
+ * cursor are the class's crash window (CN-14): legitimate only inside the in-flight row's range,
+ * and at quiescence there are none, so the data bound reports them.
+ */
+export function validateBigquerySnapshot(snapshot: BigquerySnapshot, ranges: readonly BlockRange[]): Violation[] {
+  const { sync, inFlight, state, tables } = snapshot
+  const entries = Object.entries<BigqueryTableSnapshot>(tables)
+  const violations: Violation[] = []
+
+  // With no table read, every per-table check below would pass vacuously.
+  if (!entries.length) {
+    violations.push({ validator: 'decodable', property: 'IB-22', message: 'the snapshot reads no table' })
+  }
+
+  violations.push(...validateSyncRecords(sync))
+
+  const rows: Attributed[] = []
+
+  for (const [table, { rows: tableRows }] of entries) {
+    const found = [
+      ...validateAccountedFor(state, tableRows),
+      ...validateOrdered(tableRows),
+      ...validateInRange(tableRows, ranges),
+    ]
+
+    violations.push(...found.map((violation) => ({ ...violation, message: `${table}: ${violation.message}` })))
+    rows.push(...tableRows)
+  }
+
+  violations.push(...validateDataBound(state, rows), ...validateWindow(inFlight, state, rows))
+
+  return violations
+}
+
+/**
+ * INV-42 over a crashed class-W store: a row above the recovery cursor is residue of the write the
+ * in-flight WAL row names, so it must lie inside that row's range — and with no write in flight
+ * there is nothing the row can be residue of. `validateBigquerySnapshot` cannot ask this of a
+ * crashed store: its data bound reads every row above the cursor as committed data, so the crash
+ * harness checks the window apart, over the store as the crash left it.
+ */
+export function validateBigqueryWindow(snapshot: BigquerySnapshot<string, Attributed>): Violation[] {
+  const { inFlight, state, tables } = snapshot
+  const rows = Object.values<BigqueryTableSnapshot<Attributed>>(tables).flatMap(({ rows }) => rows)
+  const cursor = state?.current?.number ?? -1
+  const above = rows.filter((row) => row.block > cursor)
+
+  if (!above.length) {
+    return []
+  }
+
+  if (inFlight === undefined) {
+    return above.map((row) => ({
+      validator: 'no-residue',
+      property: 'INV-42',
+      message: `a row at ${row.block} is above the cursor ${cursor} with no write in flight`,
+    }))
+  }
+
+  return validateWindow(inFlight, state, rows)
+}
+
+/**
+ * INV-42, class W: a row above the recovery cursor is residue of the write the in-flight WAL row
+ * names, so it must lie inside that row's range — with no row in flight, above the cursor is residue
+ * of nothing, and the data bound has already reported it.
+ */
+function validateWindow(
+  inFlight: InFlightRow | undefined,
+  state: OracleState | undefined,
+  rows: Attributed[],
+): Violation[] {
+  const cursor = state?.current?.number ?? -1
+  const above = rows.filter((row) => row.block > cursor)
+
+  if (inFlight === undefined || !above.length) {
+    return []
+  }
+
+  const stray = above.filter((row) => row.block < inFlight.range.low || row.block > inFlight.range.high)
+
+  return stray.map((row) => ({
+    validator: 'no-residue',
+    property: 'INV-42',
+    message: `a row at ${row.block} is above the cursor ${cursor} and outside the in-flight ${inFlight.op} range [${inFlight.range.low}, ${inFlight.range.high}]`,
+  }))
+}
+
 /**
  * Every structural validator a class-A store answers to, over one snapshot of it. Rows above the
  * cursor are the class's crash window: at quiescence there are none, so the data bound reports them.

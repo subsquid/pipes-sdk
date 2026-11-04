@@ -116,6 +116,7 @@ export class BigQuerySyncState {
   #saves = 0
   #lastTimestamp = 0
   #lastCommittedCursor: BlockCursor | undefined
+  #lastCommittedFinalized: BlockCursor | undefined
 
   // The id every WAL row is keyed by: an explicit `options.id`, else the pipe's source id once
   // `bindCursorKey` runs, else the legacy default (e.g. when bind never runs in unit tests).
@@ -170,6 +171,15 @@ export class BigQuerySyncState {
    */
   get lastCommittedCursor(): BlockCursor | undefined {
     return this.#lastCommittedCursor
+  }
+
+  /**
+   * The finalized floor of the last committed WAL row. A fork carries it into its rollback rows:
+   * `getCursor` seeds the source watermark from the latest row, so a rollback row without it
+   * drops the floor across a mid-fork restart (INV-12 — the floor never goes down).
+   */
+  get lastCommittedFinalized(): BlockCursor | undefined {
+    return this.#lastCommittedFinalized
   }
 
   /**
@@ -238,6 +248,7 @@ export class BigQuerySyncState {
 
     if (row.committed) {
       this.#lastCommittedCursor = cursor
+      this.#lastCommittedFinalized = finalized ?? undefined
       return cursor ? { latest: cursor, finalized } : undefined
     }
 
@@ -280,6 +291,7 @@ export class BigQuerySyncState {
     })
 
     this.#lastCommittedCursor = cursor ?? undefined
+    this.#lastCommittedFinalized = finalized ?? undefined
     return cursor ? { latest: cursor, finalized } : undefined
   }
 
@@ -336,6 +348,7 @@ export class BigQuerySyncState {
       timestamp: this.#nextTimestamp(),
     })
     this.#lastCommittedCursor = cursor
+    this.#lastCommittedFinalized = finalized
     this.#saves++
     if (this.#shouldCleanup()) await this.cleanupOldRows(logger)
   }

@@ -265,9 +265,14 @@ export function bigqueryTarget<T>(options: {
       const { safeCursor, upper } = await state.fork(canonicalBlocks)
       if (!safeCursor) return null
 
+      // The rollback rows keep the floor of the last commit: getCursor seeds the source
+      // watermark from the latest WAL row, so a null floor here would drop it across a
+      // mid-fork restart (INV-12).
+      const finalized = state.lastCommittedFinalized
+
       await state.saveRollbackPre({
         cursor: safeCursor,
-        finalized: undefined,
+        finalized,
         rollbackChain: [],
         range: { low: safeCursor.number + 1, high: upper },
       })
@@ -278,7 +283,7 @@ export function bigqueryTarget<T>(options: {
       await tracker.fork(safeCursor.number, upper)
 
       // WAL post-rollback: marks the rollback complete; restart will not re-execute.
-      await state.saveRollbackPost({ cursor: safeCursor, finalized: undefined, rollbackChain: [] })
+      await state.saveRollbackPost({ cursor: safeCursor, finalized, rollbackChain: [] })
 
       await onAfterRollback?.({ cursor: safeCursor })
 
