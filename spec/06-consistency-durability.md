@@ -115,10 +115,10 @@ unfinalized block and never mixing finalized blocks into one (`perBlockUnfinaliz
 The source makes this split after it clamps the finalized head (DEF-6), so batches from
 the cache and from the portal split against the same `F`.
 
-**CN-31 — W.** Fork is a ranged delete `(ancestor, max(canonical)]` on every tracked
-table, bracketed by intent/commit WAL records; both bounds mandatory (bounded work,
-partition pruning). Guarded by RP-43. (The delete range may exceed `C`; rows exist only
-`≤ C` (INV-42), so the deleted data set equals INV-14's `(ancestor, C]`.)
+**CN-31 — W.** Fork is a ranged delete `(ancestor, T]` on every tracked table, where `T` is
+the sink's own top (RP-43) — rows exist only `≤ C` (INV-42), so the deleted data set equals
+INV-14's `(ancestor, C]` — bracketed by intent/commit WAL records; both bounds mandatory
+(bounded work, partition pruning). A canonical window that ends below the data cannot leave orphans.
 
 **CN-32 — K.** Class K has no normal fork transition: RP-7 binds it to finalized-only
 delivery, whose route emits no fork. It exposes no rollback capability and published

@@ -5,7 +5,6 @@ import {
   CursorKey,
   LEGACY_DEFAULT_CURSOR_ID,
   type Logger,
-  PortalContractViolationError,
   type RollbackRecord,
   type TargetState,
   formatBlock,
@@ -102,8 +101,8 @@ export type BigQueryStateOptions = {
  *     across tables, since BQ DML is exact (unlike ClickHouse CollapsingMergeTree).
  *
  *   - `fork` — pages sync rows newest-first from BigQuery to find the common ancestor with
- *     `canonicalBlocks`. Asserts the portal invariant `upper >= cursor.number` to refuse
- *     silently dropping orphan rows above a truncated `canonicalBlocks`.
+ *     `canonicalBlocks`, and bounds the fork DELETE by the target's own top, which a
+ *     truncated `canonicalBlocks` cannot undercut.
  *
  *   - `cleanupOldRows` — periodic maintenance to keep the sync table small, gated on save
  *     count to avoid running every batch.
@@ -391,25 +390,20 @@ export class BigQuerySyncState {
    * Pages committed sync rows newest-first from BigQuery (`ORDER BY timestamp DESC`) and
    * walks them through `resolveForkCursor` to find the common ancestor with `canonicalBlocks`.
    *
-   * Asserts the portal invariant `upper >= currentCursor.number`. If violated — the portal
-   * sent a canonicalBlocks set whose highest block is below our persisted cursor — we throw
-   * rather than silently DELETE only part of the divergence range and leave orphan rows above
-   * `upper` to corrupt the new chain.
+   * `upper` bounds the fork DELETE and the rollback WAL range, so it must reach the target's
+   * own top: the SDK tolerates a partial canonical window (RP-43), and a set that ends below
+   * the data must not leave orphan rows above it.
    */
   async fork(canonicalBlocks: BlockCursor[]): Promise<{ safeCursor: BlockCursor | null; upper: number }> {
-    const upper = canonicalBlocks.reduce((m, b) => (b.number > m ? b.number : m), Number.NEGATIVE_INFINITY)
-    if (this.#lastCommittedCursor && upper < this.#lastCommittedCursor.number) {
-      throw new PortalContractViolationError(
-        `Portal invariant violated: max(canonicalBlocks).number=${upper} is below the persisted cursor ` +
-          `(${this.#lastCommittedCursor.number}). The portal must include every block above the safe ` +
-          `cursor in canonicalBlocks, otherwise rows in (${upper}, ${this.#lastCommittedCursor.number}] ` +
-          `would survive the fork DELETE and corrupt the new chain. Refusing to proceed — file a bug ` +
-          `against the portal contract.`,
-      )
-    }
+    const canonicalTop = canonicalBlocks.reduce((m, b) => (b.number > m ? b.number : m), Number.NEGATIVE_INFINITY)
 
-    const safeCursor = await resolveForkCursor(this.#streamRollbackRecords(), canonicalBlocks)
-    return { safeCursor, upper }
+    let ownTop = this.#lastCommittedCursor?.number ?? Number.NEGATIVE_INFINITY
+    const records = this.#tapRollbackRecords(this.#streamRollbackRecords(), (record) => {
+      for (const block of record.rollbackChain) ownTop = Math.max(ownTop, block.number)
+    })
+
+    const safeCursor = await resolveForkCursor(records, canonicalBlocks)
+    return { safeCursor, upper: Math.max(canonicalTop, ownTop) }
   }
 
   /**
@@ -443,6 +437,17 @@ export class BigQuerySyncState {
 
   async #writeRow(row: SyncRow) {
     await this.#store.commitSyncRow(SYNC_WRITE_SCHEMA, row as unknown as Record<string, unknown>)
+  }
+
+  /** Passes the record stream through, visiting every record before the walk consumes it. */
+  async *#tapRollbackRecords(
+    records: AsyncIterable<RollbackRecord>,
+    tap: (record: RollbackRecord) => void,
+  ): AsyncIterable<RollbackRecord> {
+    for await (const record of records) {
+      tap(record)
+      yield record
+    }
   }
 
   /**

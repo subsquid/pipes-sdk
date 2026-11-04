@@ -88,6 +88,34 @@ describe('resolveForkCursor', () => {
 
       expect(result).toEqual(block(5))
     })
+
+    it('should resolve to the highest common block when the window ends below the records', async () => {
+      const result = await resolveForkCursor(
+        [
+          {
+            rollbackChain: [block(4), block(3), block(2), block(1)],
+          },
+        ],
+        // The window stops at the forked block 3 while the records reach block 4
+        [block(1), block(2), block(3, '0x3b')],
+      )
+
+      expect(result).toEqual(block(2))
+    })
+
+    it('should tolerate gaps in the canonical window', async () => {
+      const result = await resolveForkCursor(
+        [
+          {
+            rollbackChain: [block(4), block(3), block(2), block(1)],
+          },
+        ],
+        // Block 3 is missing from the window: the walk lands one block lower
+        [block(1), block(2, '0x2'), block(4, '0x4b')],
+      )
+
+      expect(result).toEqual(block(2))
+    })
   })
 
   describe('multiple records (database target scenario)', () => {

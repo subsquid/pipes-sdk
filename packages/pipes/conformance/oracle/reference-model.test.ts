@@ -272,11 +272,15 @@ describe('ReferenceModel', () => {
       expect(blocksOf(model)).toEqual([0, 1, 2, 3])
     })
 
-    it('refuses a canonical chain that ends below the cursor (RP-43)', () => {
+    it('rewinds to the common ancestor when the canonical window ends below the cursor (RP-43)', () => {
       const model = new ReferenceModel({ durability: 'T' })
-      model.batch(chain(0, 5))
+      model.batch(chain(0, 5), { finalized: block(0) })
 
-      expect(refusal(model, () => model.fork(chain(0, 2, 'b')))).toBe(ORACLE_ERRORS.CANONICAL_BELOW_CURSOR)
+      const ancestor = model.fork([...chain(0, 2), block(3, 'b')])
+
+      expect(ancestor).toEqual(block(2))
+      expect(model.readState()).toEqual({ current: block(2), finalized: block(0), rollbackChain: chain(1, 2) })
+      expect(blocksOf(model)).toEqual([0, 1, 2])
     })
 
     it('falls back to the floor when only the floor is left in the window (WP-42)', () => {
