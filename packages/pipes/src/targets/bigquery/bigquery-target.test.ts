@@ -26,6 +26,7 @@ import {
  *   - DDL string generators (syncTableDdl, trackedTableDdl, partitioningWithDefaults)
  *   - chunkBuffersByByteSize byte-budget generator over pre-encoded proto rows
  *   - BigQueryWriter allowlist guard (synchronous JS check, no SDK)
+ *   - BigQueryWriter query/executeDml retry semantics (fake client object, no SDK)
  *   - BigQueryTargetError wrapper class
  *
  * Anything that requires a BigQuery client (cursor I/O, recovery, fork resolution,
@@ -101,6 +102,104 @@ describe('BigQueryWriter — tracked-table allowlist', () => {
 
   it('insert with empty rows array is a no-op', () => {
     expect(() => store.insert('events', [])).not.toThrow()
+  })
+})
+
+// -----------------------------------------------------------------------------
+// BigQueryWriter query / executeDml — retry decides on the job's own state,
+// never on a failed request for its results
+// -----------------------------------------------------------------------------
+
+// HTTP 400 can carry a transient failure identified only by `errors[].reason`.
+const jobBackendError = () =>
+  Object.assign(new Error('The job encountered an error during execution. Retrying the job may solve the problem.'), {
+    code: 400,
+    errors: [{ domain: 'global', reason: 'jobBackendError' }],
+  })
+
+const reject = (e: Error) => async () => {
+  throw e
+}
+
+const unavailable = () => Object.assign(new Error('Service unavailable'), { code: 503 })
+
+describe('BigQueryWriter retry semantics', () => {
+  const writerWith = (bigquery: Partial<BigQuery>) =>
+    new BigQueryWriter(bigquery as BigQuery, { close: vi.fn() } as any, {
+      projectId: 'p',
+      dataset: 'd',
+      syncTable: { dataset: 'd', table: 'sync' },
+      trackedTables: [],
+    })
+
+  it('retries a query that failed mid-job with a 400 jobBackendError', async () => {
+    const query = vi
+      .fn()
+      .mockRejectedValueOnce(jobBackendError())
+      .mockResolvedValueOnce([[{ current: '{}' }]])
+    await expect(writerWith({ query }).query('SELECT 1')).resolves.toEqual([{ current: '{}' }])
+    expect(query).toHaveBeenCalledTimes(2)
+  })
+
+  it('still surfaces a non-transient 400 at once', async () => {
+    const invalid = Object.assign(new Error('Syntax error'), { code: 400, errors: [{ reason: 'invalidQuery' }] })
+    const query = vi.fn().mockRejectedValue(invalid)
+    await expect(writerWith({ query }).query('SELEC 1')).rejects.toThrow('Syntax error')
+    expect(query).toHaveBeenCalledTimes(1)
+  })
+
+  // A failed result request says nothing about whether the statement ran; only the job's own state does.
+  const dmlJob = (opts: {
+    results: (() => Promise<unknown>)[]
+    status: { state: string; errorResult?: { reason: string; message: string } }
+    rows?: string
+  }) => {
+    const results = [...opts.results]
+    return {
+      getQueryResults: vi.fn(async () => (results.shift() ?? (async () => [[]]))()),
+      getMetadata: vi.fn(async () => [{ status: opts.status }]),
+      metadata: { statistics: { query: { numDmlAffectedRows: opts.rows ?? '0' } } },
+    }
+  }
+
+  it('re-creates a DML job that itself failed with a transient reason', async () => {
+    const failed = dmlJob({
+      results: [reject(jobBackendError())],
+      status: { state: 'DONE', errorResult: { reason: 'jobBackendError', message: 'Retrying may solve it' } },
+    })
+    const done = dmlJob({ results: [], status: { state: 'DONE' }, rows: '94' })
+    const createQueryJob = vi.fn().mockResolvedValueOnce([failed]).mockResolvedValueOnce([done])
+    await expect(writerWith({ createQueryJob }).executeDml('DELETE FROM t WHERE true')).resolves.toEqual({
+      rowCount: 94,
+    })
+    expect(createQueryJob).toHaveBeenCalledTimes(2)
+  })
+
+  it('never re-runs a DML job that succeeded when only the result request failed', async () => {
+    const job = dmlJob({ results: [reject(unavailable())], status: { state: 'DONE' }, rows: '7' })
+    const createQueryJob = vi.fn().mockResolvedValue([job])
+    await expect(writerWith({ createQueryJob }).executeDml('INSERT INTO t SELECT 1')).resolves.toEqual({ rowCount: 7 })
+    expect(createQueryJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('polls the same DML job again when the result request failed while it ran', async () => {
+    const job = dmlJob({ results: [reject(unavailable())], status: { state: 'RUNNING' }, rows: '3' })
+    const createQueryJob = vi.fn().mockResolvedValue([job])
+    await expect(writerWith({ createQueryJob }).executeDml('DELETE FROM t WHERE true')).resolves.toEqual({
+      rowCount: 3,
+    })
+    expect(createQueryJob).toHaveBeenCalledTimes(1)
+    expect(job.getQueryResults).toHaveBeenCalledTimes(2)
+  })
+
+  it('surfaces a DML job that failed for good, even if its result request also hit a 503', async () => {
+    const job = dmlJob({
+      results: [reject(unavailable())],
+      status: { state: 'DONE', errorResult: { reason: 'invalidQuery', message: 'Syntax error' } },
+    })
+    const createQueryJob = vi.fn().mockResolvedValue([job])
+    await expect(writerWith({ createQueryJob }).executeDml('DELET FROM t')).rejects.toThrow('Syntax error')
+    expect(createQueryJob).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -261,6 +360,30 @@ describe('isTransientError', () => {
 
   it('walks cause chain', () => {
     expect(isTransientError({ cause: { code: 14 } })).toBe(true)
+  })
+
+  it('treats reason-only transients as retryable under a non-transient HTTP code', () => {
+    for (const reason of [
+      'backendError',
+      'internalError',
+      'jobBackendError',
+      'jobInternalError',
+      'rateLimitExceeded',
+      'jobRateLimitExceeded',
+    ]) {
+      expect(isTransientError({ code: 400, errors: [{ reason }] }), reason).toBe(true)
+    }
+  })
+
+  it('does not retry a permanent reason under the same HTTP code', () => {
+    expect(isTransientError({ code: 400, errors: [{ reason: 'invalidQuery' }] })).toBe(false)
+    expect(isTransientError({ code: 400, errors: [{ reason: 'notFound' }] })).toBe(false)
+  })
+
+  it('ignores a missing or malformed errors array', () => {
+    expect(isTransientError({ code: 400 })).toBe(false)
+    expect(isTransientError({ code: 400, errors: [{}] })).toBe(false)
+    expect(isTransientError({ code: 400, errors: 'jobBackendError' })).toBe(false)
   })
 
   it('returns false for fatal errors (INVALID_ARGUMENT, NOT_FOUND)', () => {

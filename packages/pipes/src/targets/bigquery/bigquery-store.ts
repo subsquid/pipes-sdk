@@ -1,4 +1,4 @@
-import type { BigQuery, TableField } from '@google-cloud/bigquery'
+import type { BigQuery, Job, TableField } from '@google-cloud/bigquery'
 import { adapt, managedwriter } from '@google-cloud/bigquery-storage'
 // JSONEncoder is the SDK's row-to-proto-bytes encoder, used internally by JSONWriter. The
 // public managedwriter index does not re-export it (it's marked "internal" in the SDK), so
@@ -114,6 +114,38 @@ type StreamState = {
    * offset for exactly-once semantics: a retry of the same offset is server-deduped.
    */
   nextOffset: number
+}
+
+/** The DML job itself finished with an error; `errors` carries its `errorResult` for `isTransientError`. */
+class DmlJobFailedError extends Error {
+  readonly errors: { reason?: string; message?: string }[]
+
+  constructor(errorResult: { reason?: string; message?: string }, cause: unknown) {
+    super(errorResult.message ?? 'BigQuery DML job failed', { cause })
+    this.name = 'DmlJobFailedError'
+    this.errors = [errorResult]
+  }
+}
+
+/** Resolves once the job is DONE without error; a request failure while it runs rethrows for a re-poll. */
+async function settleJob(job: Job): Promise<void> {
+  try {
+    await job.getQueryResults()
+  } catch (e) {
+    const [meta] = await job.getMetadata()
+    if (meta.status?.state !== 'DONE') throw e
+    if (meta.status.errorResult) throw new DmlJobFailedError(meta.status.errorResult, e)
+  }
+}
+
+/** A failure of a request for the job's results, not of the job: re-poll it, never re-create it. */
+function isTransientRequestFailure(e: unknown): boolean {
+  return !(e instanceof DmlJobFailedError) && isTransientError(e)
+}
+
+/** A DML job that itself failed with a transient reason — the one failure that justifies re-running the statement. */
+function isTransientDmlFailure(e: unknown): e is DmlJobFailedError {
+  return e instanceof DmlJobFailedError && isTransientError({ errors: e.errors })
 }
 
 /**
@@ -475,16 +507,45 @@ export class BigQueryWriter {
    * recently streamed data, so `BEGIN; DELETE; INSERT; COMMIT` is not an option.
    */
   async executeDml(sql: string, params: Record<string, unknown> = {}): Promise<{ rowCount: number }> {
-    const [job] = await doWithRetry(() => this.#bigquery.createQueryJob({ query: sql, params }), {
-      ...RETRY_OPTIONS,
-      title: 'createQueryJob',
-      logger: this.#logger,
-    })
-    await job.getQueryResults()
+    // Re-create the job only once the job itself has failed: a failed DML statement commits nothing,
+    // while a failed request for its result says nothing about whether the statement ran.
+    const job = await doWithRetry(
+      async () => {
+        const created = await this.#createDmlJob(sql, params)
+        await this.#settleDmlJob(created)
+        return created
+      },
+      {
+        ...RETRY_OPTIONS,
+        shouldRetry: isTransientDmlFailure,
+        title: 'executeDml',
+        logger: this.#logger,
+      },
+    )
     const stats = job.metadata?.statistics?.query
     const numDmlAffectedRows = (stats?.numDmlAffectedRows ?? '0') as string
 
     return { rowCount: Number.parseInt(numDmlAffectedRows, 10) }
+  }
+
+  async #createDmlJob(sql: string, params: Record<string, unknown>): Promise<Job> {
+    const [created] = await doWithRetry(() => this.#bigquery.createQueryJob({ query: sql, params }), {
+      ...RETRY_OPTIONS,
+      title: 'createQueryJob',
+      logger: this.#logger,
+    })
+
+    return created
+  }
+
+  /** Polls the job to completion, retrying request failures but never re-creating the job for them. */
+  async #settleDmlJob(job: Job): Promise<void> {
+    await doWithRetry(() => settleJob(job), {
+      ...RETRY_OPTIONS,
+      shouldRetry: isTransientRequestFailure,
+      title: 'getQueryResults',
+      logger: this.#logger,
+    })
   }
 
   /**
