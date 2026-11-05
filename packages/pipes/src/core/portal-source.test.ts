@@ -1223,14 +1223,14 @@ describe('stall reporting', () => {
     expect(warn).toHaveBeenCalledTimes(2)
 
     release()
-    await vi.advanceTimersByTimeAsync(0)
-
-    expect(info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.stringContaining('recovered: processing block 1 took'),
-        phase: 'processing block 1',
-      }),
-    )
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('recovered: processing block 1 took'),
+          phase: 'processing block 1',
+        }),
+      )
+    })
   })
 })
 

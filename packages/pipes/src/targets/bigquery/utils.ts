@@ -2,6 +2,29 @@ import type { TableField, TableMetadata } from '@google-cloud/bigquery'
 
 import { BIGQUERY_ERROR_CODES, BigQueryTargetError } from './errors.js'
 
+const GRPC_STATUS = {
+  INVALID_ARGUMENT: 3,
+  DEADLINE_EXCEEDED: 4,
+  NOT_FOUND: 5,
+  RESOURCE_EXHAUSTED: 8,
+  ABORTED: 10,
+  INTERNAL: 13,
+  UNAVAILABLE: 14,
+} as const
+
+const TRANSIENT_CODES = new Set<number>([
+  GRPC_STATUS.DEADLINE_EXCEEDED,
+  GRPC_STATUS.RESOURCE_EXHAUSTED,
+  GRPC_STATUS.ABORTED,
+  GRPC_STATUS.INTERNAL,
+  GRPC_STATUS.UNAVAILABLE,
+  429,
+  500,
+  502,
+  503,
+  504,
+])
+
 /**
  * Detects "Not Found" errors from the @google-cloud/bigquery client AND the Storage Write
  * API: HTTP 404 from the REST client, gRPC NOT_FOUND (code 5) from Storage Write, or — when
@@ -18,7 +41,7 @@ export function isNotFoundError(error: unknown): boolean {
   const e = error as { code?: number | string; message?: string; cause?: unknown; errors?: { reason?: string }[] }
   const code = parseLocalCode(error)
 
-  if (code === 404 || code === 5) return true
+  if (code === 404 || code === GRPC_STATUS.NOT_FOUND) return true
   if (code !== undefined) {
     // Some other numeric code — authoritative, don't fall through to message scan. Still
     // walk the cause chain in case the outer is a generic wrapper around a real not-found.
@@ -31,6 +54,16 @@ export function isNotFoundError(error: unknown): boolean {
   return false
 }
 
+/** BigQuery's "retrying may solve the problem" reasons; a job that fails mid-run reports them under HTTP 400. */
+const TRANSIENT_REASONS = new Set([
+  'backendError',
+  'internalError',
+  'jobBackendError',
+  'jobInternalError',
+  'rateLimitExceeded',
+  'jobRateLimitExceeded',
+])
+
 /**
  * Detects transient BigQuery errors that should be retried by `doWithRetry`.
  *
@@ -38,7 +71,8 @@ export function isNotFoundError(error: unknown): boolean {
  *   ABORTED (10), RESOURCE_EXHAUSTED (8), UNAVAILABLE (14), DEADLINE_EXCEEDED (4), INTERNAL (13)
  *
  * Storage Write API surfaces these as `code` numeric properties on the rejected promise.
- * The BigQuery REST client uses HTTP-style codes (429, 500, 502, 503, 504).
+ * The BigQuery REST client uses HTTP-style codes (429, 500, 502, 503, 504), and `errors[].reason`
+ * for a job that failed mid-run (`TRANSIENT_REASONS`, under any HTTP code).
  *
  * Walks the cause chain — finds a transient code ANYWHERE in the chain (different from
  * `readErrorCode`, which returns just the outermost code).
@@ -47,10 +81,10 @@ export function isTransientError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
 
   const code = parseLocalCode(error)
-  if (code === 4 || code === 8 || code === 10 || code === 13 || code === 14) return true
-  if (code === 429 || code === 500 || code === 502 || code === 503 || code === 504) return true
+  if (code !== undefined && TRANSIENT_CODES.has(code)) return true
 
-  const e = error as { cause?: unknown }
+  const e = error as { cause?: unknown; errors?: { reason?: string }[] }
+  if (Array.isArray(e.errors) && e.errors.some((x) => TRANSIENT_REASONS.has(x?.reason ?? ''))) return true
   if (e.cause) return isTransientError(e.cause)
 
   return false
@@ -84,8 +118,8 @@ export function classifyBqError(error: unknown): BqErrorKind {
   // `isNotFoundError` covers both REST 404 and gRPC NOT_FOUND (5).
   if (isNotFoundError(error)) return 'not_found'
   const code = readErrorCode(error)
-  if (code === 3 || code === 400) return 'invalid_argument'
-  if (code === 8 || code === 429) return 'resource_exhausted'
+  if (code === GRPC_STATUS.INVALID_ARGUMENT || code === 400) return 'invalid_argument'
+  if (code === GRPC_STATUS.RESOURCE_EXHAUSTED || code === 429) return 'resource_exhausted'
   if (isTransientError(error)) return 'transient'
 
   return 'unknown'
