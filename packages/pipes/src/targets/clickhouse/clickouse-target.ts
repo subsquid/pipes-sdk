@@ -155,8 +155,6 @@ export function clickhouseTarget<T>({
           target.end()
         }
       }
-
-      await store.close()
     },
     resolveFork: async (canonicalBlocks) => {
       // A fork requires removing rows written above the fork point. Without a handler that

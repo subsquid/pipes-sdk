@@ -87,7 +87,7 @@ function spawnRun(
   })
 }
 
-async function readJournal<Entry>(journal: string): Promise<Entry[]> {
+export async function readJournal<Entry>(journal: string): Promise<Entry[]> {
   let text: string
   try {
     text = await readFile(journal, 'utf8')

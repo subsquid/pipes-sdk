@@ -89,9 +89,8 @@ mode ← configured stream mode
 
 bind(target):                                      # WP-7 / RP-7
   if target requires finalized-only: mode ← finalized-only
-  portal ← effective-view(mode)
-  resolve symbolic ranges through portal
-  pass the same portal view to transformers and caches
+  resolve symbolic ranges through portal with mode
+  pass portal and mode explicitly to transformers and caches
 
 recover(persisted):                                  # T-INIT
   require well-formed(persisted) else REFUSE          # INV-5, INV-44
@@ -267,6 +266,7 @@ known-suspect in the current implementation (see gap register).
 | INV-36 (cache) | CT-5 | C | keying/gap/latest-exclusion tests |
 | PF-6, WP-12 (ingest overlap) | CT-6 | P | slot semantics unit-tested; no cadence benchmark |
 | LIV-1…LIV-9 | CT-4/6/7 | U | no liveness harness yet; CT-1 S1 asserts only that a bounded run ends at its range end, not the stall budget |
+| WP-31, WP-33, LIV-6, FM-33, RP-8 (signal-managed shutdown) | CT-1/2 | P ⚠ | the stop semantics are asserted in process against the chain simulator: idle reads, retries, startup, a commit and a rollback in progress, repeated signals, several pipes, callback order and failures, the deadline, no abort listener or batch retained per batch. Real SIGTERM and SIGINT reach child processes: exit codes, the opt-out, the listeners gone after the deadline. Class C also runs signal, restart and forced-kill runs against the stand-in bus on S1. Class W drains against fake clients only, and its forced-kill guarantee rests on its CT-2 matrix; class K stops and restarts in process with no gap or repeat; classes T and A have no stop run of their own, and class A asserts only that the author's client stays open; the budget's P-SHUTDOWN-DRAIN-S value is not measured |
 | RS-10, RS-11 (purity, stateful) | CT-2 | P | K recovery relies on it; factory rollback C |
 | RS-20…RS-25 (cache) | CT-5 | C | except overlap re-insert (U) |
 | FM corpus | CT-4 | P | scattered unit coverage; no systematic corpus |

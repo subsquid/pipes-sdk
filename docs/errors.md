@@ -7,7 +7,7 @@
   routing /en/sdk/pipes-sdk/errors/<code> to the matching section anchor below.
 
   Keep in sync with the code the messages come from:
-    - packages/pipes/src/core/errors.ts                          (E0xxx, E1xxx)
+    - packages/pipes/src/core/errors.ts                          (E0xxx, E1xxx, E3xxx)
     - packages/pipes/src/targets/clickhouse/errors.ts            (E20xx)
     - packages/pipes/src/targets/drizzle/node-postgres/errors.ts (E21xx)
     - packages/pipes/src/targets/bigquery/errors.ts              (E22xx)
@@ -38,6 +38,7 @@ are stable. Codes are grouped by where they originate:
 | `E22xx` | BigQuery target                           |
 | `E23xx` | Parquet target                            |
 | `E24xx` | Google PubSub target                      |
+| `E3xxx` | Graceful shutdown                         |
 
 ---
 
@@ -162,6 +163,18 @@ evmPortalStream({
     }),
   },
 })
+```
+
+### E0005 · Invalid shutdown option
+
+The `shutdown` option of `pipeTo` is not a function, an options object or `false`, its `timeout`
+is not a positive duration, or `onShutdown` is not a function. `pipeTo` rejects before the pipe starts.
+Null and undefined use the default shutdown settings.
+
+**Fix** — pass a duration with a unit. A number of milliseconds is refused:
+
+```ts
+await stream.pipeTo(target, { shutdown: { timeout: '60s' } }) // also '1m', '2m 30s', '500ms'
 ```
 
 ---
@@ -926,3 +939,40 @@ block by block. A second route on the same topic therefore restarts at the batch
 and lands here on any batch spanning more than one block, with no ordering the mapper can supply
 to avoid it — the barrier admits one multi-block route per producer. Merge the streams into one
 `map`, or turn the barrier off.
+
+---
+
+## Graceful shutdown
+
+See [Graceful shutdown](./graceful-shutdown.md) for options and shutdown behavior.
+
+### E3001 · Pipe stopped by a signal
+
+A SIGTERM or SIGINT stopped the pipe and its shutdown succeeded: the batch in flight is committed,
+resources are closed and `onShutdown` has run. This is not a failure, but the range may be incomplete,
+so `pipeTo` rejects to keep code after `await pipeTo(...)` from treating it as finished. The error has
+a `signal` property.
+
+**Fix** — nothing is wrong. A restart resumes after the last committed batch. To exit with code 0
+instead of the code 1 of an unhandled rejection, catch it:
+
+```ts
+try {
+  await stream.pipeTo(target)
+} catch (error) {
+  if (!(error instanceof PipelineStoppedError)) throw error
+}
+```
+
+### E3002 · Shutdown timed out
+
+The shutdown outlasted its `timeout`. The `step` property says what was still running: `drain` (a
+target commit or a hook) or `onShutdown`. That work cannot be cancelled and may still be running. A
+drain failure that came first is in `cause`.
+
+If the timeout expires during draining, `onShutdown` waits until draining and cleanup settle.
+It does not run if the drain never settles.
+
+**Fix** — the persisted cursor never passes unconfirmed data, so a restart is safe. If this repeats, raise
+the `timeout`, and keep it below the deadline of whatever sends the signal. Exit the process when you
+catch this error, because the unfinished work may keep it alive.

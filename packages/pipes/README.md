@@ -60,6 +60,10 @@ To persist instead of printing, replace the loop with `.pipeTo(target)`. See the
 and [Drizzle/PostgreSQL](https://github.com/subsquid/pipes-sdk/blob/main/docs/examples/evm/08.drizzle.example.ts)
 examples.
 
+`pipeTo` handles SIGTERM and SIGINT by default: it finishes the current batch and stops.
+See [Graceful shutdown](https://github.com/subsquid/pipes-sdk/blob/main/docs/graceful-shutdown.md)
+for options, cleanup and error handling.
+
 ---
 
 ## Documentation & examples

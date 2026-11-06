@@ -69,11 +69,10 @@ selected keys present, unselected absent, absent collections decode as `[]`.
 **IB-11 — Finalized-only route selection.** A target may declare that it accepts only
 finalized-stream delivery (the TypeScript reference binding names the capability
 `requiresFinalizedStream`; other language APIs may differ). Before resolving symbolic
-ranges, the pipe constructs one effective finalized portal view and uses it for
-`GET finalized-head`, transformer startup context, cache access, and
-`POST finalized-stream`. A cache receives `finalized: true` and the effective portal
-view itself is pinned to finalized operations, so an older cache that ignores the
-flag remains safe when it uses the supplied client. The target receives the effective
+ranges, the pipe selects the effective finalized mode for `GET finalized-head`,
+transformer startup context, cache access, and `POST finalized-stream`. Caches and
+start hooks receive the original client with explicit `finalized` and `signal`
+settings, which they must forward to additional portal reads. The target receives the effective
 mode, not merely the configured one. Overriding configured full mode emits one warning;
 already-finalized mode is quiet. A target without the capability keeps the configured
 mode. Decision: ADR-22.
@@ -322,13 +321,14 @@ consumers MUST NOT read it as a block number.
 
 | Band | Area | Codes in use |
 |---|---|---|
-| E0xxx | pipe configuration | E0001 blank pipe id, E0002 invalid range/date (a bound that is not a block number, an invalid date, a date after the dataset's head), E0003 unusable instruction set (an instruction outside the decoder's `program`, a `program` with no address, mixed widths across the decoder, shared discriminator, or an instruction with none or several), E0004 event-decoder entries that can match one log |
+| E0xxx | pipe configuration | E0001 blank pipe id, E0002 invalid range/date (a bound that is not a block number, an invalid date, a date after the dataset's head), E0003 unusable instruction set (an instruction outside the decoder's `program`, a `program` with no address, mixed widths across the decoder, shared discriminator, or an instruction with none or several), E0004 event-decoder entries that can match one log, E0005 invalid shutdown option |
 | E1xxx | fork handling, portal contract | E1001 sink lacks fork support, E1002 empty or absent canonical chain, E1003 ancestor unresolvable, E1005 fork reported on the finalized-only route, E1006 block outside the request window (duplicate, out of order or out of range), E1007 unreadable stream line (invalid JSON, no block number, a second cut at one block), E1008 block violating the schema of the selected fields |
 | E20xx | ClickHouse binding | E2001–E2010 (retention, table name, distributed-rollback, collapse-column, missing sign, rollback-index, fork-without-rollback-handler, rollback of a missing table, failed SQL file statement, unavailable rollback-table metadata) |
 | E21xx | Postgres binding | E2101–E2107 (client, config, advisory lock, untracked table, missing PK, FK cycle, unresolved column name) |
 | E22xx | BigQuery binding | E2201–E2213 (schema/partition guards, orphan data E2212, append rejection E2213) |
 | E23xx | Parquet binding | E2301–E2317 and E2320–E2322 in use (schema/config; file collision E2309, state corrupt E2310, recovery delete failure E2314, nested-schema E2315; coverage guards E2316 invalid range, E2317 state/data disagreement; engine-output verification E2320 non-Parquet segment refused; E2321 output directory claimed by another cursor key; E2322 published data with no state). E2318–E2319 retired, unassigned |
 | E24xx | Pub/Sub binding | E2401–E2429, with E2427 unassigned (topic/attribute/request guards E2401–E2404, checked pre-commit and again after recovery encoding; canonical-codec refusals E2405–E2406; finality guards E2407–E2409; state guards E2410–E2411, E2417, state write failure E2426, state identity/wire binding E2419/E2421, cold-start refusal E2420, and sequence exhaustion E2424; row-identity guards E2412–E2413, E2418, E2422; route configuration E2414–E2416, E2423, E2425; sequence barrier E2428 one topic per producer, E2429 forward block order) |
+| E3xxx | graceful shutdown | E3001 run stopped by a signal, shutdown succeeded; E3002 shutdown budget expired |
 
 **IB-51 — Transport errors.** Non-coded, typed: HTTP error (with response), request
 timeout, body-stall timeout. Retryability: request timeouts and connection-class errors

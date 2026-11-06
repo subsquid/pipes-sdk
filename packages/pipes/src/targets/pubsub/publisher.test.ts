@@ -67,6 +67,21 @@ describe('partitionRows', () => {
 })
 
 describe('GooglePubsubPublisher', () => {
+  it.each([
+    ['closes a client it owns', true, 1],
+    ['leaves a client of the caller open', false, 0],
+    ['leaves a client open by default', undefined, 0],
+  ])('%s', async (_title, ownsClient, closes) => {
+    const { client } = fakeClient(async () => 'message-id')
+    const close = vi.fn(async () => {})
+    Object.assign(client, { close })
+
+    const publisher = new GooglePubsubPublisher(client, { ownsClient, messageOrdering: false, topicSetup: 'none' })
+    await publisher.close()
+
+    expect(close).toHaveBeenCalledTimes(closes)
+  })
+
   it('confirms only the prefix before a failed publish', async () => {
     const { client } = fakeClient(async (id) => {
       if (id === 'b') throw new Error('publish failed')

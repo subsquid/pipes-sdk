@@ -53,12 +53,13 @@ during configuration, before range resolution; after streaming starts the query 
 immutable for the life of the run.
 
 **WP-7 — Finalized-only source selection.** [MUST] When a sink declares finalized-only
-delivery (DEF-15), the pipe selects an effective finalized portal before resolving
-symbolic ranges, starting transformers, consulting a cache, or requesting blocks. All
-finality-sensitive operations use that same effective view: `latest` resolves against
-the finalized head, the data request uses the finalized stream, a cache receives both
-the finalized mode and a portal view pinned to it, and the sink is told the effective
-mode. A configured full-stream preference is overridden with a warning. A sink that
+delivery (DEF-15), the pipe selects the effective finalized mode before resolving
+symbolic ranges, starting transformers, consulting a cache, or requesting blocks.
+`latest` resolves against the finalized head, falling back to the hot head when no
+finalized head exists. The data request uses the finalized stream. Caches and start
+hooks receive the original portal client and explicit `finalized` and `signal` settings
+to forward to their reads, and the sink is told the effective mode.
+A configured full-stream preference is overridden with a warning. A sink that
 does not declare the capability follows the configured stream mode unchanged (IB-11).
 
 ## Streaming & batching
@@ -150,6 +151,16 @@ only (crash-equivalent or better).
 **WP-32 — Rollback notification.** [MUST] After a sink completes T-FORK, every
 transformer's rollback hook is invoked with the ancestor cursor before streaming
 resumes (stateful transformers must discard state above it).
+
+**WP-33 — Signal-managed shutdown.** [MUST] Unless the author opts out, a run stops on
+SIGTERM or SIGINT within a budget from the first signal (P-SHUTDOWN-DRAIN-S, ADR-24). The
+stop cancels source reads, their retries and read-ahead, and never a sink commit or fork
+rollback in progress. The batch in flight commits or fails whole, later batches are
+discarded, and the sink then flushes and closes as at the end of a stream. The author's
+callback runs once after that, on a signal only, also when the drain failed. A stopped
+run MUST NOT report completion, and a repeated signal MUST NOT extend the budget. The
+expired budget is reported as its own coded failure. It limits the wait without starting the
+callback early: the callback still waits for drain and cleanup to settle, even after the deadline.
 
 ## Fork (T-FORK)
 

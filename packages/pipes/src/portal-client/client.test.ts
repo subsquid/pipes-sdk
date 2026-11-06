@@ -1,3 +1,5 @@
+import { getEventListeners } from 'node:events'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { MalformedPortalResponseError, MissingForkAncestorError } from '~/core/errors.js'
@@ -547,5 +549,78 @@ describe('PortalClient bounded range above the finalized head', () => {
     expect(delivered).toEqual([1, 2, 3, 4, 5])
     // The tail was genuinely waited for: the endpoint kept being polled at the finalized head.
     expect(polled).toEqual([4, 4, 4])
+  })
+})
+
+describe('PortalClient lookup abort', () => {
+  it.each(['getHead', 'getMetadata', 'resolveTimestamp'] as const)(
+    '%s rejects with the signal reason',
+    async (method) => {
+      const reason = new Error('read stopped')
+      const abort = AbortSignal.abort(reason)
+      const client = new PortalClient({ url: 'http://portal.invalid' })
+      const lookup = method === 'resolveTimestamp' ? client.resolveTimestamp(1, { abort }) : client[method]({ abort })
+
+      await expect(lookup).rejects.toBe(reason)
+    },
+  )
+})
+
+describe('PortalClient.getStream abort', () => {
+  withPortal('ends a held request with no error, and removes its listener', async ({ portal: open }) => {
+    const portal = await open({
+      latest: 5,
+      delay: () => new Promise<void>(() => {}),
+    })
+    const client = new PortalClient({ url: portal.url })
+    const controller = new AbortController()
+
+    const reading = Array.fromAsync(client.getStream(query, { request: { abort: controller.signal } }))
+
+    await vi.waitFor(() => expect(portal.requests).toHaveLength(1))
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1)
+
+    controller.abort()
+
+    await expect(reading).resolves.toEqual([])
+    await vi.waitFor(() => expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0))
+  })
+
+  withPortal('ends the pause between retries with no error', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    portal.fail({ status: 503, times: Number.POSITIVE_INFINITY })
+
+    const client = new PortalClient({ url: portal.url, http: { retryAttempts: Number.MAX_SAFE_INTEGER } })
+    const controller = new AbortController()
+
+    const reading = Array.fromAsync(client.getStream(query, { request: { abort: controller.signal } }))
+
+    await vi.waitFor(() => expect(portal.requests.length).toBeGreaterThan(0))
+    controller.abort()
+
+    await expect(reading).resolves.toEqual([])
+  })
+
+  withPortal('sends nothing on a signal that has already aborted', async ({ portal: open }) => {
+    const portal = await open({ latest: 5 })
+    const client = new PortalClient({ url: portal.url })
+
+    const batches = await Array.fromAsync(client.getStream(query, { request: { abort: AbortSignal.abort() } }))
+
+    expect(batches).toEqual([])
+    expect(portal.requests).toEqual([])
+  })
+
+  withPortal('keeps its own stream open when the signal does not abort', async ({ portal: open }) => {
+    const portal = await open({ blocks: [{ header: { number: 1, hash: '0x1', timestamp: 1 } }], latest: 1 })
+    const client = new PortalClient({ url: portal.url })
+    const { signal } = new AbortController()
+
+    const batches = await Array.fromAsync(
+      client.getStream({ ...query, fromBlock: 1, toBlock: 1 }, { request: { abort: signal } }),
+    )
+
+    expect(batches.flatMap((batch) => batch.blocks)).toHaveLength(1)
+    expect(getEventListeners(signal, 'abort')).toHaveLength(0)
   })
 })

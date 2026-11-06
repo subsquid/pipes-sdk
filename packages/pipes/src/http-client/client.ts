@@ -420,6 +420,9 @@ export class HttpClient implements BaseHttpClient {
 
     req.signal?.addEventListener('abort', abort)
 
+    // An abort before this point fires no event.
+    if (req.signal?.aborted) abort()
+
     let timer: any | null = setTimeout(() => {
       timer = null
       abort()

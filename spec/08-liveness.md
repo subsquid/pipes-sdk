@@ -39,8 +39,9 @@ with crash residue, not with data volume).
 
 **LIV-6 — Shutdown drain.** A stop/cancel request completes (stop hooks done, resources
 released) within P-SHUTDOWN-DRAIN-S; in-flight batch either commits or is discarded
-whole (crash-equivalent or better).
-*Witness:* process exit + OB-20. *Test:* CT-1 lifecycle suite.
+whole (crash-equivalent or better). Past the budget, the run reports a coded failure,
+and the work that cannot be cancelled may outlive it (WP-33).
+*Witness:* process exit + OB-20. *Test:* CT-1 lifecycle suite, real-signal child processes.
 
 **LIV-7 — Convergence-or-alarm.** Any retry loop either succeeds, or continuously emits
 the stall/retry signal (OB-13) while retrying. Unbounded silent retry is forbidden;

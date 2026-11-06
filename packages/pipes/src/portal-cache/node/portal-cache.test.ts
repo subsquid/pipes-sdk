@@ -2,14 +2,16 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { gzipSync } from 'node:zlib'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PortalBatch } from '~/core/index.js'
+import { defaultLogger } from '~/core/logger.js'
 import { createTarget } from '~/core/target.js'
 import { loadSqlite } from '~/drivers/sqlite/sqlite.js'
 import { evmPortalStream } from '~/evm/index.js'
 import { Options, PortalCacheNodeJs, SaveBatch, StreamBatch } from '~/portal-cache/node/node-portal-cache.js'
 import { PortalSqliteCacheOptions, portalSqliteCache } from '~/portal-cache/node/node-sqlite-cache-adapter.js'
+import { PortalClient } from '~/portal-client/index.js'
 import { createMemoryTarget } from '~/targets/memory/memory-target.js'
 import { withDir } from '~/testing/dir-fixture.js'
 import { MockPortal, blockDecoder, mockPortal, readAll } from '~/testing/index.js'
@@ -59,6 +61,27 @@ export async function readAllChunks<T>(stream: AsyncIterable<T>) {
 }
 
 const DB_PATH = './test.db'
+
+withDir('cancels portal retries after a cache miss', async ({ portal: open, dir }) => {
+  const portal = await open({ latest: 5 })
+  portal.fail({ status: 503, times: Number.POSITIVE_INFINITY })
+  const client = new PortalClient({ url: portal.url, http: { retryAttempts: Number.MAX_SAFE_INTEGER } })
+  const controller = new AbortController()
+  const cache = portalSqliteCache({ path: path.join(dir, 'cache.db') })
+  const reading = Array.fromAsync(
+    cache.getStream({
+      portal: client,
+      query: { type: 'evm', fromBlock: 1, toBlock: 5, fields: { block: { number: true, hash: true } } },
+      logger: defaultLogger({ level: 'silent' }),
+      signal: controller.signal,
+    }),
+  )
+
+  await vi.waitFor(() => expect(portal.requests.length).toBeGreaterThan(0))
+  controller.abort()
+
+  await expect(reading).resolves.toEqual([])
+})
 
 describe('Portal cache', () => {
   let portal: MockPortal

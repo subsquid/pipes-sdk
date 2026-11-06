@@ -86,11 +86,13 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
     query,
     logger,
     finalized,
+    signal,
   }: {
     portal: PortalClient
     query: Query
     logger: Logger
     finalized?: boolean
+    signal?: AbortSignal
   }): PortalBlockStream<GetBlock<Q>> {
     const queryHash = await hashQuery(query)
 
@@ -106,6 +108,8 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
       fromBlock: cursor.number,
       queryHash,
     })) {
+      if (signal?.aborted) return
+
       const decoded: StreamData<GetBlock<Q>> = reviveMeta(JSON.parse(await this.decompress(message)))
 
       yield decoded
@@ -123,7 +127,7 @@ export abstract class PortalCacheNodeJs<ImplOptions> implements PortalCache {
         fromBlock: cursor.number,
         parentBlockHash: cursor.hash,
       } as Q,
-      { finalized },
+      { finalized, request: { abort: signal } },
     )) {
       const finalizedHead = batch.head.finalized?.number
       // TODO add warning

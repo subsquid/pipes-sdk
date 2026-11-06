@@ -258,7 +258,11 @@ export function bigqueryTarget<T>(options: {
           }
         }
       } finally {
-        if (ownsWriter) writer.close()
+        store.closeStreams()
+
+        if (ownsWriter) {
+          writer.close()
+        }
       }
     },
     resolveFork: async (canonicalBlocks) => {

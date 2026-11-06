@@ -16,6 +16,7 @@ export * from './portal-source.js'
 export type { Profiler, ProfilerOptions, SpanHooks } from './profiling.js'
 // `StreamInfo.state.ranges` is typed with it, so the name has to be reachable by consumers.
 export type { Range } from './query-builder.js'
+export type { PipeToOptions, ShutdownOptions, ShutdownSetting } from './shutdown.js'
 export * from './target.js'
 export * from './transformer.js'
 export * from './types.js'

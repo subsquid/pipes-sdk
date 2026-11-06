@@ -13,6 +13,10 @@ export type StartContext = {
   logger: Logger
   metrics: Metrics
   portal: PortalClient
+  /** Effective stream mode for this run. Pass it to additional portal reads. */
+  finalized: boolean
+  /** Pass to portal requests as `abort` to cancel their reads and retries when the pipe stops. */
+  signal?: AbortSignal
 }
 export type StopContext = { logger: Logger }
 type TransformerFn<In, Out> = (data: In, ctx: BatchContext) => Promise<Out> | Out
