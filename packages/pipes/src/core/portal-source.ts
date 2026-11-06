@@ -13,6 +13,7 @@ import {
 import { last, partition } from '../internal/array.js'
 import { stallWatchdog } from '../internal/stall-watchdog.js'
 import {
+  BlockRangeConfigurationError,
   DefaultPipeIdError,
   ForkCursorMissingError,
   ForkOnFinalizedStreamError,
@@ -324,6 +325,19 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       portal,
       bound: cursor ? { from: cursor.number + 1 } : undefined,
     })
+
+    // A rollback can rewind below a request range chosen from a previous resume cursor.
+    // Check every read, including a fresh restart after the rollback was persisted: otherwise
+    // the first request skips the replacement blocks and loses the cursor's parent-hash anchor.
+    const requestStart = raw[0]?.range.from
+    if (cursor && requestStart !== undefined && requestStart > cursor.number + 1) {
+      throw new BlockRangeConfigurationError([
+        `The configured request starts at block ${requestStart}, but the persisted cursor requires resuming at block ${cursor.number + 1}.`,
+        'The pipe stopped before requesting data to avoid skipping blocks after a rollback.',
+        'Configure the request range to include every block a fork may replay; do not set its start from the latest saved cursor.',
+        'The target resume cursor already excludes previously processed blocks during normal reading.',
+      ])
+    }
 
     const initial = raw[0]?.range.from || 0
     const ranges = raw.map((r) => r.range)

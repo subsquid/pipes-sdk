@@ -1373,6 +1373,103 @@ describe('Portal stream block order', () => {
   )
 })
 
+describe('Portal stream restart with a fork below the request start', () => {
+  for (const from of [1, 5, 'latest'] as const) {
+    const name =
+      from === 5
+        ? 'halts on an uncovered rollback, stays halted on restart, and recovers with a wider request'
+        : `replays the replacement block with request start ${from}`
+    withPortal(name, async ({ portal: serve }) => {
+      const block = (number: number, suffix = '') => ({ number, hash: `0x${number}${suffix}` })
+      const resume = { latest: block(4, 'a'), finalized: block(2) }
+      const records: RollbackRecord[] = [{ rollbackChain: [block(3), resume.latest], finalized: resume.finalized }]
+      const portal = await serve({
+        blocks: [1, 2, 3, 4, 5, 6].map((number) => ({
+          header: { ...block(number, number >= 4 ? 'b' : ''), timestamp: number * 1000 },
+        })),
+        finalized: 2,
+        latest: 6,
+        blocksPerResponse: 1,
+      })
+      const seen: { number: number; hash: string }[] = []
+      let savedCursor: TargetState['latest'] = resume.latest
+      const resolveFork = vi.fn(async (canonical: Parameters<typeof resolveForkCursor>[1]) => {
+        const ancestor = await resolveForkCursor(records, canonical)
+        if (ancestor) savedCursor = ancestor
+        return ancestor
+      })
+
+      // Start from durable state left by a terminated run. The reason it stopped is irrelevant:
+      // block 4 is now orphaned, and recovery must replay its canonical replacement.
+      const runFrom = (requestStart: number | 'latest') =>
+        evmPortalStream({
+          id: 'test',
+          portal: portal.url,
+          logger: 'silent',
+          outputs: blockDecoder({ from: requestStart, to: 6 }),
+        }).pipeTo(
+          createTarget({
+            write: async ({ read }) => {
+              for await (const { data, ctx } of read({ latest: savedCursor, finalized: resume.finalized })) {
+                seen.push(...data.map(({ number, hash }) => ({ number, hash })))
+                savedCursor = ctx.stream.state.current
+              }
+            },
+            resolveFork,
+          }),
+        )
+
+      if (from === 5) {
+        await expect(runFrom(from)).rejects.toMatchObject({ code: 'E0002', name: 'PipeConfiguration' })
+        expect(savedCursor).toEqual(block(3))
+        expect(seen).toEqual([])
+        expect(portal.requests).toHaveLength(1)
+
+        // The rollback is durable even if the process stops again before reporting the error.
+        // A fresh source must refuse the same gap without issuing an unanchored request.
+        await expect(runFrom(from)).rejects.toMatchObject({ code: 'E0002', name: 'PipeConfiguration' })
+        expect(savedCursor).toEqual(block(3))
+        expect(seen).toEqual([])
+        expect(portal.requests).toHaveLength(1)
+      }
+
+      await expect(runFrom(from === 5 ? 1 : from)).resolves.toBeUndefined()
+      expect(portal.requests[0]).toMatchObject({
+        status: 409,
+        query: { fromBlock: 5, parentBlockHash: resume.latest.hash },
+      })
+      expect(resolveFork).toHaveBeenCalledOnce()
+      expect(await resolveFork.mock.results[0]!.value).toEqual(block(3))
+      expect(savedCursor).toMatchObject(block(6, 'b'))
+      expect(seen).toEqual([block(4, 'b'), block(5, 'b'), block(6, 'b')])
+      expect(portal.requests[1]?.query).toMatchObject({ fromBlock: 4, parentBlockHash: block(3).hash })
+    })
+  }
+
+  withPortal('allows an intentional gap between configured ranges on resume', async ({ portal: serve }) => {
+    const portal = await serve({ latest: 6, finalized: 6, blocksPerResponse: 1 })
+    const seen: number[] = []
+    const outputs = evmQuery()
+      .addRange({ from: 1, to: 1 })
+      .addRange({ from: 5, to: 6 })
+      .addFields({ block: { number: true } })
+      .build()
+
+    await evmPortalStream({ id: 'test', portal: portal.url, logger: 'silent', outputs }).pipeTo(
+      createTarget({
+        write: async ({ read }) => {
+          for await (const { data } of read({ latest: { number: 3, hash: '0x3' }, finalized: null })) {
+            seen.push(...data.map(({ header }) => header.number))
+          }
+        },
+      }),
+    )
+
+    expect(seen).toEqual([5, 6])
+    expect(portal.requests[0]?.query.parentBlockHash).toBeUndefined()
+  })
+})
+
 describe('Portal stream fork below the finalized floor', () => {
   function blocks(numbers: number[], finalized: number): MockResponse {
     return {
