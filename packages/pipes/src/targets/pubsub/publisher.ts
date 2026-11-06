@@ -7,6 +7,8 @@ import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 export type TopicSetup = 'validate' | 'create' | 'none'
 
 export type PublisherOptions = {
+  /** Close the client with the publisher. A client the caller passed in stays open: it may be shared. */
+  ownsClient?: boolean
   messageOrdering: boolean
   batching?: BatchPublishOptions
   flowControl?: FlowControlOptions
@@ -178,7 +180,10 @@ export class GooglePubsubPublisher implements Publisher {
       await topic.flush().catch(() => undefined)
     }
     this.#topics.clear()
-    await this.#client.close()
+
+    if (this.#options.ownsClient) {
+      await this.#client.close()
+    }
   }
 }
 

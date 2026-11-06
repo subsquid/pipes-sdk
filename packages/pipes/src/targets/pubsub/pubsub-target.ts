@@ -325,6 +325,7 @@ export function pubsubTarget<T>(options: PubsubTargetOptions<T>) {
         if (!publisher) {
           const client = await resolvePubsubClient(options.pubsub)
           const publisherOptions: PublisherOptions = {
+            ownsClient: client !== options.pubsub,
             messageOrdering,
             topicSetup,
             batching: options.publish?.batching,

@@ -2,7 +2,6 @@ import {
   ApiDataset,
   GetBlock,
   PortalBlockStream,
-  PortalBlockStreamOptions,
   PortalClient,
   PortalClientOptions,
   Query,
@@ -26,6 +25,7 @@ import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
 import { QueryBuilder, type Range, hashQuery } from './query-builder.js'
+import { PipeToOptions, resolveShutdown, withShutdown } from './shutdown.js'
 import { ReadOptions, Target, TargetState } from './target.js'
 import { QueryAwareTransformer, Transformer, TransformerArgs, TransformerOptions } from './transformer.js'
 import { BlockCursor, HookContext } from './types.js'
@@ -72,47 +72,15 @@ const FORCED_FINALIZED_STREAM_WARNING = formatWarning({
   ],
 })
 
-/**
- * A view of an existing client whose block stream cannot be switched back to its configured hot
- * default. Keeping the original instance behind a Proxy preserves custom clients and HTTP
- * configuration, while also making `instanceof PortalClient` true for caches.
- *
- * The stream is pinned; head lookups are only defaulted. A caller that explicitly asks for the hot
- * head still gets it — `start` hands this view to transformer hooks, and a transformer measuring
- * head lag must be able to see the block the chain is actually on.
- */
-function finalizedPortalView(portal: PortalClient): PortalClient {
-  const getHead: PortalClient['getHead'] = async (options) => {
-    if (options?.finalized === false) return portal.getHead(options)
-
-    // A dataset that finalizes nothing still streams (its files just aren't reorg-safe), and an
-    // absent finalized head would resolve `from: 'latest'` to genesis — a full backfill.
-    const head = await portal.getHead({ ...options, finalized: true })
-
-    return head ?? portal.getHead({ ...options, finalized: false })
-  }
-  const getStream: PortalClient['getStream'] = <Q extends Query>(query: Q, options?: PortalBlockStreamOptions) =>
-    portal.getStream(query, { ...options, finalized: true })
-
-  return new Proxy(portal, {
-    get(target, property) {
-      if (property === 'finalized') return true
-      if (property === 'getHead') return getHead
-      if (property === 'getStream') return getStream
-
-      // PortalClient uses private fields, so methods/getters must keep the real client as `this`.
-      const value = Reflect.get(target, property, target)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-}
-
 export interface PortalCache {
   getStream<Q extends Query>(options: {
     portal: PortalClient
     query: Q
     logger: Logger
+    /** Effective stream mode; forward it to the portal on a cache miss. */
     finalized?: boolean
+    /** Stop iteration on abort and forward this as `request.abort` on a cache miss. */
+    signal?: AbortSignal
   }): PortalBlockStream<GetBlock<Q>>
 }
 
@@ -166,6 +134,8 @@ export type BatchContext = {
 export type HeadContext = Omit<BatchContext, 'stream'> & { stream?: StreamInfo }
 
 export type PortalBatch<T = any> = { data: T; ctx: BatchContext }
+
+type SourceReadOptions = ReadOptions & { finalized?: boolean; signal?: AbortSignal }
 
 type PartialBlock = { header: { number: number; hash: string; timestamp?: number } }
 
@@ -299,15 +269,15 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
   }
 
   /**
-   * `forceFinalized` is an argument rather than instance state on purpose: one source can be piped
-   * to several targets, and a finalized-only target must not silently pin the endpoint for the hot
-   * consumers that follow it.
+   * Finality belongs to this read, so a finalized-only target does not change the client defaults
+   * for other consumers of the same source.
    */
-  private async *read(
-    state?: TargetState,
-    options?: ReadOptions,
-    forceFinalized = false,
-  ): AsyncIterable<PortalBatch<T>> {
+  private async *read(state?: TargetState, options: SourceReadOptions = {}): AsyncIterable<PortalBatch<T>> {
+    const { finalized = this.#portal.finalized, signal: stop } = options
+    if (stop?.aborted) {
+      return
+    }
+
     // Seed the monotonic finalized watermark from the target's persisted finalized
     // head so it survives an unclean restart mid-fork. Seeding only from the
     // dedicated `finalized` field (never from `latest`) keeps no-finality datasets
@@ -315,13 +285,15 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     this.#watermark.seed(state?.finalized ?? undefined)
 
     const cursor = state?.latest
-    const portal = forceFinalized ? finalizedPortalView(this.#portal) : this.#portal
+    const portal = this.#portal
 
     /*
      Calculates query ranges while excluding blocks that were previously fetched to avoid duplicate processing
      */
     const { bounded, raw } = await this.#queryBuilder.calculateRanges({
       portal,
+      finalized,
+      signal: stop,
       bound: cursor ? { from: cursor.number + 1 } : undefined,
     })
 
@@ -330,9 +302,10 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
 
     this.#logger.debug(`${bounded.length} range(s) configured`)
 
-    await this.start({ initial, current: cursor }, portal)
+    await this.start({ initial, current: cursor }, { finalized, signal: stop })
+    if (stop?.aborted) return
 
-    const datasetMetadata = await portal.getMetadata()
+    const datasetMetadata = await portal.getMetadata({ abort: stop })
     if (!datasetMetadata.real_time) {
       this.#logger.warn(NOT_REAL_TIME_WARNING(datasetMetadata.dataset))
     }
@@ -368,26 +341,20 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
         parentBlockHash: isResumeContinuation ? cursor.hash : undefined,
       }
 
-      // `portal` already enforces finality when the target requires it. Forwarding the effective
-      // value as well keeps the cache contract explicit; a cache that ignores it is still safe.
-      // Passed as the boolean it is — `false` means "this pipe is hot", which a cache deciding what
-      // is safe to persist must be able to tell apart from "the source said nothing".
-      const finalizedStream = portal.finalized
-
       const source = this.#options.cache
         ? // use cache if available
           this.#options.cache.getStream({
             portal,
             logger: this.#logger,
             query,
-            finalized: finalizedStream,
+            finalized,
+            signal: stop,
           })
-        : portal.getStream(query, { finalized: finalizedStream })
+        : portal.getStream(query, { finalized, request: { abort: stop } })
 
       const batchContext = async (
         batch: StreamData<any>,
-        finalized: BlockCursor | undefined,
-        current: BlockCursor,
+        { finalized, current }: { finalized: BlockCursor | undefined; current: BlockCursor },
         profiler: Profiler,
       ): Promise<BatchContext> => {
         // The last block this run can reach. A configured end bounds it, but never past the
@@ -439,6 +406,11 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
         for await (const { batch, finalized } of this.applyFinality(source, options)) {
           readSpan.end()
 
+          // A batch read ahead of the target: nothing committed it, so the restart reads it again.
+          if (stop?.aborted) {
+            return
+          }
+
           const blocks = batch.blocks
 
           // Held until the consumer comes back for the next batch, so it covers the transformers
@@ -446,17 +418,21 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
           watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
 
           if (blocks.length > 0) {
-            const ctx = await batchContext(batch, finalized, cursorFromHeader(last(blocks)), batchSpan)
+            const ctx = await batchContext(batch, { finalized, current: cursorFromHeader(last(blocks)) }, batchSpan)
             processed = ctx.stream.state.current
 
             const data = await this.applyTransformers(ctx, batch.blocks as T)
+
+            if (stop?.aborted) {
+              return
+            }
 
             yield { data, ctx }
           } else {
             // A head-only response: no blocks to yield, but its head and request counts still reach
             // the progress tracker and the stats (WP-13).
             if (processed) {
-              const ctx = await batchContext(batch, finalized, processed, batchSpan)
+              const ctx = await batchContext(batch, { finalized, current: processed }, batchSpan)
               await this.applyHead(ctx)
               this.#metricServer.headProcessed?.(ctx)
             } else {
@@ -607,7 +583,10 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     )
   }
 
-  private async start(state: { initial: number; current?: BlockCursor }, portal: PortalClient) {
+  private async start(
+    state: { initial: number; current?: BlockCursor },
+    options: { finalized: boolean; signal?: AbortSignal },
+  ) {
     if (this.#started) {
       this.#logger.debug(`stream has been already started, skipping "start" hook...`)
       return
@@ -627,7 +606,8 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       id: this.#id,
       metrics: this.#metricServer.metrics,
       state,
-      portal,
+      portal: this.#portal,
+      ...options,
     })
     await Promise.all(this.#transformers.map((t) => t.start(ctx)))
     span.end()
@@ -659,7 +639,21 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     await this.#metricServer.stop()
   }
 
-  pipeTo(target: Target<T>) {
+  /**
+   * Streams into `target`. By default a SIGTERM or SIGINT drains the pipe, and the promise rejects
+   * with {@link PipelineStoppedError}: see {@link PipeToOptions}. It resolves only when the range completed.
+   */
+  async pipeTo(target: Target<T>, options?: PipeToOptions): Promise<void> {
+    const shutdown = resolveShutdown(options?.shutdown)
+
+    if (shutdown === false) {
+      return this.writeTo(target)
+    }
+
+    return withShutdown(shutdown, this.#logger, (stop) => this.writeTo(target, stop))
+  }
+
+  private writeTo(target: Target<T>, stop?: AbortSignal) {
     const self = this
 
     // Decided before write(), so the flag handed to the target is the stream it will actually read.
@@ -679,7 +673,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
 
         // A fork resumes the run, it does not restart the lifecycle (WP-30).
         try {
-          yield* self.readAcrossForks(target, state, options, forceFinalized)
+          yield* self.readAcrossForks(target, state, { ...options, finalized, signal: stop })
         } finally {
           await self.stop()
         }
@@ -687,25 +681,33 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     })
   }
 
-  /** Reads to the end of the run; after a fork, from the common ancestor. */
+  /**
+   * Reads to the end of the run; after a fork, from the common ancestor. Ending early on `stop` looks
+   * like the end of the stream to the target, which then flushes and closes as usual. Only the source
+   * side is cancelled: a target's commit or fork rollback in progress runs on.
+   */
   private async *readAcrossForks(
     target: Target<T>,
     state: TargetState | undefined,
-    options: ReadOptions | undefined,
-    forceFinalized: boolean,
+    options: SourceReadOptions,
   ): AsyncIterable<PortalBatch<T>> {
+    const { finalized = this.#portal.finalized, signal: stop } = options
     while (true) {
       try {
-        for await (const batch of this.read(state, options, forceFinalized)) {
+        for await (const batch of this.read(state, options)) {
           yield batch as PortalBatch<T>
           this.batchEnd(batch.ctx)
         }
 
         return
       } catch (e) {
+        if (stop?.aborted && e === stop.reason) {
+          return
+        }
+
         if (!isForkException(e)) throw e
 
-        const ancestor = await this.rollbackFork(target, e.canonicalBlocks, forceFinalized)
+        const ancestor = await this.rollbackFork(target, e.canonicalBlocks, finalized)
 
         // The finalized floor persists in #watermark across read() calls, so re-seeding it with
         // the same state.finalized is a harmless monotonic no-op.
@@ -715,10 +717,10 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
   }
 
   /** Rolls the target, then the transformers, back to the common ancestor, and returns it. */
-  private async rollbackFork(target: Target<T>, canonicalBlocks: BlockCursor[], forceFinalized: boolean) {
+  private async rollbackFork(target: Target<T>, canonicalBlocks: BlockCursor[], finalized: boolean) {
     // A fork on `/finalized-stream` contradicts the route's contract. Never dispatch it to
     // a target rollback handler: that could delete data already committed as finalized.
-    if (this.#portal.finalized || forceFinalized) {
+    if (finalized) {
       throw new ForkOnFinalizedStreamError()
     }
 

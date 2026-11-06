@@ -51,6 +51,6 @@ Target = ratified contract value; ⚠ = proposed, pending ADR-14.
 | P-STALL-BUDGET-S | max unsignalled zero-progress (LIV-1, LIV-2, SLI-6) | not measured | ⚠ 60 s |
 | P-FORK-RESOLVE-S | fork signal → resumed streaming (LIV-4, SLI-4) | not measured | ⚠ 30 s |
 | P-STARTUP-S | start → first commit post-crash (LIV-5, SLI-5) | not measured | ⚠ 60 s |
-| P-SHUTDOWN-DRAIN-S | stop request → clean exit (LIV-6) | not measured | ⚠ 10 s |
+| P-SHUTDOWN-DRAIN-S | first signal → drain, cleanup and callback done (LIV-6, WP-33) | default budget 30 s, set per pipe (ADR-24); duration not measured | ⚠ 30 s |
 | P-SLO-BACKFILL-BPS | S1 backfill throughput floor (SLI-1) | not measured | ⚠ set from first CT-6 baseline |
 | P-SLO-COMMIT-P99-MS | S1 commit latency p99 (SLI-3) | not measured | ⚠ set from first CT-6 baseline |

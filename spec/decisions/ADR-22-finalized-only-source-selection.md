@@ -19,8 +19,8 @@ it has not published.
 ## Decision
 
 A sink that accepts only finalized delivery declares that capability before reading.
-The pipe then selects one effective finalized portal view before symbolic range
-resolution and uses it consistently for transformer startup, caches, and block reads
+The pipe then selects the effective finalized mode before symbolic range resolution
+and passes it explicitly to transformer startup, caches, and block reads
 (WP-7, IB-11). A configured full-stream preference is overridden with a warning; the
 sink is told the effective mode.
 
@@ -48,8 +48,8 @@ no rollback state or handler. Range resolution, custom caches, and transformers 
 same effective source mode as the sink, so `latest` and data reads cannot disagree.
 
 The finality buffer API is removed. Custom finalized-only targets declare the new
-capability and write rows as delivered; custom caches use the effective portal view
-passed to them. Reorg safety now depends directly on the dataset's finalized-route
+capability and write rows as delivered; custom caches and start hooks forward the
+effective mode supplied alongside the original client. Reorg safety depends directly on the dataset's finalized-route
 semantics, which makes the no-finality limitation visible rather than approximating it
 inside a sink.
 

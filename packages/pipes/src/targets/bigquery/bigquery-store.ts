@@ -561,9 +561,12 @@ export class BigQueryWriter {
     return rows as T[]
   }
 
-  close(): void {
-    // Tear down every cached Committed-stream writer + its underlying gRPC connection. Each
-    // close is best-effort — a Writer.close() / connection.close() throw must NOT propagate
+  /**
+   * Tears down every cached Committed-stream writer + its underlying gRPC connection, and leaves
+   * the WriterClient open: a caller may own it. The next write opens new streams.
+   */
+  closeStreams(): void {
+    // Each close is best-effort — a Writer.close() / connection.close() throw must NOT propagate
     // because we're often called from a finally block during normal shutdown and a single
     // failed close shouldn't mask the original control flow.
     for (const state of this.#streams.values()) {
@@ -579,6 +582,10 @@ export class BigQueryWriter {
       }
     }
     this.#streams.clear()
+  }
+
+  close(): void {
+    this.closeStreams()
 
     // WriterClient.close() is synchronous and returns void.
     this.#writer.close()

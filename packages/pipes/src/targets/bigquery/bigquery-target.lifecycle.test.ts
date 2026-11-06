@@ -3,8 +3,18 @@ import { managedwriter } from '@google-cloud/bigquery-storage'
 import * as protobuf from 'protobufjs'
 import { type Mock, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { BatchContext, BlockCursor, Logger, Target } from '~/core/index.js'
+import {
+  type BatchContext,
+  type BlockCursor,
+  type Logger,
+  PipelineShutdownTimeoutError,
+  PipelineStoppedError,
+  type Target,
+} from '~/core/index.js'
+import { evmPortalStream, evmQuery } from '~/evm/index.js'
+import { mockBlock } from '~/testing/evm/index.js'
 import { mockMetricsServer, testLogger } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
 import { BigQuerySyncState } from './bigquery-state.js'
 import { BigQueryWriter, type ProtoWriterFactory } from './bigquery-store.js'
@@ -703,6 +713,209 @@ describe('bigqueryTarget — write lifecycle', () => {
 // -----------------------------------------------------------------------------
 // bigqueryTarget — Track 2 metrics (commit lag / commit duration / append errors)
 // -----------------------------------------------------------------------------
+
+describe('bigqueryTarget — graceful shutdown', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  function setup({ appendResult }: { appendResult?: () => Promise<unknown> } = {}) {
+    const { writer, calls } = makeWriter()
+    const { bq } = makeBigQuery()
+    const syncRows: { committed: boolean }[] = []
+    let writersClosed = 0
+
+    const settings = {
+      protoWriterFactory: (({ protoDescriptor }) => ({
+        appendRows: ({ serializedRows }) => {
+          for (const row of decodeProtoRows(serializedRows, protoDescriptor)) {
+            if ('op' in row) {
+              syncRows.push({ committed: Boolean(row['committed']) })
+            }
+          }
+
+          return { getResult: appendResult ?? (async () => ({})) }
+        },
+        close: () => {
+          writersClosed++
+        },
+      })) as ProtoWriterFactory,
+    }
+
+    return {
+      bq,
+      writer,
+      calls,
+      settings,
+      syncRows,
+      writersClosed: () => writersClosed,
+    }
+  }
+
+  function blockStream(url: string) {
+    return evmPortalStream({
+      id: 'test-pipe',
+      portal: { url, maxBytes: 1 },
+      logger: 'silent',
+      outputs: evmQuery()
+        .addRange({ from: 1, to: 5 })
+        .addFields({ block: { number: true, hash: true, timestamp: true } })
+        .build()
+        .pipe((blocks) => blocks.map((block) => block.header)),
+    })
+  }
+
+  const chainOf = (count: number) => Array.from({ length: count }, (_, i) => mockBlock({ number: i + 1 }))
+
+  withPortal(
+    'commits the batch in flight, closes its streams, and leaves the writer of the caller open',
+    async ({ portal }) => {
+      const chain = await portal({ blocks: chainOf(5), blocksPerResponse: 1 })
+      const { bq, writer, calls, settings, syncRows, writersClosed } = setup()
+      const batches: number[] = []
+      const onShutdown = vi.fn(() => {
+        expect(writersClosed()).toBeGreaterThan(0)
+      })
+
+      const target = bigqueryTarget<{ number: number }[]>({
+        client: { bigquery: bq, writer },
+        dataset: 'd',
+        tables: TABLES,
+        settings,
+        onData: async ({ store, data }) => {
+          batches.push(data[0].number)
+          store.insert(
+            'events',
+            data.map((block) => ({ block_number: block.number })),
+          )
+
+          process.emit('SIGTERM', 'SIGTERM')
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        },
+      })
+
+      const run = blockStream(chain.url).pipeTo(target, { shutdown: onShutdown })
+
+      await expect(run).rejects.toBeInstanceOf(PipelineStoppedError)
+
+      expect(batches).toEqual([1])
+      // IN_FLIGHT_COMMIT, then COMMITTED: the cursor moved, and only over what the tables acked.
+      expect(syncRows.map((row) => row.committed)).toEqual([false, true])
+      expect(onShutdown).toHaveBeenCalledTimes(1)
+      expect(writersClosed()).toBe(2)
+      expect(calls.close).toBe(0)
+    },
+  )
+
+  withPortal('lets a commit retry through a transient failure during the drain', async ({ portal }) => {
+    const chain = await portal({ blocks: chainOf(5), blocksPerResponse: 1 })
+    let attempts = 0
+    const { bq, writer, settings, syncRows } = setup({
+      appendResult: async () => {
+        attempts++
+        if (attempts === 2) {
+          throw Object.assign(new Error('unavailable'), { code: 14 })
+        }
+
+        return {}
+      },
+    })
+
+    const target = bigqueryTarget<{ number: number }[]>({
+      client: { bigquery: bq, writer },
+      dataset: 'd',
+      tables: TABLES,
+      settings,
+      onData: ({ store, data }) => {
+        store.insert(
+          'events',
+          data.map((block) => ({ block_number: block.number })),
+        )
+
+        process.emit('SIGTERM', 'SIGTERM')
+      },
+    })
+
+    await expect(blockStream(chain.url).pipeTo(target)).rejects.toBeInstanceOf(PipelineStoppedError)
+
+    expect(attempts).toBeGreaterThan(3)
+    expect(syncRows.map((row) => row.committed).slice(-1)).toEqual([true])
+  })
+
+  withPortal('reports a commit that outlasts the budget, with no COMMITTED row', async ({ portal }) => {
+    const chain = await portal({ blocks: chainOf(5), blocksPerResponse: 1 })
+    let appends = 0
+    const { bq, writer, settings, syncRows } = setup({
+      appendResult: () => {
+        appends++
+
+        return appends === 1 ? Promise.resolve({}) : new Promise(() => {})
+      },
+    })
+
+    const target = bigqueryTarget<{ number: number }[]>({
+      client: { bigquery: bq, writer },
+      dataset: 'd',
+      tables: TABLES,
+      settings,
+      onData: ({ store, data }) => {
+        store.insert(
+          'events',
+          data.map((block) => ({ block_number: block.number })),
+        )
+
+        process.emit('SIGTERM', 'SIGTERM')
+      },
+    })
+
+    const run = blockStream(chain.url).pipeTo(target, { shutdown: { timeout: '50ms' } })
+
+    await expect(run).rejects.toBeInstanceOf(PipelineShutdownTimeoutError)
+    expect(syncRows.map((row) => row.committed)).toEqual([false])
+  })
+
+  withPortal('stops during startup without reading the portal', async ({ portal }) => {
+    const chain = await portal({ blocks: chainOf(5) })
+    const { bq, writer, settings, syncRows } = setup()
+
+    const target = bigqueryTarget<{ number: number }[]>({
+      client: { bigquery: bq, writer },
+      dataset: 'd',
+      tables: TABLES,
+      settings,
+      onStart: () => {
+        process.emit('SIGTERM', 'SIGTERM')
+      },
+      onData: () => {},
+    })
+
+    await expect(blockStream(chain.url).pipeTo(target)).rejects.toBeInstanceOf(PipelineStoppedError)
+
+    expect(chain.requests).toEqual([])
+    expect(syncRows).toEqual([])
+  })
+
+  it('closes its streams on a natural end too, and the writer of the caller stays open', async () => {
+    const { bq, writer, calls, settings, writersClosed } = setup()
+
+    const target = bigqueryTarget<unknown>({
+      client: { bigquery: bq, writer },
+      dataset: 'd',
+      tables: TABLES,
+      settings,
+      onData: ({ store, data }) => {
+        store.insert('events', [data as Record<string, unknown>])
+      },
+    })
+
+    async function* read() {
+      yield { data: { block_number: 10, tx_hash: '0xa' }, ctx: makeBatchContext(cursor(10)) }
+    }
+
+    await writeAll(target, read)
+
+    expect(writersClosed()).toBe(2)
+    expect(calls.close).toBe(0)
+  })
+})
 
 describe('bigqueryTarget — commit metrics', () => {
   let writerSetup: ReturnType<typeof makeWriter>

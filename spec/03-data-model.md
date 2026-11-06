@@ -75,8 +75,8 @@ processed this interval for this table*, not that rows exist in it.
 
 **DEF-15 — Finalized-only delivery.** A sink policy requiring every finality-sensitive
 source operation to use the finalized mode. The pipe selects that mode before range
-resolution and passes the same effective portal view through transformer startup,
-caching, and streaming (WP-7, IB-11). On a finalizing dataset, the portal admits a block
+resolution and passes that mode explicitly through transformer startup, caching,
+and streaming (WP-7, IB-11). On a finalizing dataset, the portal admits a block
 only after finalization and emits no fork on that route, so the sink feeds delivered
 rows into its ordinary commit protocol without a finality hold-back and needs no
 rollback handler. On a no-finality dataset the route cannot establish reorg safety;

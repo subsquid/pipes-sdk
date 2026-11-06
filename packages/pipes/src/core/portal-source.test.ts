@@ -458,7 +458,12 @@ describe('Portal abstract stream', () => {
         write: async () => {},
       })
 
-      expect(() => stream.pipeTo(target as any)).not.toThrow()
+      // An unawaited run keeps the shared shutdown listeners past this test (ADR-24).
+      let run!: Promise<void>
+      expect(() => {
+        run = stream.pipeTo(target as any)
+      }).not.toThrow()
+      await run
     })
   })
 
@@ -986,14 +991,13 @@ describe('finalized-only targets', () => {
   })
 
   it('gives a transformer the hot head when it explicitly asks for one', async () => {
-    // `start` hooks get the finalized view, which pins the STREAM. A transformer measuring head lag
-    // still has to see the block the chain is actually on.
     portal = await mockPortal({ finalized: 1, latest: 99 })
+    const client = new PortalClient({ url: portal.url, finalized: false })
     let seenHead: { number: number } | undefined
 
     await evmPortalStream({
       id: 'test',
-      portal: { url: portal.url, finalized: false },
+      portal: client,
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     })
@@ -1002,7 +1006,10 @@ describe('finalized-only targets', () => {
           profiler: { name: 'head-lag' },
           transform: (data) => data,
           start: async (ctx) => {
-            seenHead = await ctx.portal.getHead({ finalized: false })
+            expect(ctx.portal).toBe(client)
+            expect(ctx.finalized).toBe(true)
+            expect(ctx.portal.finalized).toBe(false)
+            seenHead = await ctx.portal.getHead({ finalized: false, abort: ctx.signal })
           },
         }),
       )
@@ -1043,28 +1050,28 @@ describe('finalized-only targets', () => {
     expect(hot.finalized).toBe(false)
   })
 
-  it('keeps a custom cache safe even when it ignores the finalized option', async () => {
-    // The cache intentionally behaves like an implementation compiled against the old contract:
-    // it ignores `finalized` and relies entirely on the client defaults. The mock serves only
-    // /finalized-stream, so this completes only if the client handed to the cache is finalized.
+  it('passes the effective finality and stop signal to a cache with the original client', async () => {
     portal = await mockPortal([response], { finalized: true })
-    let cacheSawFinalizedClient: boolean | undefined
+    const client = new PortalClient({ url: portal.url, finalized: false })
+    let cacheSawFinalized: boolean | undefined
     const cache: PortalCache = {
-      getStream({ portal: cachedPortal, query }) {
-        cacheSawFinalizedClient = cachedPortal.finalized
-        return cachedPortal.getStream(query)
+      getStream({ portal: cachedPortal, query, finalized, signal }) {
+        expect(cachedPortal).toBe(client)
+        expect(signal).toBeInstanceOf(AbortSignal)
+        cacheSawFinalized = finalized
+        return cachedPortal.getStream(query, { finalized, request: { abort: signal } })
       },
     }
 
     await evmPortalStream({
       id: 'test',
-      portal: { url: portal.url, finalized: false },
+      portal: client,
       cache,
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     }).pipeTo(recordingTarget(true, {}) as any)
 
-    expect(cacheSawFinalizedClient).toBe(true)
+    expect(cacheSawFinalized).toBe(true)
   })
 
   it('stays quiet when the pipe already asked for the finalized stream', async () => {
@@ -1132,27 +1139,34 @@ describe('stall reporting', () => {
     const logger = defaultLogger({ level: 'silent' })
     const warn = vi.spyOn(logger, 'warn')
 
+    let release = () => {}
+    const paused = new Promise<void>((resolve) => {
+      release = resolve
+    })
     const portalClient = new StubPortalClient(async function* () {
-      await new Promise(() => {})
+      await paused
     })
 
-    evmPortalStream({
+    const run = evmPortalStream({
       id: 'test',
       portal: portalClient,
       logger,
       progress: { interval: 0 },
       outputs: blockDecoder({ from: 1, to: 1 }),
-    })
-      .pipeTo(hangingTarget(async () => {}) as any)
-      .catch(() => {})
+    }).pipeTo(hangingTarget(async () => {}) as any)
 
-    await vi.advanceTimersByTimeAsync(120_000)
+    try {
+      await vi.advanceTimersByTimeAsync(120_000)
 
-    expect(warn).toHaveBeenCalledExactlyOnceWith({
-      message: 'stalled: waiting for data from the portal for 2m 0s',
-      phase: 'waiting for data from the portal',
-      elapsedMs: 120_000,
-    })
+      expect(warn).toHaveBeenCalledExactlyOnceWith({
+        message: 'stalled: waiting for data from the portal for 2m 0s',
+        phase: 'waiting for data from the portal',
+        elapsedMs: 120_000,
+      })
+    } finally {
+      release()
+      await run
+    }
   })
 
   it('does not call a stall that ended in an error recovered', async () => {
@@ -1167,7 +1181,7 @@ describe('stall reporting', () => {
       })
     })
 
-    evmPortalStream({
+    const run = evmPortalStream({
       id: 'test',
       portal: portalClient,
       logger,
@@ -1175,9 +1189,10 @@ describe('stall reporting', () => {
       outputs: blockDecoder({ from: 1, to: 1 }),
     })
       .pipeTo(hangingTarget(async () => {}) as any)
-      .catch(() => {})
+      .catch((error) => error)
 
     await vi.advanceTimersByTimeAsync(180_000)
+    expect(await run).toMatchObject({ message: 'portal is gone' })
 
     expect(info).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('recovered') }))
   })
@@ -1192,45 +1207,53 @@ describe('stall reporting', () => {
       release = resolve
     })
 
+    let finish = () => {}
+    const paused = new Promise<void>((resolve) => {
+      finish = resolve
+    })
     const portalClient = new StubPortalClient(async function* () {
       yield batch(1)
-      await new Promise(() => {})
+      await paused
     })
 
-    evmPortalStream({
+    const run = evmPortalStream({
       id: 'test',
       portal: portalClient,
       logger,
       progress: { interval: 0 },
       outputs: blockDecoder({ from: 1, to: 10 }),
-    })
-      .pipeTo(hangingTarget(() => wedged) as any)
-      .catch(() => {})
+    }).pipeTo(hangingTarget(() => wedged) as any)
 
-    await vi.advanceTimersByTimeAsync(120_000)
-    expect(warn).toHaveBeenCalledExactlyOnceWith({
-      message: 'stalled: processing block 1 for 2m 0s',
-      phase: 'processing block 1',
-      elapsedMs: 120_000,
-    })
+    try {
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(warn).toHaveBeenCalledExactlyOnceWith({
+        message: 'stalled: processing block 1 for 2m 0s',
+        phase: 'processing block 1',
+        elapsedMs: 120_000,
+      })
 
-    // The second report comes 4 minutes after the first, so an hours-long wedge is a handful
-    // of lines rather than one every couple of minutes.
-    await vi.advanceTimersByTimeAsync(120_000)
-    expect(warn).toHaveBeenCalledOnce()
+      // The second report comes 4 minutes after the first, so an hours-long wedge is a handful
+      // of lines rather than one every couple of minutes.
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(warn).toHaveBeenCalledOnce()
 
-    await vi.advanceTimersByTimeAsync(120_000)
-    expect(warn).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(warn).toHaveBeenCalledTimes(2)
 
-    release()
-    await vi.waitFor(() => {
-      expect(info).toHaveBeenCalledWith(
-        expect.objectContaining({
-          message: expect.stringContaining('recovered: processing block 1 took'),
-          phase: 'processing block 1',
-        }),
-      )
-    })
+      release()
+      await vi.waitFor(() => {
+        expect(info).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringContaining('recovered: processing block 1 took'),
+            phase: 'processing block 1',
+          }),
+        )
+      })
+    } finally {
+      release()
+      finish()
+      await run
+    }
   })
 })
 

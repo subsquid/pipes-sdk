@@ -9,6 +9,7 @@ export enum SdkErrorName {
   ForkHandling = 'ForkHandling',
   TargetConfiguration = 'TargetConfiguration',
   PortalContract = 'PortalContract',
+  PipeShutdown = 'PipeShutdown',
 }
 
 export class PipeError extends Error {
@@ -71,6 +72,16 @@ export class InstructionDecoderConfigurationError extends PipeError {
 export class EventDecoderConfigurationError extends PipeError {
   constructor(message: string | string[]) {
     super('E0004', SdkErrorName.PipeConfiguration, message)
+  }
+}
+
+/**
+ * E0005: Thrown when the `shutdown` option of `pipeTo` is not a function, an options object or `false`,
+ * or its `timeout` is not a positive duration such as `'30s'`, `'1m'` or `'2m 30s'`. The pipe does not start.
+ */
+export class ShutdownConfigurationError extends PipeError {
+  constructor(message: string | string[]) {
+    super('E0005', SdkErrorName.PipeConfiguration, message)
   }
 }
 
@@ -232,5 +243,58 @@ export class BlockValidationError extends PipeError {
       'Report it with the block number and the field.',
       'Either the portal sent a wrong value, or the SDK schema rejects a value the chain really has.',
     ])
+  }
+}
+
+// ─── Shutdown (E3xxx) ─────────────────────────────────────────────────────────
+
+/**
+ * E3001: `pipeTo` rejects with this after a SIGTERM or SIGINT stopped the pipe and its shutdown
+ * succeeded. It is not a failure, but code after `await pipeTo(...)` must not read it as a finished range.
+ */
+export class PipelineStoppedError extends PipeError {
+  readonly signal: NodeJS.Signals
+
+  constructor(signal: NodeJS.Signals) {
+    super('E3001', SdkErrorName.PipeShutdown, [
+      `The pipe stopped on ${signal}, so its range may not be complete.`,
+      'Every committed batch is saved, and a restart resumes after the last one.',
+    ])
+    this.signal = signal
+  }
+}
+
+/** The shutdown step that was still running when the timeout expired. */
+export type ShutdownStep = 'drain' | 'onShutdown'
+
+/**
+ * E3002: `pipeTo` rejects with this when the shutdown of a pipe outlasts its `timeout`. The work still
+ * running cannot be cancelled and may go on after the rejection. `cause` holds a drain failure that came first.
+ */
+export class PipelineShutdownTimeoutError extends PipeError {
+  readonly signal: NodeJS.Signals
+  readonly timeout: string
+  readonly step: ShutdownStep
+
+  constructor({
+    signal,
+    timeout,
+    step,
+    cause,
+  }: { signal: NodeJS.Signals; timeout: string; step: ShutdownStep; cause?: unknown }) {
+    const running = step === 'drain' ? 'the target was still draining' : 'the onShutdown callback was still running'
+
+    super(
+      'E3002',
+      SdkErrorName.PipeShutdown,
+      [
+        `The pipe did not shut down within ${timeout} of ${signal}: ${running}.`,
+        'That work may still be running. The persisted cursor never passes unconfirmed data, so a restart is safe.',
+      ],
+      cause === undefined ? undefined : { cause },
+    )
+    this.signal = signal
+    this.timeout = timeout
+    this.step = step
   }
 }

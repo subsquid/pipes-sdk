@@ -90,7 +90,7 @@ export interface PortalClientOptions {
 
 export type PortalRequestOptions = Pick<
   RequestOptions,
-  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout'
+  'headers' | 'retryAttempts' | 'retrySchedule' | 'httpTimeout' | 'bodyTimeout' | 'abort'
 >
 
 export interface PortalBlockStreamOptions {
@@ -98,6 +98,8 @@ export interface PortalBlockStreamOptions {
    * `bodyTimeout` defaults to the one of the HTTP client. Without one, a response gets 30 s when
    * the portal serves it from real-time data and 150 s otherwise. A stream requests a response that
    * times out again from the block after the last one it delivered.
+   *
+   * `abort` ends the stream: the request stops, and the iteration ends with no error.
    */
   request?: PortalRequestOptions
   maxBytes?: number
@@ -177,7 +179,7 @@ export class PortalClient {
     return res.body.block_number
   }
 
-  async getHead(options?: PortalRequestOptions & { finalized: boolean }): Promise<BlockRef | undefined> {
+  async getHead(options?: PortalRequestOptions & { finalized?: boolean }): Promise<BlockRef | undefined> {
     const res = await this.request<BlockRef>(
       'GET',
       this.getDatasetUrl((options?.finalized ?? this.#options.finalized) ? 'finalized-head' : 'head'),
@@ -259,14 +261,20 @@ export class PortalClient {
   }
 
   private request<T = any>(method: string, url: string, options: RequestOptions & HttpBody = {}) {
-    return this.#client.request<T>(url, {
-      ...options,
-      method,
-      headers: {
-        'User-Agent': USER_AGENT,
-        ...options?.headers,
-      },
-    })
+    return this.#client
+      .request<T>(url, {
+        ...options,
+        method,
+        headers: {
+          'User-Agent': USER_AGENT,
+          ...options?.headers,
+        },
+      })
+      .catch((error) => {
+        // Requests and retry pauses report cancellation through the same signal reason.
+        options.abort?.throwIfAborted()
+        throw error
+      })
   }
 }
 
@@ -300,8 +308,20 @@ function createPortalStream<Q extends Query>(
     stream?: AsyncIterable<Lines> | null | undefined
   }>,
 ): PortalBlockStream<GetBlock<Q>> {
-  const { headPollInterval, request, onStall, onCut, ...bufferOptions } = options
+  const {
+    headPollInterval,
+    request: { abort: stop, ...request },
+    onStall,
+    onCut,
+    ...bufferOptions
+  } = options
   const buffer = new StreamBuffer<GetBlock<Q>>(bufferOptions)
+
+  const closeOnStop = () => buffer.close()
+  if (stop?.aborted) {
+    buffer.close()
+  }
+  stop?.addEventListener('abort', closeOnStop, { once: true })
 
   let { fromBlock = 0, toBlock, parentBlockHash } = query
   const start = fromBlock
@@ -434,10 +454,12 @@ function createPortalStream<Q extends Query>(
     }
   }
 
-  ingest().then(
-    () => buffer.close(),
-    (err) => buffer.fail(err),
-  )
+  ingest()
+    .then(
+      () => buffer.close(),
+      (err) => buffer.fail(err),
+    )
+    .finally(() => stop?.removeEventListener('abort', closeOnStop))
 
   return buffer.iterate()
 }

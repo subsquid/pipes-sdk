@@ -48,6 +48,10 @@ to make a full stream safe. The pipe owns enforcement of the capability (WP-7),
 including overriding a configured full stream. Full-stream sinks MUST NOT declare it
 merely to avoid implementing their required fork path.
 
+**RP-8 — Resource ownership.** [MUST] When its write loop ends, on any exit path, a sink
+closes what it created (streams, connections, clients built from configuration) and
+leaves open every client the author passed in: other pipes may share it (ADR-24).
+
 ## Output contract (what downstream consumers may rely on)
 
 **RP-20 — Visibility class.** [MUST] Immediate-visibility sinks (classes T/W/A/C) expose

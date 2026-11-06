@@ -82,13 +82,22 @@ export abstract class QueryBuilder<F extends {}, R = any> {
   async calculateRanges({
     portal,
     bound,
+    finalized,
+    signal,
   }: {
     bound?: Range
     portal: Portal
+    finalized?: boolean
+    signal?: AbortSignal
   }): Promise<{ bounded: RangeRequest<R>[]; raw: RangeRequest<R>[] }> {
-    const latest = this.requests.some((r) => r.range.from === 'latest') ? await portal.getHead() : undefined
+    let latest: { number: number; hash: string } | undefined
+    if (this.requests.some((r) => r.range.from === 'latest')) {
+      latest = await portal.getHead({ finalized, abort: signal })
+      // Datasets without finality still resolve 'latest' to their head, rather than genesis.
+      if (!latest && finalized) latest = await portal.getHead({ finalized: false, abort: signal })
+    }
 
-    const resolvedTimestamps = await this.resolveTimestamps(portal)
+    const resolvedTimestamps = await this.resolveTimestamps(portal, signal)
 
     const resolvedRequests = this.requests.map((r) => ({
       range:
@@ -129,7 +138,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
     }
   }
 
-  private async resolveTimestamps(portal: Portal): Promise<Map<number, number>> {
+  private async resolveTimestamps(portal: Portal, signal?: AbortSignal): Promise<Map<number, number>> {
     const timestamps = new Set<number>()
 
     for (const r of this.requests) {
@@ -147,7 +156,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
     await Promise.all(
       [...timestamps].map(async (ts) => {
         try {
-          resolved.set(ts, await portal.resolveTimestamp(ts))
+          resolved.set(ts, await portal.resolveTimestamp(ts, { abort: signal }))
         } catch (error) {
           // The portal answers a timestamp before its first block with that block, so 404 means after its head.
           const noBlockYet = error instanceof HttpError && error.response.status === 404
@@ -172,8 +181,8 @@ export abstract class QueryBuilder<F extends {}, R = any> {
 
 /** Minimal portal interface needed by `QueryBuilder.calculateRanges` to resolve head and timestamps. */
 export interface Portal {
-  getHead(): Promise<{ number: number; hash: string } | undefined>
-  resolveTimestamp(seconds: number): Promise<number>
+  getHead(options?: { finalized?: boolean; abort?: AbortSignal }): Promise<{ number: number; hash: string } | undefined>
+  resolveTimestamp(seconds: number, options?: { abort?: AbortSignal }): Promise<number>
 }
 
 function dateToSeconds(date: Date): number {

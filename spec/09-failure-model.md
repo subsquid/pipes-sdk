@@ -60,7 +60,7 @@ Bands 30–34.
 | FM-30 | crash at any commit-protocol step | recovery per class (CN-10…CN-14): converge to committed state (INV-40…INV-42) |
 | FM-31 | crash during recovery | recovery idempotent (INV-41) |
 | FM-32 | crash during fork rollback | fork completion is a commit point (CN-34); recovery either sees pre-fork state (redo fork on next signal) or post-fork state; partial rollback must be idempotent under re-application (WP-46) |
-| FM-33 | cancellation mid-batch | crash-equivalent or better (LIV-6) |
+| FM-33 | cancellation mid-batch | crash-equivalent or better (LIV-6); a signal-managed stop commits or fails the batch whole (WP-33) |
 | FM-34 | author-code exception in a callback | abort commit protocol for the batch (RP-5); surface the error; committed state intact |
 
 ## Client/consumer faults
