@@ -11,8 +11,8 @@ import {
   Profiler,
   createTarget,
   formatBlock,
-  toEpochSeconds,
 } from '~/core/index.js'
+import { toEpochSeconds } from '~/internal/time.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
 import {
