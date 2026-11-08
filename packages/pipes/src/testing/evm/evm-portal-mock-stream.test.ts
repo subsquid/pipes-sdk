@@ -6,7 +6,7 @@ import { evmPortalStream } from '~/evm/evm-portal-source.js'
 
 import { MockPortal, readAll } from '../index.js'
 import { mockEvmPortalStream } from './evm-portal-mock-stream.js'
-import { encodeEvent, mockBlock, resetMockBlockCounter } from './mock-block.js'
+import { MOCK_GENESIS_TIMESTAMP, encodeEvent, mockBlock, resetMockBlockCounter } from './mock-block.js'
 
 const WETH_ADDRESS = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' as const
 const ALICE = '0x7a250d5630b4cf539739df2c5dacb4c659f2488d' as const
@@ -56,7 +56,7 @@ describe('test-evm-data helpers', () => {
       const block = mockBlock()
 
       expect(block.header.number).toBe(1)
-      expect(block.header.timestamp).toBe(1000)
+      expect(block.header.timestamp).toBe(MOCK_GENESIS_TIMESTAMP + 1)
       expect(block.header.hash).toMatch(/^0x/)
       expect(block.header.parentHash).toMatch(/^0x/)
       expect(block.transactions).toEqual([])

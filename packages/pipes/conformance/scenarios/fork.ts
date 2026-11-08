@@ -1,4 +1,4 @@
-import { mockBlock } from '~/testing/evm/index.js'
+import { MOCK_GENESIS_TIMESTAMP, mockBlock } from '~/testing/evm/index.js'
 import { type MockChainPortal, mockPortal } from '~/testing/index.js'
 
 import {
@@ -82,7 +82,7 @@ function branchOf(block: Cursor): Branch {
 
 /** A block's cursor, as a batch carries it. */
 function cursorAt(number: number, branch: Branch): Cursor {
-  return { number, hash: hashAt(number, branch), timestamp: number * 1000 }
+  return { number, hash: hashAt(number, branch), timestamp: MOCK_GENESIS_TIMESTAMP + number }
 }
 
 /** The block the chain ends with at `number`. */

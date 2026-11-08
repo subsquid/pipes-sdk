@@ -98,6 +98,13 @@ type MockBlockOptions = {
 let blockCounter = 0
 
 /**
+ * Plausible epoch seconds (2023-11-14) that mock blocks count up from. A block timestamp
+ * outside the plausibility window is dropped as untrustworthy by `toEpochSeconds` — a cursor
+ * round-trip through a class-T sync column would lose it, so fixtures must stay inside.
+ */
+export const MOCK_GENESIS_TIMESTAMP = 1_700_000_000
+
+/**
  * Creates a block in portal format with auto-generated metadata.
  * Block number, timestamp, hash, and parentHash are generated sequentially
  * unless explicitly overridden.
@@ -115,7 +122,7 @@ let blockCounter = 0
 export function mockBlock(options: MockBlockOptions = {}): PortalBlock {
   blockCounter++
   const number = options.number ?? blockCounter
-  const timestamp = options.timestamp ?? number * 1000
+  const timestamp = options.timestamp ?? MOCK_GENESIS_TIMESTAMP + number
   const hash = options.hash ?? (`0x${number.toString(16).padStart(64, '0')}` as Hex)
   const parentHash = options.parentHash ?? (`0x${(number - 1).toString(16).padStart(64, '0')}` as Hex)
 
