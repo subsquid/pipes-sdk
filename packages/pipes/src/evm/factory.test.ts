@@ -241,7 +241,7 @@ describe('Factory', () => {
             "transactionHash": "0x934c7927ff44855bb2839a79a5bcd7f5b8241403acd5bebca71470d282b34712",
             "transactionIndex": 1,
           },
-          "timestamp": 1970-01-01T00:33:20.000Z,
+          "timestamp": 2023-11-14T22:13:22.000Z,
         },
       ]
     `)

@@ -1,3 +1,4 @@
+import { MOCK_GENESIS_TIMESTAMP } from './evm/mock-block.js'
 import { selectEvm } from './portal-evm.js'
 import type { WireHead } from './portal-wire.js'
 
@@ -152,7 +153,7 @@ export class PortalChain {
         number,
         hash: this.hash(number),
         parentHash: this.hash(Math.max(number - 1, 0)),
-        timestamp: number * 1000,
+        timestamp: (MOCK_GENESIS_TIMESTAMP + number) * this.#timestampsPerSecond,
       }
     )
   }

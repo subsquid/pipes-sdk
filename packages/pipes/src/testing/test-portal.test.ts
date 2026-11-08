@@ -9,7 +9,7 @@ import { evmPortalStream } from '~/evm/index.js'
 import { HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 
-import { mockBlock } from './evm/mock-block.js'
+import { MOCK_GENESIS_TIMESTAMP, mockBlock } from './evm/mock-block.js'
 import { withPortal } from './portal-fixture.js'
 import { blockDecoder } from './test-block-stream.js'
 import { type MockChainPortal, type MockPortal, finalizedMockPortal, mockPortal } from './test-portal.js'
@@ -440,14 +440,14 @@ describe('mockPortal timestamp route', () => {
     }
   }
 
-  // Made-up blocks are `number * 1000` seconds apart from genesis.
+  // Made-up blocks sit one second apart, counting up from the mock genesis.
   withPortal('finds the first block at or after a time in seconds', async ({ portal: open }) => {
     const portal = await open({ latest: 3 })
 
-    expect(await blockAt(portal, 0)).toBe(0)
-    expect(await blockAt(portal, 1_000)).toBe(1)
-    expect(await blockAt(portal, 1_500)).toBe(2)
-    expect(await blockAt(portal, 3_001)).toBe('HTTP 404')
+    expect(await blockAt(portal, MOCK_GENESIS_TIMESTAMP - 1)).toBe(0)
+    expect(await blockAt(portal, MOCK_GENESIS_TIMESTAMP + 1)).toBe(1)
+    expect(await blockAt(portal, MOCK_GENESIS_TIMESTAMP + 3)).toBe(3)
+    expect(await blockAt(portal, MOCK_GENESIS_TIMESTAMP + 4)).toBe('HTTP 404')
   })
 
   withPortal('reads block timestamps in milliseconds on a tron dataset', async ({ portal: open }) => {

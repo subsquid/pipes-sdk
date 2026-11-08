@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { BlockRangeConfigurationError } from '~/core/errors.js'
 import { PortalClient } from '~/portal-client/index.js'
+import { MOCK_GENESIS_TIMESTAMP } from '~/testing/evm/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 import { stubPortal } from '~/testing/stub-portal.js'
 
@@ -79,11 +80,14 @@ describe('EvmQuery', () => {
       expect(bounded).toEqual([{ range: { from: 18908900, to: 19145700 }, request: {} }])
     })
 
-    // Mock chain timestamps are `number * 1000` seconds, so block 10 is the head at 10,000 s.
+    // Mock chain blocks sit one second apart from the mock genesis, so block 10 is the head at genesis + 10 s.
     withPortal('resolves a date through the portal', async ({ portal: open }) => {
       const portal = await open({ latest: 10 })
       const builder = new EvmQueryBuilder()
-      builder.addRange({ from: new Date(4_500 * 1000), to: new Date(7_000 * 1000) })
+      builder.addRange({
+        from: new Date((MOCK_GENESIS_TIMESTAMP + 5) * 1000),
+        to: new Date((MOCK_GENESIS_TIMESTAMP + 7) * 1000),
+      })
 
       const { bounded } = await builder.calculateRanges({ portal: new PortalClient({ url: portal.url }) })
 

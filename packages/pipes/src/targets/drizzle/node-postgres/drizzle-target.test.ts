@@ -91,11 +91,11 @@ describe('Drizzle target', () => {
         {
           statusCode: 200,
           data: [
-            { header: { number: 1, hash: '0x1', timestamp: 1000 } },
-            { header: { number: 2, hash: '0x2', timestamp: 2000 } },
-            { header: { number: 3, hash: '0x3', timestamp: 3000 } },
-            { header: { number: 4, hash: '0x4', timestamp: 4000 } },
-            { header: { number: 5, hash: '0x5', timestamp: 5000 } },
+            { header: { number: 1, hash: '0x1', timestamp: 1_700_000_001 } },
+            { header: { number: 2, hash: '0x2', timestamp: 1_700_000_002 } },
+            { header: { number: 3, hash: '0x3', timestamp: 1_700_000_003 } },
+            { header: { number: 4, hash: '0x4', timestamp: 1_700_000_004 } },
+            { header: { number: 5, hash: '0x5', timestamp: 1_700_000_005 } },
           ],
           head: { finalized: { number: 2, hash: '0x2' } },
         },
@@ -132,11 +132,11 @@ describe('Drizzle target', () => {
         {
           statusCode: 200,
           data: [
-            { header: { number: 1, hash: '0x1', timestamp: 1000 } },
-            { header: { number: 2, hash: '0x2', timestamp: 2000 } },
-            { header: { number: 3, hash: '0x3', timestamp: 3000 } },
-            { header: { number: 4, hash: '0x4', timestamp: 4000 } },
-            { header: { number: 5, hash: '0x5', timestamp: 5000 } },
+            { header: { number: 1, hash: '0x1', timestamp: 1_700_000_001 } },
+            { header: { number: 2, hash: '0x2', timestamp: 1_700_000_002 } },
+            { header: { number: 3, hash: '0x3', timestamp: 1_700_000_003 } },
+            { header: { number: 4, hash: '0x4', timestamp: 1_700_000_004 } },
+            { header: { number: 5, hash: '0x5', timestamp: 1_700_000_005 } },
           ],
           head: { finalized: { number: 2, hash: '0x2' } },
         },
@@ -161,7 +161,7 @@ describe('Drizzle target', () => {
           {
             "current_hash": "0x2",
             "current_number": "2",
-            "current_timestamp": 1970-01-01T00:33:20.000Z,
+            "current_timestamp": 2023-11-14T22:13:22.000Z,
             "finalized": {
               "hash": "0x2",
               "number": 2,
@@ -172,7 +172,7 @@ describe('Drizzle target', () => {
           {
             "current_hash": "0x3",
             "current_number": "3",
-            "current_timestamp": 1970-01-01T00:50:00.000Z,
+            "current_timestamp": 2023-11-14T22:13:23.000Z,
             "finalized": {
               "hash": "0x2",
               "number": 2,
@@ -182,14 +182,14 @@ describe('Drizzle target', () => {
               {
                 "hash": "0x3",
                 "number": 3,
-                "timestamp": 3000,
+                "timestamp": 1700000003,
               },
             ],
           },
           {
             "current_hash": "0x4",
             "current_number": "4",
-            "current_timestamp": 1970-01-01T01:06:40.000Z,
+            "current_timestamp": 2023-11-14T22:13:24.000Z,
             "finalized": {
               "hash": "0x2",
               "number": 2,
@@ -199,14 +199,14 @@ describe('Drizzle target', () => {
               {
                 "hash": "0x4",
                 "number": 4,
-                "timestamp": 4000,
+                "timestamp": 1700000004,
               },
             ],
           },
           {
             "current_hash": "0x5",
             "current_number": "5",
-            "current_timestamp": 1970-01-01T01:23:20.000Z,
+            "current_timestamp": 2023-11-14T22:13:25.000Z,
             "finalized": {
               "hash": "0x2",
               "number": 2,
@@ -216,7 +216,7 @@ describe('Drizzle target', () => {
               {
                 "hash": "0x5",
                 "number": 5,
-                "timestamp": 5000,
+                "timestamp": 1700000005,
               },
             ],
           },
