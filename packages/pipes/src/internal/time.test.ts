@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { toEpochSeconds } from './block-timestamp.js'
+import { toEpochSeconds } from './time.js'
 
 describe('toEpochSeconds', () => {
   it('passes epoch-second timestamps through unchanged', () => {

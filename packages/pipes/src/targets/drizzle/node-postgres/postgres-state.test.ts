@@ -330,6 +330,135 @@ describe('PostgresState — legacy cursor migration', () => {
   })
 })
 
+// Portal cursor timestamps are network-dependent (IB-21). The values below were read from the
+// live portals on 2026-11-09: ethereum-mainnet block 26372900 reports seconds, tron-mainnet block
+// 87833400 reports milliseconds. The sync column must hold the wall-clock instant either way.
+const EVM_SECONDS = 1_794_173_939
+const TRON_MS = 1_794_173_943_000
+
+function ctxWithTimestamp(
+  current: { number: number; hash: string; timestamp?: number },
+  finalized: { number: number; hash: string } | undefined = undefined,
+): BatchContext {
+  return {
+    logger: testLogger(),
+    profiler: fakeSpan(),
+    stream: {
+      head: { finalized },
+      state: { current, rollbackChain: [] },
+    },
+  } as unknown as BatchContext
+}
+
+function stateWithRow(row: Partial<Record<string, unknown>>) {
+  const client = {
+    query: async () => ({
+      rows: [
+        {
+          id: 'stream',
+          current_number: '50',
+          current_hash: '0x50',
+          finalized: {},
+          rollback_chain: [],
+          ...row,
+        },
+      ],
+    }),
+  }
+
+  return new PostgresState(client as any, {})
+}
+
+describe('PostgresState — cursor timestamp units', () => {
+  it('binds a tron-style millisecond cursor as its wall-clock instant, not ×1000', async () => {
+    const state = stateWithRow({})
+
+    const executed: any[] = []
+    const tx = { execute: async (sql: any) => (executed.push(sql), { rowCount: 0 }) }
+
+    await state.saveCursor(tx as any, ctxWithTimestamp({ number: 50, hash: '0x50', timestamp: TRON_MS }))
+
+    const bound = paramsOf(executed[0])[3]
+    expect(bound).toBeInstanceOf(Date)
+    // Pre-fix code bound `new Date(TRON_MS * 1000)`, storing year ~58825.
+    expect((bound as Date).getTime()).toBe(TRON_MS)
+  })
+
+  it('keeps an evm-style seconds cursor unchanged', async () => {
+    const state = stateWithRow({})
+
+    const executed: any[] = []
+    const tx = { execute: async (sql: any) => (executed.push(sql), { rowCount: 0 }) }
+
+    await state.saveCursor(tx as any, ctxWithTimestamp({ number: 50, hash: '0x50', timestamp: EVM_SECONDS }))
+
+    const bound = paramsOf(executed[0])[3] as Date
+    expect(bound.getTime()).toBe(EVM_SECONDS * 1000)
+  })
+
+  it('stores SQL NULL for a timestamp no Date can hold (microseconds)', async () => {
+    const state = stateWithRow({})
+
+    const executed: any[] = []
+    const tx = { execute: async (sql: any) => (executed.push(sql), { rowCount: 0 }) }
+
+    // Hyperliquid's native API reports microseconds; a portal passing them through would reach
+    // here. `new Date(µs * 1000)` is an Invalid Date that node-postgres serializes as
+    // "NaN-NaN-NaN…", failing the whole batch transaction.
+    await state.saveCursor(tx as any, ctxWithTimestamp({ number: 50, hash: '0x50', timestamp: TRON_MS * 1000 }))
+
+    expect(paramsOf(executed[0]).some((p) => p instanceof Date)).toBe(false)
+    expect(sqlTextOf(executed[0])).toMatch(/NULL/)
+  })
+
+  it('reads the resumed cursor timestamp as epoch seconds from a correctly stored row', async () => {
+    const state = stateWithRow({ current_timestamp: new Date(TRON_MS) })
+
+    const resume = await state.getCursor({ logger: testLogger() })
+
+    expect(resume?.latest.timestamp).toBe(TRON_MS / 1000)
+  })
+
+  it('recovers the true instant from a legacy row stored ×1000', async () => {
+    // Rows written by pre-fix code for a millisecond network hold the portal value as if it were
+    // seconds — a date in the far future. The read must normalize, not echo the wrong unit.
+    const state = stateWithRow({ current_timestamp: new Date(TRON_MS * 1000) })
+
+    const resume = await state.getCursor({ logger: testLogger() })
+
+    expect(resume?.latest.timestamp).toBe(TRON_MS / 1000)
+  })
+
+  it('persists the fork ancestor timestamp with the same normalization', async () => {
+    const state = stateWithRow({})
+
+    const executed: any[] = []
+    const tx = {
+      execute: async (query: any) => {
+        executed.push(query)
+        if (executed.length === 1) {
+          return {
+            rows: [
+              {
+                current_number: '130',
+                finalized: block(120),
+                rollback_chain: [block(121), block(122), block(130)],
+              },
+            ],
+          }
+        }
+        return { rows: [] }
+      },
+    }
+
+    await state.saveForkCursor(tx as any, { number: 122, hash: '0x122', timestamp: TRON_MS })
+
+    const bound = paramsOf(executed[1])[3]
+    expect(bound).toBeInstanceOf(Date)
+    expect((bound as Date).getTime()).toBe(TRON_MS)
+  })
+})
+
 describe('PostgresState — fork cleanup', () => {
   it('deletes the now-dead sync rows above the fork cursor', async () => {
     const state = await seededState(block(100))

@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm'
+import { type SQL, sql } from 'drizzle-orm'
 
 import {
   BatchContext,
@@ -14,6 +14,7 @@ import {
 } from '~/core/index.js'
 import { doWithRetry } from '~/internal/function.js'
 import { parseNumber } from '~/internal/number.js'
+import { toEpochSeconds } from '~/internal/time.js'
 import { Transaction } from '~/targets/drizzle/node-postgres/drizzle-target.js'
 import { syncTable, tableNotExists } from '~/targets/drizzle/node-postgres/tables.js'
 
@@ -25,6 +26,20 @@ type DeleteResult = {
 type SelectResult<T> = {
   rows: T[]
 }
+
+/**
+ * The sync column's value for a portal cursor timestamp: wall-clock time. The portal reports
+ * the unit per network — evm and solana seconds, tron, substrate and hyperliquid fills
+ * milliseconds — so normalize before building the Date. A value that cannot be trusted (absent,
+ * out of range, microseconds no Date can hold) stores NULL: an Invalid Date would serialize as
+ * "NaN-NaN-NaN…" and fail the whole batch transaction (Postgres 22007).
+ */
+function syncTimestampValue(timestamp: number | undefined): Date | SQL {
+  const seconds = toEpochSeconds(timestamp)
+
+  return seconds !== undefined ? new Date(Math.round(seconds * 1000)) : sql.raw('NULL')
+}
+
 type StateRow = {
   rollback_chain: BlockCursor[]
   finalized: BlockCursor
@@ -177,7 +192,7 @@ export class PostgresState {
               ${this.#key.value},
               ${current.number},
               ${current.hash},
-              ${current.timestamp ? new Date(current.timestamp * 1000) : sql.raw('NULL')},
+              ${syncTimestampValue(current.timestamp)},
               ${JSON.stringify(head.finalized || {})},
               ${JSON.stringify(rollbackChain || [])}
           )
@@ -248,7 +263,10 @@ export class PostgresState {
       latest: {
         number: parseNumber(row.current_number),
         hash: row.current_hash,
-        timestamp: row.current_timestamp ? row.current_timestamp.getTime() / 1000 : undefined,
+        // Rows an older SDK wrote for a millisecond network hold the portal value as if it were
+        // seconds (a date in the far future); the normalization recovers the true instant from
+        // them and drops only genuinely untrustworthy values.
+        timestamp: toEpochSeconds(row.current_timestamp ? row.current_timestamp.getTime() / 1000 : undefined),
       },
       finalized: normalizeFinalized(row.finalized) ?? null,
     }
@@ -327,7 +345,7 @@ export class PostgresState {
         ${this.#key.value},
         ${cursor.number},
         ${cursor.hash},
-        ${cursor.timestamp ? new Date(cursor.timestamp * 1000) : sql.raw('NULL')},
+        ${syncTimestampValue(cursor.timestamp)},
         ${JSON.stringify(finalized || {})},
         ${JSON.stringify(rollbackChain)}
       )

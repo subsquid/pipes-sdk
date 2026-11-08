@@ -12,8 +12,8 @@ import {
   formatBlock,
   formatNumber,
   humanBytes,
-  toEpochSeconds,
 } from '~/core/index.js'
+import { toEpochSeconds } from '~/internal/time.js'
 
 import { type BigQueryStateOptions, BigQuerySyncState } from './bigquery-state.js'
 import { BigQueryWriter } from './bigquery-store.js'

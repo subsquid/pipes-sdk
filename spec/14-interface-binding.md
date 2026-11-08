@@ -82,7 +82,7 @@ mode. Decision: ADR-22.
 Cross-implementation contract: any conforming implementation MUST read and write these
 formats (CN-45). JSON cursor encoding everywhere: `{"number": ℕ, "hash": string?,
 "timestamp": ℕ?}`, the timestamp being the portal header value verbatim, in a
-network-dependent unit (DEF-1; GAP-24).
+network-dependent unit (DEF-1).
 
 **IB-20 — ClickHouse binding (class A).** Sync table (default `<db>.sync`):
 `id String, current String (cursor JSON), finalized String (cursor JSON | '' when
@@ -116,7 +116,12 @@ an accepted deviation, ADR-15)*.
 **IB-21 — Postgres binding (class T).** Sync table (default `public.sync`):
 `id text, current_number numeric, current_hash text, "current_timestamp" timestamptz,
 finalized jsonb ('{}' when absent), rollback_chain jsonb, PRIMARY KEY (id,
-current_number)`. Data + cursor commit in one transaction, serializable by default.
+current_number)`. `"current_timestamp"` holds wall-clock time: the portal unit is detected
+(seconds on evm/solana/bitcoin, milliseconds on tron/substrate/hyperliquid fills), an
+untrustworthy value (absent, out of range, a unit no client Date can hold) stores NULL
+rather than failing the batch, and the resumed cursor timestamp is normalized epoch
+seconds — which recovers the true instant from rows stored before this normalization.
+Data + cursor commit in one transaction, serializable by default.
 The operator MAY choose a weaker level. The batch commit stays atomic at every level.
 A weaker level does not guarantee serial equivalence with other writers. Statements in
 one batch can observe different snapshots. Concurrent updates can be lost. The undo log
