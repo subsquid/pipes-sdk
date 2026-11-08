@@ -9,9 +9,9 @@ import {
   Logger,
   Metrics,
   Profiler,
-  blockTimestampSeconds,
   createTarget,
   formatBlock,
+  toEpochSeconds,
 } from '~/core/index.js'
 
 import { PUBSUB_ERROR_CODES, PubsubTargetError } from './errors.js'
@@ -692,7 +692,7 @@ class WriteContext {
       this.#metrics.portalToCommitLag.observe({ id: ctx.id }, publishAckAt - receivedAt.getTime() / 1000)
     }
 
-    const blockTimestamp = blockTimestampSeconds(ctx.stream.state.current.timestamp)
+    const blockTimestamp = toEpochSeconds(ctx.stream.state.current.timestamp)
     if (blockTimestamp === undefined) {
       this.#warnMissingBlockTimestamp(ctx)
 

@@ -10,7 +10,7 @@ const MILLISECOND_THRESHOLD = MIN_PLAUSIBLE_SECONDS * 1000
 /**
  * Normalize a portal block timestamp to epoch seconds, or `undefined` when it cannot be trusted.
  *
- * Portal block times are network-dependent (GAP-24): EVM and Solana report seconds, tron and
+ * Portal block times are network-dependent (DEF-1): evm and solana report seconds, tron and
  * substrate milliseconds. Consumers that subtract them from a wall clock need one unit.
  *
  * Out-of-range values are dropped rather than clamped. Tron's portal is known to emit integers
@@ -18,7 +18,7 @@ const MILLISECOND_THRESHOLD = MIN_PLAUSIBLE_SECONDS * 1000
  * a Prometheus histogram moves `_sum` to a magnitude where the float64 ULP exceeds every later
  * sample — the series then freezes for the life of the process instead of merely spiking.
  */
-export function blockTimestampSeconds(timestamp: number | undefined): number | undefined {
+export function toEpochSeconds(timestamp: number | undefined): number | undefined {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return undefined
 
   const seconds = timestamp >= MILLISECOND_THRESHOLD ? timestamp / 1000 : timestamp

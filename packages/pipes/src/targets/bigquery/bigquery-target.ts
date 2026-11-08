@@ -8,11 +8,11 @@ import {
   type HookContext,
   type Logger,
   type Metrics,
-  blockTimestampSeconds,
   createTarget,
   formatBlock,
   formatNumber,
   humanBytes,
+  toEpochSeconds,
 } from '~/core/index.js'
 
 import { type BigQueryStateOptions, BigQuerySyncState } from './bigquery-state.js'
@@ -242,7 +242,7 @@ export function bigqueryTarget<T>(options: {
             // Portal block times are per-network (tron and substrate report ms), so they are
             // normalized here rather than trusted verbatim; an unusable one is skipped, not
             // observed as a wildly wrong value derived from `0`.
-            const blockTimestamp = blockTimestampSeconds(next.timestamp)
+            const blockTimestamp = toEpochSeconds(next.timestamp)
             if (blockTimestamp !== undefined) {
               metrics.blockToCommitLag.observe({ id: ctx.id }, commitEndMs / 1000 - blockTimestamp)
             }
