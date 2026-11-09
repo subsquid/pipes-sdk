@@ -7,11 +7,13 @@ import { PortalCache } from '~/core/portal-source.js'
 import { SpanHooks } from '~/core/profiling.js'
 import { ReadOptions, Target, TargetState, createTarget } from '~/core/target.js'
 import { TransformerArgs, createTransformer } from '~/core/transformer.js'
+import type { BlockCursor } from '~/core/types.js'
 import { evmPortalStream, evmQuery } from '~/evm/index.js'
 import { PortalBlockStreamOptions, PortalClient, PortalClientOptions, Query } from '~/portal-client/index.js'
 import {
   MockChainPortal,
   MockPortal,
+  MockPortalOptions,
   MockResponse,
   blockDecoder,
   mockMetricsServer,
@@ -1394,6 +1396,128 @@ describe('Portal stream block order', () => {
       expect(written).toEqual([1, 2, 3].slice(0, written.length))
     },
   )
+})
+
+describe('Portal stream restart with a fork below the request start', () => {
+  const block = (number: number, suffix = '') => ({ number, hash: `0x${number}${suffix}` })
+  const finalized = block(2)
+  const orphan = block(4, 'a')
+  const replacements = [block(4, 'b'), block(5, 'b'), block(6, 'b')]
+
+  /** Blocks 4–6 replaced the orphaned branch the saved cursor sits on. */
+  const serveChain = (serve: (options: MockPortalOptions) => Promise<MockChainPortal>) =>
+    serve({
+      blocks: [1, 2, 3, 4, 5, 6].map((number) => ({
+        header: { ...block(number, number >= 4 ? 'b' : ''), timestamp: number * 1000 },
+      })),
+      finalized: 2,
+      latest: 6,
+      blocksPerResponse: 1,
+    })
+
+  /** A durable target: the cursor and the rows outlive each run, as a store does across restarts. */
+  function storeAt(cursor: BlockCursor) {
+    const store = { cursor, seen: [] as BlockCursor[] }
+    const records: RollbackRecord[] = [{ rollbackChain: [block(3), orphan], finalized }]
+
+    const run = (url: string, from: number | 'latest') =>
+      evmPortalStream({
+        id: 'test',
+        portal: url,
+        logger: 'silent',
+        outputs: blockDecoder({ from, to: 6 }),
+      }).pipeTo(
+        createTarget({
+          write: async ({ read }) => {
+            for await (const { data, ctx } of read({ latest: store.cursor, finalized })) {
+              store.seen.push(...data.map(({ number, hash }) => ({ number, hash })))
+              store.cursor = ctx.stream.state.current
+            }
+          },
+          resolveFork: async (canonical) => {
+            const ancestor = await resolveForkCursor(records, canonical)
+            if (ancestor) {
+              store.cursor = ancestor
+            }
+
+            return ancestor
+          },
+        }),
+      )
+
+    return { store, run }
+  }
+
+  withPortal('halts when a fork rolls the cursor back below the range start', async ({ portal: serve }) => {
+    const portal = await serveChain(serve)
+    const { store, run } = storeAt(orphan)
+
+    await expect(run(portal.url, 5)).rejects.toMatchObject({ code: 'E0002', name: 'PipeConfiguration' })
+
+    expect(store.cursor).toEqual(block(3))
+    expect(store.seen).toEqual([])
+    expect(portal.requests).toHaveLength(1)
+    expect(portal.requests[0]).toMatchObject({ status: 409, query: { fromBlock: 5, parentBlockHash: orphan.hash } })
+  })
+
+  withPortal('refuses a restart whose saved cursor is below the range start', async ({ portal: serve }) => {
+    const portal = await serveChain(serve)
+    const { store, run } = storeAt(block(3))
+
+    await expect(run(portal.url, 5)).rejects.toMatchObject({ code: 'E0002', name: 'PipeConfiguration' })
+
+    expect(store.cursor).toEqual(block(3))
+    expect(portal.requests).toEqual([])
+  })
+
+  withPortal('recovers on restart once the start follows the saved cursor again', async ({ portal: serve }) => {
+    const portal = await serveChain(serve)
+    const { store, run } = storeAt(orphan)
+
+    await expect(run(portal.url, store.cursor.number + 1)).rejects.toMatchObject({ code: 'E0002' })
+    await run(portal.url, store.cursor.number + 1)
+
+    expect(store.seen).toEqual(replacements)
+    expect(store.cursor).toMatchObject(block(6, 'b'))
+    expect(portal.requests[1]?.query).toMatchObject({ fromBlock: 4, parentBlockHash: block(3).hash })
+  })
+
+  for (const from of [1, 'latest'] as const) {
+    withPortal(`replays the replacement blocks with a range start of ${from}`, async ({ portal: serve }) => {
+      const portal = await serveChain(serve)
+      const { store, run } = storeAt(orphan)
+
+      await run(portal.url, from)
+
+      expect(store.seen).toEqual(replacements)
+      expect(store.cursor).toMatchObject(block(6, 'b'))
+      expect(portal.requests[0]).toMatchObject({ status: 409, query: { fromBlock: 5, parentBlockHash: orphan.hash } })
+      expect(portal.requests[1]?.query).toMatchObject({ fromBlock: 4, parentBlockHash: block(3).hash })
+    })
+  }
+
+  withPortal('allows a resume block in a gap between configured ranges', async ({ portal: serve }) => {
+    const portal = await serve({ latest: 6, finalized: 6, blocksPerResponse: 1 })
+    const seen: number[] = []
+    const outputs = evmQuery()
+      .addRange({ from: 1, to: 1 })
+      .addRange({ from: 5, to: 6 })
+      .addFields({ block: { number: true } })
+      .build()
+
+    await evmPortalStream({ id: 'test', portal: portal.url, logger: 'silent', outputs }).pipeTo(
+      createTarget({
+        write: async ({ read }) => {
+          for await (const { data } of read({ latest: { number: 3, hash: '0x3' }, finalized: null })) {
+            seen.push(...data.map(({ header }) => header.number))
+          }
+        },
+      }),
+    )
+
+    expect(seen).toEqual([5, 6])
+    expect(portal.requests[0]?.query.parentBlockHash).toBeUndefined()
+  })
 })
 
 describe('Portal stream fork below the finalized floor', () => {

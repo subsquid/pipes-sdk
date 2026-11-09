@@ -36,7 +36,7 @@ describe('SolanaQueryBuilder', () => {
         portal: stubPortal({
           getHead: async () => ({ number: 15, hash: '0x' }),
         }),
-        bound: { from: 10 },
+        resumeFrom: 10,
       })
 
       expect(bounded).toMatchInlineSnapshot(`
