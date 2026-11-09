@@ -157,7 +157,9 @@ describe('SqlitePubsubState', () => {
 
     await commit(state, { operations: [], ledger: [], cursor: block(100), finalized: block(90) })
 
-    expect(await state.getCursor()).toEqual({ latest: block(100), finalized: block(90) })
+    await state.close()
+    const reopened = await openState()
+    expect(await reopened.state.getCursor()).toEqual({ latest: block(100), finalized: block(90) })
   })
 
   withStateFile('states the absence of a finalized head as null, never as a missing key', async ({ openState }) => {
@@ -327,14 +329,19 @@ describe('SqlitePubsubState', () => {
     expect(retry.coldStart).toBe(false)
   })
 
-  // Only schema 3 migrates in place; anything older is refused rather than guessed at.
-  withStateFile('refuses a state file written by a schema it cannot migrate', async ({ openState }) => {
-    const first = await openState()
-    await first.state.setMeta('schema_version', '2')
-    await first.state.close()
+  // Schema 3 migrates; unsupported, future and malformed versions must preserve all tables.
+  for (const version of ['2', '999', 'invalid']) {
+    withStateFile(`refuses schema ${version} without changing persisted state`, async ({ statePath, openState }) => {
+      const first = await openState()
+      await commit(first.state, { operations: [operation()], ledger: [], cursor: block(100), finalized: block(90) })
+      await first.state.setMeta('schema_version', version)
+      await first.state.close()
+      const before = await inspectStateFile(statePath)
 
-    await expect(openState()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
-  })
+      await expect(openState()).rejects.toMatchObject({ code: PUBSUB_ERROR_CODES.STATE_SCHEMA_VERSION })
+      expect(await inspectStateFile(statePath)).toEqual(before)
+    })
+  }
 
   describe('schema 3 migration', () => {
     withStateFile('keeps the change sequence and the unconfirmed outbox', async ({ statePath, openState }) => {

@@ -13,7 +13,7 @@ import {
   resolveForkCursor,
 } from '~/core/index.js'
 import { doWithRetry } from '~/internal/function.js'
-import { parseNumber } from '~/internal/number.js'
+import { isPersistedCursor, parsePersistedHeight } from '~/internal/cursor.js'
 import { toEpochSeconds } from '~/internal/time.js'
 import { Transaction } from '~/targets/drizzle/node-postgres/drizzle-target.js'
 import { syncTable, tableNotExists } from '~/targets/drizzle/node-postgres/tables.js'
@@ -259,16 +259,29 @@ export class PostgresState {
     // state that row carries the highest finalized; right after a fork it can briefly hold an
     // older finalized, but the source re-clamps the floor from the live head on the first batch
     // (and re-forks off the stale `latest`), so it self-heals. `null` when none was stored.
-    return {
-      latest: {
-        number: parseNumber(row.current_number),
-        hash: row.current_hash,
-        // Rows an older SDK wrote for a millisecond network hold the portal value as if it were
-        // seconds (a date in the far future); the normalization recovers the true instant from
-        // them and drops only genuinely untrustworthy values.
+    try {
+      const number = parsePersistedHeight(row.current_number)
+      if (number === null) throw new Error('invalid cursor height')
+      const latest = {
+        number,
+        hash: row.current_hash ?? undefined,
         timestamp: toEpochSeconds(row.current_timestamp ? row.current_timestamp.getTime() / 1000 : undefined),
-      },
-      finalized: normalizeFinalized(row.finalized) ?? null,
+      }
+      // Only the documented empty object and SQL NULL mean no floor. Validate other
+      // stored values before normalization can discard a malformed finalized cursor.
+      const absentFinalized =
+        row.finalized === null ||
+        row.finalized === undefined ||
+        (typeof row.finalized === 'object' && !Array.isArray(row.finalized) && Object.keys(row.finalized).length === 0)
+      const finalized = absentFinalized ? null : row.finalized
+      if (!isPersistedCursor(latest) || (finalized !== null && !isPersistedCursor(finalized)))
+        throw new Error('invalid cursor')
+      return { latest, finalized }
+    } catch {
+      throw new PostgresTargetError(
+        POSTGRES_ERROR_CODES.STATE_CORRUPT,
+        'Persisted cursor is invalid; no recovery was performed.',
+      )
     }
   }
 

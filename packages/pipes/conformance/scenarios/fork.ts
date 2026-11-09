@@ -32,13 +32,16 @@ export const S3 = {
   blocksPerResponse: 7,
 } as const
 
+/** Vary rollback depth and transport partitioning without changing the original S3 defaults. */
+export type S3Options = { ancestor?: number; blocksPerResponse?: number }
+
 export const S3_RANGES = [{ from: S3.from, to: S3.to }]
 
 /** Branch 0 is the chain the run starts on; branch 1 replaces its blocks above the ancestor. */
 type Branch = 0 | 1
 
 /** Branch 0 hashes as `mockBlock` makes them, branch 1 as the mock chain makes up its first fork. */
-function hashAt(number: number, branch: Branch): `0x${string}` {
+export function hashAt(number: number, branch: Branch): `0x${string}` {
   const digits = number.toString(16)
 
   return branch === 0 ? `0x${digits.padStart(64, '0')}` : `0x00000001${digits.padStart(56, '0')}`
@@ -52,13 +55,13 @@ function valuesAt(number: number, branch: Branch) {
   return { transfer: number + shift, approval }
 }
 
-function blockAt(number: number, branch: Branch) {
+export function blockAt(number: number, branch: Branch, ancestor: number = S3.ancestor) {
   const { transfer, approval } = valuesAt(number, branch)
   const logs = erc20Logs({
     transfer: BigInt(transfer),
     approval: approval === undefined ? undefined : BigInt(approval),
   })
-  const parentBranch: Branch = branch === 1 && number - 1 > S3.ancestor ? 1 : 0
+  const parentBranch: Branch = branch === 1 && number - 1 > ancestor ? 1 : 0
 
   return mockBlock({
     number,
@@ -68,12 +71,12 @@ function blockAt(number: number, branch: Branch) {
   })
 }
 
-function branchOf(block: Cursor): Branch {
+function branchOf(block: Cursor, ancestor: number = S3.ancestor): Branch {
   if (block.hash === hashAt(block.number, 0)) {
     return 0
   }
 
-  if (block.number > S3.ancestor && block.hash === hashAt(block.number, 1)) {
+  if (block.number > ancestor && block.hash === hashAt(block.number, 1)) {
     return 1
   }
 
@@ -86,13 +89,13 @@ function cursorAt(number: number, branch: Branch): Cursor {
 }
 
 /** The block the chain ends with at `number`. */
-function canonicalAt(number: number): Cursor {
-  return cursorAt(number, number > S3.ancestor ? 1 : 0)
+function canonicalAt(number: number, ancestor: number = S3.ancestor): Cursor {
+  return cursorAt(number, number > ancestor ? 1 : 0)
 }
 
 /** The rows S3 stores for a block of either branch, as the store reads them back: INT64 as bigint. */
-export function s3RowsAt(block: Cursor): OracleRow[] {
-  const { transfer, approval } = valuesAt(block.number, branchOf(block))
+export function s3RowsAt(block: Cursor, ancestor: number = S3.ancestor): OracleRow[] {
+  const { transfer, approval } = valuesAt(block.number, branchOf(block, ancestor))
   const blockNumber = BigInt(block.number)
   const rows: OracleRow[] = [
     { table: 'transfers', block: block.number, value: { blockNumber, value: String(transfer) } },
@@ -106,35 +109,46 @@ export function s3RowsAt(block: Cursor): OracleRow[] {
 }
 
 /** Every row S3 must leave in the store, from the scenario alone: the chain it ends with. */
-export const S3_ROWS: OracleRow[] = inStoreOrder(numbers(S3.from, S3.to).map(canonicalAt).flatMap(s3RowsAt))
+export function s3Rows({ ancestor = S3.ancestor }: S3Options = {}): OracleRow[] {
+  return inStoreOrder(
+    numbers(S3.from, S3.to)
+      .map((number) => canonicalAt(number, ancestor))
+      .flatMap((block) => s3RowsAt(block, ancestor)),
+  )
+}
 
 /**
  * The rows a store whose cursor is `cursor` holds: the blocks up to it, on the branch the cursor is
  * on above the ancestor, so a store a crash left before the fork still holds the forked rows.
  */
-export function s3RowsUpTo(cursor: Cursor | undefined): OracleRow[] {
+export function s3RowsUpTo(cursor: Cursor | undefined, { ancestor = S3.ancestor }: S3Options = {}): OracleRow[] {
   if (cursor === undefined) {
     return []
   }
 
-  const branch = branchOf(cursor)
-  const blocks = numbers(S3.from, cursor.number).map((number) => cursorAt(number, number > S3.ancestor ? branch : 0))
+  const branch = branchOf(cursor, ancestor)
+  const blocks = numbers(S3.from, cursor.number).map((number) => cursorAt(number, number > ancestor ? branch : 0))
 
-  return inStoreOrder(blocks.flatMap(s3RowsAt))
+  return inStoreOrder(blocks.flatMap((block) => s3RowsAt(block, ancestor)))
 }
 
 /** The state S3 must leave in the store: the range end, the raised floor, every block above it. */
-export function s3EndState(): OracleState {
+export function s3EndState({ ancestor = S3.ancestor }: S3Options = {}): OracleState {
   return {
-    current: canonicalAt(S3.to),
+    current: canonicalAt(S3.to, ancestor),
     finalized: { number: S3.raisedTo, hash: hashAt(S3.raisedTo, 0) },
-    rollbackChain: numbers(S3.raisedTo + 1, S3.to).map(canonicalAt),
+    rollbackChain: numbers(S3.raisedTo + 1, S3.to).map((number) => canonicalAt(number, ancestor)),
   }
 }
 
 /** The oracle for S3, as a full-stream class. */
-export function s3Oracle(durability: DurabilityClass): ReferenceModel {
-  return new ReferenceModel({ durability, mode: 'full', ranges: S3_RANGES, transform: s3RowsAt })
+export function s3Oracle(durability: DurabilityClass, { ancestor = S3.ancestor }: S3Options = {}): ReferenceModel {
+  return new ReferenceModel({
+    durability,
+    mode: 'full',
+    ranges: S3_RANGES,
+    transform: (block) => s3RowsAt(block, ancestor),
+  })
 }
 
 /** The portal of S3, which forks once (`s3Portal`). */
@@ -144,7 +158,10 @@ export type S3Simulator = { chain: MockChainPortal }
  * The portal of S3. It raises the floor and forks the chain at the first request that reaches each
  * step, whichever process sends it, so a crash and a restart meet the same history.
  */
-export async function s3Portal(): Promise<MockChainPortal> {
+export async function s3Portal({
+  ancestor = S3.ancestor,
+  blocksPerResponse = S3.blocksPerResponse,
+}: S3Options = {}): Promise<MockChainPortal> {
   let raised = false
   let forked = false
 
@@ -152,7 +169,7 @@ export async function s3Portal(): Promise<MockChainPortal> {
     blocks: numbers(S3.from, S3.latest).map((number) => blockAt(number, 0)),
     latest: S3.latest,
     finalized: S3.finalized,
-    blocksPerResponse: S3.blocksPerResponse,
+    blocksPerResponse,
     delay: ({ query }) => {
       if (!raised && query.fromBlock >= S3.raiseAt) {
         raised = true
@@ -162,8 +179,8 @@ export async function s3Portal(): Promise<MockChainPortal> {
       if (!forked && query.fromBlock >= S3.forkAt) {
         forked = true
         portal.fork(
-          S3.ancestor,
-          numbers(S3.ancestor + 1, S3.to).map((number) => blockAt(number, 1)),
+          ancestor,
+          numbers(ancestor + 1, S3.to).map((number) => blockAt(number, 1, ancestor)),
         )
       }
     },

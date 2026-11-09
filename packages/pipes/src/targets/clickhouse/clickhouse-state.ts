@@ -10,6 +10,7 @@ import {
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
+import { isPersistedCursor } from '~/internal/cursor.js'
 
 import { ClickhouseStore, RollbackCursor } from './clickhouse-store.js'
 import { CLICKHOUSE_ERROR_CODES, ClickhouseTargetError } from './errors.js'
@@ -150,7 +151,25 @@ export class ClickhouseState {
     return JSON.stringify(cursor)
   }
   decodeCursor(cursor: string): BlockCursor {
-    return JSON.parse(cursor)
+    try {
+      const parsed: unknown = JSON.parse(cursor)
+      if (isStartCursor(parsed as StoredCursor)) {
+        const start = parsed as StartCursor
+        if (
+          !Number.isSafeInteger(start.number) ||
+          start.number < -1 ||
+          !Number.isSafeInteger(start.batchEnd) ||
+          start.batchEnd <= start.number
+        )
+          throw new Error('invalid start cursor')
+      } else if (!isPersistedCursor(parsed)) throw new Error('invalid cursor')
+      return parsed as BlockCursor
+    } catch {
+      throw new ClickhouseTargetError(
+        CLICKHOUSE_ERROR_CODES.STATE_CORRUPT,
+        'Persisted cursor is invalid; no recovery was performed.',
+      )
+    }
   }
 
   async saveCursor(

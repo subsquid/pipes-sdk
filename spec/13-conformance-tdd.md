@@ -147,6 +147,11 @@ windows, persisted formats — is deterministic against the oracle.
 
 ## Test-class taxonomy
 
+These classes label the guarantees checked, not the directory a test must occupy.
+Follow [test placement and overlap](../packages/pipes/TESTING.md) when adding or
+consolidating tests. Helper tests validate the harness; they do not by themselves
+establish pipeline conformance.
+
 | CT | Class | Primary properties |
 |---|---|---|
 | CT-1 | pipeline property tests (simulator ↔ oracle lockstep, structural validators, quiescence diff) | INV-1…INV-5, INV-10…INV-17, INV-20…INV-25, INV-30, WP-*, RP-7, RP-20…RP-23 |
@@ -196,6 +201,15 @@ the fork's commit, the store holds the ancestor with the current floor and a tri
 chain. Not checked: the undo log's restore of an updated or deleted row, because S3
 only inserts; retention's cleanup steps.
 
+*Additional S3 coverage:* `fork-depth.test.ts` runs depths 1, 3 and 6 (the last
+rolls back exactly to the finalized block), with one or seven blocks per response,
+for classes T, A, C and W. It also kills the rollback at two protocol steps at the
+finality boundary, restarts it, and repeats a pre-commit crash before resuming.
+The same store/oracle/end-state checks used by the original S3 matrix apply.
+Classes T and A additionally assert E1003 for a fork that replaces the finalized
+block, with the stored rows and cursor preserved. Class W uses the existing
+project-gated suite.
+
 ## Structural validators (kind-agnostic, always on)
 
 Applicable to any emission/state without domain knowledge: decodable (parses per
@@ -223,8 +237,8 @@ known-suspect in the current implementation (see gap register).
 | WP-4 (range resolution) | CT-1 | C | range-algebra + builder tests |
 | WP-5/CN-40…CN-44 recovery-before-write | CT-2 | P ⚠ | classes K, T and A: the CT-2 kill-point matrix on S1, where the oracle requires the recovered state to be a commit point (CN-40), rollback records included for class T; before the first cursor write classes K and A recover over their start state (IB-22) and start cursor (ADR-15); class C: the CT-2 matrix on S1 and S3, where the oracle requires the stand-in bus and the outbox together to hold exactly the changelog up to the recovered cursor, and nothing the state did not record (CN-17); class W: the CT-2 matrix on S1 and S3 against a real BigQuery project (`BIGQUERY_TEST_PROJECT`), where the oracle requires the recovered state to be a commit point, with every row above the recovery cursor inside the range the in-flight WAL row names (CN-14); orphan guard: class K refuses data with no state (unit suite), class W probes table-wide rather than key-scoped (GAP-20) |
 | INV-40…INV-42 (recovery soundness, idempotence, no orphans) | CT-2 | P ⚠ | classes K, T and A: every CT-2 point on S1, and for classes T and A on S3, ends in the scenario's end state with no residue, crashes during recovery and a second crash in the restart included; before the first commit classes K and A recover over their start state (IB-22) and start cursor (ADR-15); after a fork, class T holds the ancestor with the current floor and a trimmed chain; class C: every CT-2 point on S1 and S3 ends in the scenario's end state with an empty outbox, a second crash in the recovery publish and in the fork transaction included; class W: every CT-2 point on S1 and S3 ends in the scenario's end state with no residue, a crash in the restart's recovery, a second crash before the fork's WAL row and a restart that begins while the killed run's rollback DELETEs still run included |
-| INV-43 (re-fetch byte identity) | CT-2 | U | unit boundaries after a restart are free, so CT-2 diffs rows, not bytes |
-| INV-44 (refuse-before-delete) | CT-2 | P | class K refuses a straddling unit the coverage does not explain (E2317, target suite); no corrupted-state corpus |
+| INV-43 (re-fetch byte identity) | CT-2 | P | finalized S1 reprocessing with fixed response/unit boundaries compares all stored bytes; arbitrary crash/repartition recovery still compares rows, not bytes |
+| INV-44 (refuse-before-delete) | CT-2 | P | class K refuses a straddling unit the coverage does not explain (E2317, target suite); state suites now include malformed cursor corpora for T/A/W, malformed state fields for K, unsupported schema versions for C and invalid W recovery bounds, with preservation assertions; cross-field and older-record corruption remain open |
 | WP-7, RP-7, DEF-15, INV-25, IB-11 (finalized-only selection) | CT-1/5 | C | portal-source asserts hot override + warning, finalized `latest` and its no-finality fallback, transformer-start view honouring an explicit hot head, per-pipe (non-sticky) selection, effective cache client and node-cache forwarding, quiet pre-finalized mode, and unchanged non-requiring mode; Parquet/memory assert direct delivery and the coded impossible-fork refusal; CT-1 S1 diffs the class-K store against the oracle under a lagging floor and with no finality |
 | WP-10, WP-15, INV-20 (ordering) | CT-1 | P | buffer/split unit tests; the CT-1 S1 lockstep oracle refuses a batch whose cursor descends or is not the chain's block, and the diff against S1's fixed end state catches a skipped block that holds rows, and a run that ends early (class K); the linked validator checks block order within a batch, but no CT feeds it delivered batches yet; the portal client refuses a duplicate, out-of-order or out-of-range block (E1006, ADR-1), asserted with scripted responses at client and pipe level; the chain simulator has no adversarial mode |
 | WP-11, HZ-1 (assembly bounds) | CT-1 | C | stream-buffer tests |
@@ -238,7 +252,7 @@ known-suspect in the current implementation (see gap register).
 | WP-30…WP-32 (lifecycle) | CT-1 | P | stop-once + partial-start tested; across a resolved fork, the start and stop hooks and the metrics server run once each |
 | WP-40…WP-43 (fork core) | CT-3 | C ⚠ | core fork, portal-source, and fork-capable target suites; WP-42 text normativized from the tested deep-fork/floor-fallback semantics; K/∅ excluded by WP-7 |
 | WP-41 (empty canonical) | CT-4 | C | a 409 with an empty or absent chain fails with E1002, asserted with scripted responses at client level |
-| WP-44 (finality conflict) | CT-3 | P | Resolver unit tests: the search stops at the first block below `F`, so a match, a deep-fork restart or an older floor below `F` gives ⊥. `F` is the highest floor of all records, also of a record with an empty chain or after the match. `F` is the ancestor only when no older record holds a canonical block above it. The oracle pins the halt and the fallback. A pipe test stops with E1003 when the fork replaces the finalized block. No built-in target or CT-3 test asserts the halt |
+| WP-44 (finality conflict) | CT-3 | P | Resolver unit tests: the search stops at the first block below `F`, so a match, a deep-fork restart or an older floor below `F` gives ⊥. `F` is the highest floor of all records, also of a record with an empty chain or after the match. `F` is the ancestor only when no older record holds a canonical block above it. The oracle pins the halt and the fallback. A pipe test stops with E1003 when the fork replaces the finalized block. CT-3 asserts E1003 and preservation of stored rows and cursor for classes T, A and W (W project-gated); class C follows CN-35 instead: compensate to the finalized baseline, drain, then halt |
 | WP-46 (rollback idempotence) | CT-2/3 | P | netting idempotence tested (one binding); classes T, A and C: CT-2 S3 kills the fork's rollback twice in a row and converges; others U |
 | WP-47 (depth bound) | CT-3 | P ⚠ | retention pruning tested; deep-fork restart e2e U |
 | RP-1…RP-6 (write loop) | CT-1 | C | per-target state suites |
@@ -272,7 +286,7 @@ known-suspect in the current implementation (see gap register).
 | FM corpus | CT-4 | P | scattered unit coverage; no systematic corpus |
 | SLI/PF | CT-6 | U | no benchmarks recorded |
 | IB-1…IB-11 wire | CT-5 | P | client-side tested, including finalized route selection; CT-1 S1 checks the IB-3 anchor of every request; no golden wire fixtures |
-| IB-20…IB-28 formats | CT-5 | P ⚠ | per-binding tests; no round-trip corpus; the class-T timestamp-unit handling is covered by `conformance/postgres/cursor-timestamp` |
+| IB-20…IB-28 formats | CT-5 | P ⚠ | per-binding tests plus fresh-reader writer-output round-trips for T/A/W and file reopen for K/C; class-T timestamp-unit handling is covered by `conformance/postgres/cursor-timestamp`; second-implementation compatibility is unverified |
 | IB-40…IB-46 observability | CT-5 | P ⚠ | the CORS origin check and the /profiler `enabled` flag are tested over HTTP; consumed by dashboard, no golden scrapes (GAP-16) |
 | IB-50…IB-52 error registry | CT-5 | C | declared codes synced with `docs/errors.md` and the IB-50 table by the spec check, run on specification, error-source and error-document changes |
 
@@ -284,7 +298,6 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP | Statement | Violated | Pri | First test |
 |---|---|---|---|---|
 | GAP-7 | Legacy cursor migration in one binding is unlocked: concurrent first runs can both adopt legacy state and inherit a foreign monotonic floor that never self-corrects | RP-32, INV-35 | P2 | two concurrent first runs against legacy-keyed store; ≤ 1 adopts |
-| GAP-14 | Closed (2026-11-04): classes K, T, A and C run kill-point matrices (CT-2 on S1, classes T, A and C also on S3 with one fork). Class W now runs its matrix (CT-2 on S1 and S3) against a real BigQuery project the harness uses through `BIGQUERY_TEST_PROJECT`; without the variable the class-W suite skips wholesale, so a runner with no project credentials still runs the rest. The suite's first S3 run found a real INV-12 violation — the fork's rollback WAL rows dropped the finalized floor, which a mid-fork restart then read back as the resume floor — fixed with the matrix | INV-40…INV-42, CN-34 | closed | — |
 | GAP-16 | Observability payloads are consumed by the dashboard but have no golden fixtures; shapes drift silently (a version-drift accommodation already exists in the dashboard) | IB-40…IB-46 | P3 | golden scrape of /stats, /metrics, preview against a scripted run |
 | GAP-20 | The orphan-data guard is table-wide where it must be key-scoped: the write-ahead binding (E2212) probes the tracked table with no key filter while reading its sync row by key, so a co-resident pipe's legitimate first run into a populated shared table is refused — one pipe's startup made dependent on another's data, blocking a configuration INV-35/RP-41 support. The other bindings run no guard at all and restart from scratch over genuinely orphan data | CN-44, INV-35, REQ-3 | P2 | second pipe id, first run into a table another pipe populates → assert start, not refusal; then on declared-exclusive tables delete cursor state and assert coded refusal per binding |
 | GAP-28 | Required observability signals with no IB binding and no implementation: OB-6 head gauge, OB-20 lifecycle timestamps, OB-21 publication lag, OB-30 terminal-error level read, OB-32 capture-on-stall. OB-13 is partial: a stall watchdog logs a warning after a fixed delay, but exposes nothing a scraper can read and carries no reason code. /stats pre-first-batch zeros defeat OB-1/OB-4 on that surface | OB-6/13/20/21/30/32, REQ-10 | P2 | bind each in IB-41/IB-42, then golden scrapes (with GAP-16) |
@@ -293,20 +306,18 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 
 ## Build order
 
-- **Phase 0 — harness skeleton**: ledger mode (the chain-form mock portal), the
-  reference model (oracle), the structural validators, the class-K store probe and
-  class-K kill-point injection are in place; CT-1 is green on the reference
-  implementation for S1, and CT-2 runs the class-K matrix on S1 — the exit criteria
-  are met. Open: adversarial histories (over-return for INV-24, duplicate and out-of-order
-  delivery, head regressions), which build on the same chain model.
-- **Phase 1 — P1 gaps**: GAP-14 closed (the matrices of classes K, T, A, C and W run,
-  class A with and without its repair hook; class W behind `BIGQUERY_TEST_PROJECT`, the
-  INV-12 violation its first run found fixed). Register updated; remaining fixes landed
-  or accepted as documented deviations.
-- **Phase 2 — correctness core**: full CT-2 matrix all classes; CT-3 fork suite; CT-5
-  format round-trips (this unblocks the second-language implementation). Exit: matrix
-  rows for INV/CN/WP ≥ P everywhere, C on the fork/recovery core.
-- **Phase 3 — robustness**: CT-4 systematic FM corpus; CT-8 isolation; CT-9 fuzz.
-- **Phase 4 — performance regime**: CT-6 baselines into 11-performance, SLO
-  ratification (ADR-14), CT-7 soaks.
-Each phase ends by updating this matrix and register.
+Remaining work, in dependency order. Completed work is recorded in the traceability
+matrix above.
+
+1. **Correctness core (CT-2/3/5):** extend the corruption corpus to cross-field
+   contradictions, older rollback records and Pub/Sub cursor/outbox bytes; verify
+   cross-implementation format compatibility. Retain the existing kill-point and
+   fork matrices. Exit: INV/CN/WP matrix rows at least P everywhere, C on the
+   fork/recovery core.
+2. **Robustness (CT-4/8/9):** adversarial simulator histories (over-return,
+   duplicate and out-of-order delivery, head regressions), a systematic FM corpus,
+   isolation tests and fuzzing.
+3. **Performance and endurance (CT-6/7):** baselines in
+   [11-performance.md](11-performance.md), SLO ratification (ADR-14) and soaks.
+
+Update the traceability matrix and open gap register as each item is completed.

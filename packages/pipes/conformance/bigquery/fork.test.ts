@@ -1,6 +1,7 @@
 import { describe, expect } from 'vitest'
 
 import { S3 } from '../scenarios/fork.js'
+import { STORM, forkStorm } from '../scenarios/fork-storm.js'
 import { S3_BIGQUERY, it, runToEnd } from './harness.js'
 
 /** Without a project the harness may write, the class-W suite skips wholesale. */
@@ -28,5 +29,21 @@ describe.skipIf(!RUN)('BigQuery (class W) · S3 one fork · one uninterrupted ru
 
     expect(forks).toHaveLength(1)
     expect(afterFork?.fromBlock).toBe(S3.ancestor + 1)
+  })
+})
+
+describe.skipIf(!process.env['BIGQUERY_TEST_PROJECT'])('bigquery · repeated forks (CT-3)', () => {
+  it('replaces three branches, rolls back to finality and leaves no superseded rows', { timeout: 300_000 }, async ({
+    simulateForkStorm,
+    database,
+  }) => {
+    const simulator = await simulateForkStorm()
+    await runToEnd({ scenario: forkStorm('W'), simulator, database })
+    const requests = simulator.chain.requests
+    const forks = requests.filter((request) => request.answer?.kind === 'fork')
+    expect(forks).toHaveLength(STORM.ancestors.length)
+    expect(forks.map((request) => requests[requests.indexOf(request) + 1]?.query.fromBlock)).toEqual(
+      STORM.ancestors.map((number) => number + 1),
+    )
   })
 })

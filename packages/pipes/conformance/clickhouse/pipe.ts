@@ -82,6 +82,7 @@ export function streamClickhouse({
   logger,
   observe,
   onFork,
+  onRollback,
 }: {
   range: { from: number; to: number }
   url: string
@@ -90,6 +91,7 @@ export function streamClickhouse({
   logger: Logger
   observe: (observation: Observation) => void
   onFork: (canonical: BlockCursor[]) => void
+  onRollback?: (cursor: BlockCursor) => void
 }): Promise<void> {
   const target = clickhouseTarget<Record<TableName, Erc20Row[]>>({
     client,
@@ -102,7 +104,13 @@ export function streamClickhouse({
         }
       }
     },
-    onRollback: REPAIRS[repair],
+    onRollback:
+      REPAIRS[repair] === undefined
+        ? undefined
+        : async (ctx) => {
+            onRollback?.(ctx.safeCursor)
+            await REPAIRS[repair]?.(ctx)
+          },
   })
   const resolveFork = target.resolveFork as NonNullable<typeof target.resolveFork>
 

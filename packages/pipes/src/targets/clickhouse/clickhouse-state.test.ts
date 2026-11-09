@@ -83,16 +83,26 @@ describe('ClickhouseState — resume state & cursor persistence', () => {
     expect(resume).toEqual({ latest: block(50), finalized: block(100) })
   })
 
-  it('persists the finalized head + rollback chain verbatim (the source already clamped them)', async () => {
+  it.each([undefined, block(120)])('round-trips serialized state through a fresh reader (floor %j)', async (floor) => {
     const { store, inserts } = makeStore(block(100))
-    const state = new ClickhouseState(store as any, {})
-
-    await state.saveCursor(ctxFor(block(130), block(120), [block(121)]))
-
+    const writer = new ClickhouseState(store as any, {})
+    const current = { ...block(130), timestamp: 1_700_000_000 }
+    const rollbackChain = floor ? [block(121), block(130)] : []
+    await writer.saveCursor(ctxFor(current, floor, rollbackChain))
     const row = inserts[0].values[0]
-    expect(row.current).toBe(JSON.stringify(block(130)))
-    expect(row.finalized).toBe(JSON.stringify(block(120)))
-    expect(row.rollback_chain).toBe(JSON.stringify([block(121)]))
+    expect(row.current).toBe(JSON.stringify(current))
+    expect(row.finalized).toBe(floor ? JSON.stringify(floor) : '')
+    expect(row.rollback_chain).toBe(JSON.stringify(rollbackChain))
+    const reader = new ClickhouseState(
+      {
+        ...store,
+        query: async () => ({
+          json: async () => [{ ...row, timestamp: new Date(row.timestamp).toISOString() }],
+        }),
+      } as any,
+      {},
+    )
+    expect(await reader.getCursor()).toEqual({ latest: current, finalized: floor ?? null })
   })
 
   it('persists a fork ancestor with the current floor and a trimmed rollback chain', async () => {
@@ -438,5 +448,29 @@ describe('ClickhouseState — start cursor', () => {
     const stamps = inserts.map((insert) => insert.values[0].timestamp)
 
     expect(stamps).toEqual([now, now + 1, now + 2])
+  })
+})
+
+describe('clickhouse — malformed persisted cursor', () => {
+  it.each([
+    'not-json',
+    '{}',
+    '{"number":-2}',
+    '{"number":1.5}',
+    '{"number":"7"}',
+    '{"number":7,"hash":42}',
+    '{"number":7,"kind":"unknown"}',
+  ])('refuses %s before mutating the store', async (raw) => {
+    const { store, inserts, removals } = keyedStore({
+      stream: {
+        current: raw,
+        finalized: '',
+        timestamp: '2026-10-28T10:00:00.000Z',
+      },
+    })
+    const state = new ClickhouseState(store as any, {})
+    await expect(state.getCursor()).rejects.toMatchObject({ code: 'E2011' })
+    expect(inserts).toEqual([])
+    expect(removals).toEqual([])
   })
 })

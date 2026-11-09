@@ -1,6 +1,7 @@
 import { describe, expect } from 'vitest'
 
 import { S3 } from '../scenarios/fork.js'
+import { STORM, forkStorm } from '../scenarios/fork-storm.js'
 import { S3_PUBSUB, it, runToEnd, sharingCalls } from './harness.js'
 
 const scenario = S3_PUBSUB
@@ -31,5 +32,21 @@ describe('Pub/Sub (class C) · S3 one fork · one uninterrupted run (CT-1)', () 
     // Compensations go out, and are confirmed, before the source re-streams the canonical blocks (CN-35).
     expect(firstRewrite).toBe(deleted.length)
     expect(sharingCalls(pubsub.bus.messages.slice(firstRepair), deleted.length)).toBe(0)
+  })
+})
+
+describe('pubsub · repeated forks (CT-3)', () => {
+  it('replaces three branches, rolls back to finality and leaves no superseded rows', { timeout: 300_000 }, async ({
+    simulateForkStorm,
+    pubsub,
+  }) => {
+    const simulator = await simulateForkStorm()
+    await runToEnd({ scenario: forkStorm('C'), simulator, pubsub })
+    const requests = simulator.chain.requests
+    const forks = requests.filter((request) => request.answer?.kind === 'fork')
+    expect(forks).toHaveLength(STORM.ancestors.length)
+    expect(forks.map((request) => requests[requests.indexOf(request) + 1]?.query.fromBlock)).toEqual(
+      STORM.ancestors.map((number) => number + 1),
+    )
   })
 })

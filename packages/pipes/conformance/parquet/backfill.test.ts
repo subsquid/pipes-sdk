@@ -36,16 +36,6 @@ async function snapshotFiles(dir: string): Promise<Record<string, string>> {
  * claim in its title.
  */
 describe('Parquet (class K) · S1 backfill · one uninterrupted run (CT-1)', () => {
-  it('leaves exactly S1 in the store: every row, the cursor at the range end, the last floor', async ({
-    simulateS1,
-    dir,
-  }) => {
-    const simulator = await simulateS1()
-
-    // The claim is the end state itself, which `runToEnd` checks.
-    await runToEnd({ simulator, dir })
-  })
-
   it('leaves exactly S1 on a dataset without finality, with no floor (DEF-15, WP-47)', async ({ simulateS1, dir }) => {
     const simulator = await simulateS1({ finalized: null })
 
@@ -152,6 +142,21 @@ describe('Parquet (class K) · S1 backfill · one uninterrupted run (CT-1)', () 
     } finally {
       await rm(second, { recursive: true, force: true })
     }
+  })
+
+  it('reprocessing finalized blocks with fixed unit boundaries reproduces the file bytes (INV-43)', async ({
+    simulateS1,
+    dir,
+  }) => {
+    const first = await simulateS1({ blocksPerResponse: 7 })
+    await runToEnd({ simulator: first, dir })
+    const before = await snapshotFiles(dir)
+    expect(Object.keys(before).filter((name) => name.endsWith('.parquet')).length).toBeGreaterThan(1)
+    // Discard this test-owned store and replay the same finalized history from scratch.
+    await rm(dir, { recursive: true, force: true })
+    const replay = await simulateS1({ blocksPerResponse: 7 })
+    await runToEnd({ simulator: replay, dir })
+    expect(await snapshotFiles(dir)).toEqual(before)
   })
 
   it('changes nothing on a restart with nothing left to read (INV-10)', async ({ simulateS1, dir }) => {

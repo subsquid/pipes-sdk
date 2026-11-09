@@ -603,17 +603,6 @@ describe('Factory types', () => {
     }> | null>()
   })
 
-  it('getContract returns a typed response according to event params', () => {
-    type Result = Awaited<ReturnType<Factory<Args>['getContract']>>
-    expectTypeOf<Result>().toEqualTypeOf<FactoryEvent<{
-      token0: string
-      token1: string
-      fee: number
-      tickSpacing: number
-      pool: string
-    }> | null>()
-  })
-
   it('should type factory returns according to params passed', async () => {
     const poolFactory = contractFactory({
       address: '',

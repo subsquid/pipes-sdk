@@ -52,4 +52,6 @@ export const BIGQUERY_ERROR_CODES = {
    * dropped while our code believes the write succeeded.
    */
   APPEND_ROW_REJECTED: 'E2213',
+  /** Persisted cursor state cannot be interpreted safely. */
+  STATE_CORRUPT: 'E2214',
 } as const

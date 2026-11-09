@@ -11,6 +11,7 @@ import {
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
+import { isPersistedCursor, parsePersistedHeight } from '~/internal/cursor.js'
 
 import type { BigQueryWriter } from './bigquery-store.js'
 import type { TrackedTableLocation } from './bigquery-tracker.js'
@@ -253,12 +254,12 @@ export class BigQuerySyncState {
     }
 
     // Recovery path — clean the in-flight range across every tracked table.
-    const low = parseIntStrict(row.range_low)
-    const high = parseIntStrict(row.range_high)
+    const low = parsePersistedHeight(row.range_low)
+    const high = parsePersistedHeight(row.range_high)
     if (low === null || high === null) {
       throw new BigQueryTargetError(
         BIGQUERY_ERROR_CODES.CORRUPT_INFLIGHT_ROW,
-        `Internal: sync row in ${row.op} IN_FLIGHT state has NULL range_low/range_high; ` +
+        `Internal: sync row in ${row.op} IN_FLIGHT state has invalid range_low/range_high; ` +
           `cannot recover. Manual intervention needed: inspect ${this.#fqn} for id=${this.#key.value}.`,
       )
     }
@@ -585,13 +586,15 @@ function encodeCursor(c: BlockCursor): string {
 
 function decodeCursor(s: string | null): BlockCursor | undefined {
   if (s == null) return undefined
-  const parsed = JSON.parse(s)
-  return parsed == null ? undefined : (parsed as BlockCursor)
-}
-
-function parseIntStrict(v: number | string | null): number | null {
-  if (v === null) return null
-  if (typeof v === 'number') return v
-  const n = Number.parseInt(v, 10)
-  return Number.isFinite(n) ? n : null
+  try {
+    const parsed: unknown = JSON.parse(s)
+    if (parsed === null) return undefined
+    if (!isPersistedCursor(parsed)) throw new Error('invalid cursor')
+    return parsed as BlockCursor
+  } catch {
+    throw new BigQueryTargetError(
+      BIGQUERY_ERROR_CODES.STATE_CORRUPT,
+      'Persisted cursor is invalid; no recovery was performed.',
+    )
+  }
 }

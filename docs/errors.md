@@ -340,6 +340,12 @@ The target refuses to guess because the wrong cancel mechanism can duplicate or 
 
 ---
 
+### E2011 · Persisted cursor state invalid
+
+The target cannot interpret a stored cursor. Recovery stops before changing data.
+Restore a valid checkpoint together with its corresponding data, or use a fresh
+state and destination for a deliberate reindex.
+
 ## Postgres (Drizzle) target
 
 ### E2101 · Drizzle client missing
@@ -388,6 +394,12 @@ nothing — so the snapshot trigger and rollback SQL cannot name the column.
 `drizzle(..., { casing: 'snake_case' })` so the dialect can resolve it.
 
 ---
+
+### E2108 · Persisted cursor state invalid
+
+The target cannot interpret a stored cursor. Recovery stops before changing data.
+Restore a valid checkpoint together with its corresponding data, or use a fresh
+state and destination for a deliberate reindex.
 
 ## BigQuery target
 
@@ -462,8 +474,9 @@ Internal invariant violation (schema map and allowlist disagree).
 
 ### E2211 · Corrupt in-flight sync row
 
-A sync row left in `IN_FLIGHT` state is missing its `range_low`/`range_high` bounds, so recovery
-can't proceed.
+A sync row left in `IN_FLIGHT` state has missing or invalid `range_low`/`range_high` bounds.
+Each bound must represent a non-negative safe integer; malformed strings, fractional or
+negative values, and unsafe integers are rejected before recovery changes data.
 
 **Fix** — manual intervention: inspect the sync table row for this pipe `id` and repair or clear the
 in-flight state.
@@ -487,6 +500,12 @@ range). The affected rows are **not** written.
 column or values.
 
 ---
+
+### E2214 · Persisted cursor state invalid
+
+The target cannot interpret a stored cursor. Recovery stops before changing data.
+Restore a valid checkpoint together with its corresponding data, or use a fresh
+state and destination for a deliberate reindex.
 
 ## Parquet target
 

@@ -15,7 +15,7 @@ import type { Cursor, OracleRow, PersistedState, ReferenceModel } from '../oracl
 import { type BigquerySnapshot, validateBigquerySnapshot, validateBigqueryWindow } from '../oracle/validators.js'
 import { type Observation, PIPE_ID, TABLE_NAMES, type TableName, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
-import { type FullStreamScenario, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
+import { type FullStreamScenario, type ScenarioPortal, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
 import type { CallJournalEntry, CallKillPoint, KillEvidence } from './kill-switch.js'
 import { bigqueryAdmin, streamBigquery } from './pipe.js'
 import { readBigquerySnapshot, rowsOfBigquery } from './probe.js'
@@ -91,17 +91,19 @@ function persistedOf(store: BigqueryStore): PersistedState | undefined {
  * The end state comes from the scenario and the simulator, not the pipe: the oracle follows the
  * pipe, so it agrees with a pipe that stopped early.
  */
-export async function runToEnd<Sim extends { chain: MockChainPortal }>({
+export async function runToEnd<Sim extends { chain: ScenarioPortal }>({
   scenario,
   simulator,
   database,
   model = scenario.oracle(),
+  onRollback,
 }: {
   scenario: FullStreamScenario<Sim>
   simulator: Sim
   database: Database
   /** Pass one to watch it during a run, or to carry it across a restart or a crash. */
   model?: ReferenceModel
+  onRollback?: (cursor: BlockCursor) => void
 }): Promise<BigqueryStore> {
   const before = await readBigqueryStore(database)
   model.recover(persistedOf(before))
@@ -115,6 +117,7 @@ export async function runToEnd<Sim extends { chain: MockChainPortal }>({
     logger: testLogger(),
     observe: (observation) => follower.batch(observation),
     onFork: (canonical) => follower.fork(canonical),
+    onRollback,
   })
 
   const after = await readBigqueryStore(database)

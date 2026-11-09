@@ -37,4 +37,6 @@ export const CLICKHOUSE_ERROR_CODES = {
   SQL_FILE_STATEMENT_FAILED: 'E2009',
   /** System tables cannot describe a rollback target because access is denied. */
   ROLLBACK_METADATA_UNAVAILABLE: 'E2010',
+  /** Persisted cursor state cannot be interpreted safely. */
+  STATE_CORRUPT: 'E2011',
 } as const

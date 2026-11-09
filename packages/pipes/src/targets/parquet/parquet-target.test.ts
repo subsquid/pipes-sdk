@@ -1383,11 +1383,28 @@ describe('parquetTarget', () => {
   })
 
   describe('ParquetState', () => {
-    it('throws STATE_CORRUPT on an unparseable state file', async () => {
-      await writeFile(path.join(dir, '_sqd_parquet_state.json'), 'not-json')
+    const corruptStates = [
+      'not-json',
+      'null',
+      '{}',
+      '{"cursor":{"number":"5"}}',
+      '{"cursor":{"number":-2}}',
+      '{"cursor":{"number":1.5}}',
+      '{"cursor":{"number":5,"hash":42}}',
+      '{"cursor":{"number":5},"finalized":{"number":"4"}}',
+      '{"cursor":{"number":5},"coverage":{"blocks":-1}}',
+      '{"cursor":{"kind":"unknown","number":5}}',
+    ]
+    it.each(corruptStates)('refuses corrupt state before deleting data or temp files: %s', async (raw) => {
+      const statePath = path.join(dir, '_sqd_parquet_state.json')
+      await writeFile(statePath, raw)
+      await mkdir(path.join(dir, 'blocks'), { recursive: true })
+      const remnants = ['.tmp-uncommitted', '000000000006-000000000007.parquet']
+      for (const name of remnants) await writeFile(path.join(dir, 'blocks', name), 'preserve')
       const state = new ParquetState({ dir, tables: ['blocks'], logger: testLogger() })
-
-      await expect(state.getCursor()).rejects.toThrowError(/could not be parsed/)
+      await expect(state.getCursor()).rejects.toMatchObject({ code: 'E2310' })
+      expect(await readFile(statePath, 'utf8')).toBe(raw)
+      for (const name of remnants) expect(await readFile(path.join(dir, 'blocks', name), 'utf8')).toBe('preserve')
     })
 
     it('returns undefined on a cold start and creates table directories', async () => {
@@ -1417,18 +1434,21 @@ describe('parquetTarget', () => {
       expect(await state.getCursor()).toEqual({ latest: { number: 5, hash: '0x5' }, finalized: null })
     })
 
-    it('persists the finalized head alongside the cursor so the source can re-seed on restart', async () => {
-      const state = new ParquetState({ dir, tables: ['blocks'], logger: testLogger() })
-      await state.getCursor()
-
-      await state.saveCursor({ number: 7, hash: '0x7' }, { number: 7, hash: '0x7f' })
-
-      const persisted = JSON.parse(await readFile(path.join(dir, '_sqd_parquet_state.json'), 'utf8'))
-      expect(persisted).toMatchObject({
-        cursor: { number: 7, hash: '0x7' },
-        finalized: { number: 7, hash: '0x7f' },
-      })
-    })
+    it.each([undefined, { number: 7, hash: '0x7f' }])(
+      'round-trips cursor and coverage through a fresh reader (floor %j)',
+      async (floor) => {
+        const state = new ParquetState({ dir, tables: ['blocks'], logger: testLogger() })
+        await state.getCursor()
+        const cursor = { number: 7, hash: '0x7', timestamp: 1_700_000_000 }
+        const coverage = { blocks: 8 }
+        await state.saveCursor(cursor, floor, coverage)
+        const persisted = JSON.parse(await readFile(path.join(dir, '_sqd_parquet_state.json'), 'utf8'))
+        expect(persisted).toEqual({ cursor, ...(floor ? { finalized: floor } : {}), coverage })
+        const reopened = new ParquetState({ dir, tables: ['blocks'], logger: testLogger() })
+        expect(await reopened.getCursor()).toEqual({ latest: cursor, finalized: floor ?? null })
+        expect(reopened.coverage).toEqual(coverage)
+      },
+    )
 
     it('refuses a data file that straddles the cursor without destroying it first', async () => {
       // A restored older state file, or a hand-rewound cursor: the committed cursor is block 1, but
