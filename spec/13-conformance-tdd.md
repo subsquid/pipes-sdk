@@ -284,7 +284,7 @@ known-suspect in the current implementation (see gap register).
 | RS-10, RS-11 (purity, stateful) | CT-2 | P | K recovery relies on it; factory rollback C |
 | RS-20…RS-25 (cache) | CT-5 | C | except overlap re-insert (U) |
 | FM corpus | CT-4 | P | scattered unit coverage; no systematic corpus |
-| SLI/PF | CT-6 | U | no benchmarks recorded |
+| SLI/PF | CT-6 | P | S2/S3 head-following and fork sweep (`packages/pipes/conformance/perf`): SLI-4 with its detect, rollback and resume parts, head lag and the saturation knee per class (memory, T, A), with portal and store latency injected; S1, S4–S6, SLI-7 and SLO gates not built |
 | IB-1…IB-11 wire | CT-5 | P | client-side tested, including finalized route selection; CT-1 S1 checks the IB-3 anchor of every request; no golden wire fixtures |
 | IB-20…IB-28 formats | CT-5 | P ⚠ | per-binding tests plus fresh-reader writer-output round-trips for T/A/W and file reopen for K/C; class-T timestamp-unit handling is covered by `conformance/postgres/cursor-timestamp`; second-implementation compatibility is unverified |
 | IB-40…IB-46 observability | CT-5 | P ⚠ | the CORS origin check and the /profiler `enabled` flag are tested over HTTP; consumed by dashboard, no golden scrapes (GAP-16) |
