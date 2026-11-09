@@ -28,6 +28,62 @@ describe('EvmQuery', () => {
     })
   })
 
+  describe('calculateRanges with resumeFrom', () => {
+    it('drops the blocks below the resume block', async () => {
+      const qb = new EvmQueryBuilder().addRange({ from: 1, to: 9 })
+
+      const { raw, bounded } = await qb.calculateRanges({ portal: stubPortal(), resumeFrom: 4 })
+
+      expect(raw).toEqual([{ range: { from: 1, to: 9 }, request: {} }])
+      expect(bounded).toEqual([{ range: { from: 4, to: 9 }, request: {} }])
+    })
+
+    it('accepts a range that starts at the resume block', async () => {
+      const qb = new EvmQueryBuilder().addRange({ from: 4, to: 9 })
+
+      const { bounded } = await qb.calculateRanges({ portal: stubPortal(), resumeFrom: 4 })
+
+      expect(bounded).toEqual([{ range: { from: 4, to: 9 }, request: {} }])
+    })
+
+    it('refuses a range that starts one block above the resume block', async () => {
+      const qb = new EvmQueryBuilder().addRange({ from: 5, to: 9 })
+
+      await expect(qb.calculateRanges({ portal: stubPortal(), resumeFrom: 4 })).rejects.toThrow(
+        new BlockRangeConfigurationError([
+          'The range starts at block 5, but the saved cursor is at block 3, so the pipe must continue at block 4. Block 4 would be skipped.',
+          'If `from` is computed from the saved cursor, use a fixed start: the pipe continues from its cursor by itself, also after a fork.',
+          'To skip these blocks on purpose, reset the pipe state or use a new pipe id.',
+        ]),
+      )
+    })
+
+    it('names every block a range far above the resume block would skip', async () => {
+      const qb = new EvmQueryBuilder().addRange({ from: 1000 })
+
+      await expect(qb.calculateRanges({ portal: stubPortal(), resumeFrom: 501 })).rejects.toThrow(
+        'The range starts at block 1000, but the saved cursor is at block 500, so the pipe must continue at block 501. Blocks 501–999 would be skipped.',
+      )
+    })
+
+    it('accepts a resume block in a gap between configured ranges', async () => {
+      const qb = new EvmQueryBuilder().addRange({ from: 1, to: 1 }).addRange({ from: 5, to: 9 })
+
+      const { bounded } = await qb.calculateRanges({ portal: stubPortal(), resumeFrom: 3 })
+
+      expect(bounded).toEqual([{ range: { from: 5, to: 9 }, request: {} }])
+    })
+
+    it("resumes a 'latest' range at the resume block, below the head", async () => {
+      const qb = new EvmQueryBuilder().addRange({ from: 'latest' })
+      const portal = stubPortal({ getHead: async () => ({ number: 15, hash: '0x15' }) })
+
+      const { bounded } = await qb.calculateRanges({ portal, resumeFrom: 4 })
+
+      expect(bounded).toEqual([{ range: { from: 4 }, request: {} }])
+    })
+  })
+
   describe('from: timestamp', () => {
     it('should resolve a Date to a block number', async () => {
       const builder = new EvmQueryBuilder()
@@ -210,7 +266,7 @@ describe('EvmQuery', () => {
         portal: stubPortal({
           getHead: async () => ({ number: 15, hash: '0x' }),
         }),
-        bound: { from: 10 },
+        resumeFrom: 10,
       })
 
       expect(bounded).toMatchInlineSnapshot(`

@@ -294,7 +294,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       portal,
       finalized,
       signal: stop,
-      bound: cursor ? { from: cursor.number + 1 } : undefined,
+      resumeFrom: cursor ? cursor.number + 1 : undefined,
     })
 
     const initial = raw[0]?.range.from || 0

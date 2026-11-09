@@ -45,6 +45,11 @@ numbers via the portal. Unresolvable or inverted ranges fail startup with the co
 range-configuration error. Ranges then merge (overlaps unioned) and clip to the resume
 bound.
 
+If a saved cursor exists, the earliest configured request MUST start at or before
+`state.latest.number + 1`. Check this on initial resume and again after every rollback;
+otherwise halt with E0002 before requesting blocks. An explicit range is never silently
+expanded to cover the gap. Configured inter-range gaps remain intentional (WP-15).
+
 **WP-5 — Repair before write.** [MUST] Recovery repair (06, CN-40…CN-44) completes
 before the first new commit. No new data may land while orphan data above `C` exists.
 

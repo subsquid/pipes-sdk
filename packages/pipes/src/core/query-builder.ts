@@ -75,17 +75,19 @@ export abstract class QueryBuilder<F extends {}, R = any> {
    *
    * - Resolves `'latest'` to the current head block number via the portal.
    * - Resolves `Date` values to block numbers via `portal.resolveTimestamp`.
-   * - Merges overlapping ranges and applies an optional `bound` to clip results.
+   * - Merges overlapping ranges and, given `resumeFrom`, drops every block below it.
    *
-   * @returns `raw` — the full merged ranges; `bounded` — ranges clipped to `bound`.
+   * @param resumeFrom - The block after the saved cursor. The earliest range must reach it: a range
+   *   starting above it would skip blocks, so it fails with a range-configuration error.
+   * @returns `raw` — the full merged ranges; `bounded` — ranges starting at `resumeFrom` or later.
    */
   async calculateRanges({
     portal,
-    bound,
+    resumeFrom,
     finalized,
     signal,
   }: {
-    bound?: Range
+    resumeFrom?: number
     portal: Portal
     finalized?: boolean
     signal?: AbortSignal
@@ -103,7 +105,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
       range:
         r.range.from === 'latest'
           ? {
-              from: Math.min(latest?.number || 0, bound?.from || Infinity),
+              from: Math.min(latest?.number || 0, resumeFrom ?? Infinity),
               ...(r.range.to != null ? { to: r.range.to } : {}),
             }
           : {
@@ -123,6 +125,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
     }
 
     const ranges = mergeRangeRequests(resolvedRequests, this.mergeDataRequests)
+    const bound = resumeFrom === undefined ? undefined : { from: resumeFrom }
 
     if (!ranges.length) {
       // FIXME request should be optional
@@ -131,6 +134,8 @@ export abstract class QueryBuilder<F extends {}, R = any> {
         bounded: [{ range: bound || { from: 0 } } as any],
       }
     }
+
+    assertResumeBlockCovered(ranges, resumeFrom)
 
     return {
       raw: ranges,
@@ -177,6 +182,31 @@ export abstract class QueryBuilder<F extends {}, R = any> {
 
     return resolved
   }
+}
+
+/**
+ * A resume block below the earliest range is one the stream would skip, not a configured gap: after a
+ * fork rolls the cursor back below a start derived from it, the replacement blocks are never read.
+ */
+function assertResumeBlockCovered<R>(ranges: RangeRequest<R>[], resumeFrom: number | undefined) {
+  const start = ranges[0]?.range.from
+  if (resumeFrom === undefined || start === undefined) {
+    return
+  }
+
+  const skipsResumeBlock = start > resumeFrom
+  if (!skipsResumeBlock) {
+    return
+  }
+
+  const lastSkipped = start - 1
+  const skipped = lastSkipped === resumeFrom ? `Block ${resumeFrom}` : `Blocks ${resumeFrom}–${lastSkipped}`
+
+  throw new BlockRangeConfigurationError([
+    `The range starts at block ${start}, but the saved cursor is at block ${resumeFrom - 1}, so the pipe must continue at block ${resumeFrom}. ${skipped} would be skipped.`,
+    'If `from` is computed from the saved cursor, use a fixed start: the pipe continues from its cursor by itself, also after a fork.',
+    'To skip these blocks on purpose, reset the pipe state or use a new pipe id.',
+  ])
 }
 
 /** Minimal portal interface needed by `QueryBuilder.calculateRanges` to resolve head and timestamps. */
