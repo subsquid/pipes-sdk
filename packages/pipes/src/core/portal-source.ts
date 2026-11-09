@@ -24,7 +24,7 @@ import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
-import { QueryBuilder, type Range, hashQuery } from './query-builder.js'
+import { QueryBuilder, type Range, type RangeAnchors, hashQuery } from './query-builder.js'
 import { PipeToOptions, resolveShutdown, withShutdown } from './shutdown.js'
 import { ReadOptions, Target, TargetState } from './target.js'
 import { QueryAwareTransformer, Transformer, TransformerArgs, TransformerOptions } from './transformer.js'
@@ -136,6 +136,11 @@ export type HeadContext = Omit<BatchContext, 'stream'> & { stream?: StreamInfo }
 export type PortalBatch<T = any> = { data: T; ctx: BatchContext }
 
 type SourceReadOptions = ReadOptions & { finalized?: boolean; signal?: AbortSignal }
+
+type ReadRun = {
+  anchors?: RangeAnchors
+  metadata?: ApiDataset
+}
 
 type PartialBlock = { header: { number: number; hash: string; timestamp?: number } }
 
@@ -272,7 +277,15 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
    * Finality belongs to this read, so a finalized-only target does not change the client defaults
    * for other consumers of the same source.
    */
-  private async *read(state?: TargetState, options: SourceReadOptions = {}): AsyncIterable<PortalBatch<T>> {
+  /**
+   * @param run - Portal answers kept across the restarts of one run. A fork restarts the read, and the
+   * ranges and the dataset metadata do not change between restarts.
+   */
+  private async *read(
+    state?: TargetState,
+    options: SourceReadOptions = {},
+    run: ReadRun = {},
+  ): AsyncIterable<PortalBatch<T>> {
     const { finalized = this.#portal.finalized, signal: stop } = options
     if (stop?.aborted) {
       return
@@ -290,12 +303,14 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     /*
      Calculates query ranges while excluding blocks that were previously fetched to avoid duplicate processing
      */
-    const { bounded, raw } = await this.#queryBuilder.calculateRanges({
+    const { bounded, raw, anchors } = await this.#queryBuilder.calculateRanges({
       portal,
       finalized,
       signal: stop,
       resumeFrom: cursor ? cursor.number + 1 : undefined,
+      anchors: run.anchors,
     })
+    run.anchors = anchors
 
     const initial = raw[0]?.range.from || 0
     const ranges = raw.map((r) => r.range)
@@ -305,9 +320,14 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     await this.start({ initial, current: cursor }, { finalized, signal: stop })
     if (stop?.aborted) return
 
-    const datasetMetadata = await portal.getMetadata({ abort: stop })
-    if (!datasetMetadata.real_time) {
-      this.#logger.warn(NOT_REAL_TIME_WARNING(datasetMetadata.dataset))
+    let datasetMetadata = run.metadata
+    if (!datasetMetadata) {
+      datasetMetadata = await portal.getMetadata({ abort: stop })
+      run.metadata = datasetMetadata
+
+      if (!datasetMetadata.real_time) {
+        this.#logger.warn(NOT_REAL_TIME_WARNING(datasetMetadata.dataset))
+      }
     }
 
     // A wedged target and a silent portal look identical from the outside: the progress line
@@ -692,9 +712,11 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     options: SourceReadOptions,
   ): AsyncIterable<PortalBatch<T>> {
     const { finalized = this.#portal.finalized, signal: stop } = options
+    const run: ReadRun = {}
+
     while (true) {
       try {
-        for await (const batch of this.read(state, options)) {
+        for await (const batch of this.read(state, options, run)) {
           yield batch as PortalBatch<T>
           this.batchEnd(batch.ctx)
         }

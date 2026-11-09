@@ -31,6 +31,15 @@ export type RequestOptions<R> = {
   request: R
 }
 
+/**
+ * The portal answers a range depends on: the head `'latest'` resolved to, and the block of each `Date`.
+ * Resolved once per run, so a restart after a fork reads the same ranges without asking the portal again.
+ */
+export type RangeAnchors = {
+  latest?: { number: number; hash: string }
+  timestamps: Map<number, number>
+}
+
 export type QueryTransformerOpts<In, Out, Query extends QueryBuilder<any>> = TransformerArgs<In, Out> & {
   setupQuery?: SetupQueryFn<Query>
 }
@@ -79,27 +88,26 @@ export abstract class QueryBuilder<F extends {}, R = any> {
    *
    * @param resumeFrom - The block after the saved cursor. The earliest range must reach it: a range
    *   starting above it would skip blocks, so it fails with a range-configuration error.
-   * @returns `raw` — the full merged ranges; `bounded` — ranges starting at `resumeFrom` or later.
+   * @param anchors - Anchors from an earlier call in the same run. Given, the portal is not asked again.
+   * @returns `raw` — the full merged ranges; `bounded` — ranges starting at `resumeFrom` or later;
+   *   `anchors` — what the portal answered, to pass to the next call.
    */
   async calculateRanges({
     portal,
     resumeFrom,
     finalized,
     signal,
+    anchors,
   }: {
     resumeFrom?: number
     portal: Portal
     finalized?: boolean
     signal?: AbortSignal
-  }): Promise<{ bounded: RangeRequest<R>[]; raw: RangeRequest<R>[] }> {
-    let latest: { number: number; hash: string } | undefined
-    if (this.requests.some((r) => r.range.from === 'latest')) {
-      latest = await portal.getHead({ finalized, abort: signal })
-      // Datasets without finality still resolve 'latest' to their head, rather than genesis.
-      if (!latest && finalized) latest = await portal.getHead({ finalized: false, abort: signal })
-    }
+    anchors?: RangeAnchors
+  }): Promise<{ bounded: RangeRequest<R>[]; raw: RangeRequest<R>[]; anchors: RangeAnchors }> {
+    anchors ??= await this.resolveAnchors(portal, finalized, signal)
 
-    const resolvedTimestamps = await this.resolveTimestamps(portal, signal)
+    const { latest, timestamps: resolvedTimestamps } = anchors
 
     const resolvedRequests = this.requests.map((r) => ({
       range:
@@ -132,6 +140,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
       return {
         raw: [{ range: { from: 0 } } as any],
         bounded: [{ range: bound || { from: 0 } } as any],
+        anchors,
       }
     }
 
@@ -140,7 +149,21 @@ export abstract class QueryBuilder<F extends {}, R = any> {
     return {
       raw: ranges,
       bounded: applyRangeBound(ranges, bound),
+      anchors,
     }
+  }
+
+  private async resolveAnchors(portal: Portal, finalized?: boolean, signal?: AbortSignal): Promise<RangeAnchors> {
+    let latest: { number: number; hash: string } | undefined
+    if (this.requests.some((r) => r.range.from === 'latest')) {
+      latest = await portal.getHead({ finalized, abort: signal })
+      // Datasets without finality still resolve 'latest' to their head, rather than genesis.
+      if (!latest && finalized) latest = await portal.getHead({ finalized: false, abort: signal })
+    }
+
+    const timestamps = await this.resolveTimestamps(portal, signal)
+
+    return { latest, timestamps }
   }
 
   private async resolveTimestamps(portal: Portal, signal?: AbortSignal): Promise<Map<number, number>> {
