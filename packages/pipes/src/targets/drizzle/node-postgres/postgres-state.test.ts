@@ -89,9 +89,31 @@ describe('PostgresState — resume state & cursor persistence', () => {
     expect(resume).toEqual({ latest: { number: 50, hash: '0x50' }, finalized: null })
   })
 
-  it('persists the finalized head + rollback chain verbatim (the source already clamped them)', async () => {
-    const state = await seededState(block(100))
+  it('reads SQL NULL for an optional hash and timestamp as absent cursor fields', async () => {
+    const client = {
+      query: async () => ({
+        rows: [
+          {
+            current_number: '0',
+            current_hash: null,
+            current_timestamp: null,
+            finalized: {},
+            rollback_chain: [],
+          },
+        ],
+      }),
+    }
+    const state = new PostgresState(client as any, {})
+    expect(await state.getCursor({ logger: testLogger() })).toEqual({
+      latest: { number: 0, hash: undefined, timestamp: undefined },
+      finalized: null,
+    })
+  })
 
+  it.each([undefined, block(120)])('round-trips bound state through a fresh reader (floor %j)', async (floor) => {
+    const state = await seededState(block(100))
+    const current = { ...block(130), timestamp: 1_700_000_000 }
+    const chain = floor ? [block(121), block(130)] : []
     const executed: any[] = []
     const tx = {
       execute: async (sql: any) => {
@@ -99,12 +121,34 @@ describe('PostgresState — resume state & cursor persistence', () => {
         return { rowCount: 0 }
       },
     }
-
-    await state.saveCursor(tx as any, ctxFor(block(130), block(120), [block(121), block(122)]))
-
-    const insertParams = paramsOf(executed[0])
-    expect(insertParams).toContain(JSON.stringify(block(120)))
-    expect(insertParams).toContain(JSON.stringify([block(121), block(122)]))
+    await state.saveCursor(tx as any, ctxFor(current, floor, chain))
+    const [id, number, hash, timestamp, finalized, rollbackChain] = paramsOf(executed[0])
+    expect([id, number, hash, timestamp, finalized, rollbackChain]).toEqual([
+      'stream',
+      130,
+      '0x130',
+      new Date(1_700_000_000_000),
+      JSON.stringify(floor ?? {}),
+      JSON.stringify(chain),
+    ])
+    const reader = new PostgresState(
+      {
+        query: async () => ({
+          rows: [
+            {
+              id,
+              current_number: String(number),
+              current_hash: hash,
+              current_timestamp: timestamp,
+              finalized: JSON.parse(finalized as string),
+              rollback_chain: JSON.parse(rollbackChain as string),
+            },
+          ],
+        }),
+      } as any,
+      {},
+    )
+    expect(await reader.getCursor({ logger: testLogger() })).toEqual({ latest: current, finalized: floor ?? null })
   })
 
   // Falling back to the current block sweeps away the cursor rows a deep fork needs.
@@ -330,11 +374,10 @@ describe('PostgresState — legacy cursor migration', () => {
   })
 })
 
-// Portal cursor timestamps are network-dependent (IB-21). The values below were read from the
-// live portals on 2026-11-09: ethereum-mainnet block 26372900 reports seconds, tron-mainnet block
-// 87833400 reports milliseconds. The sync column must hold the wall-clock instant either way.
+// The millisecond fixture includes subsecond precision so restart validation must
+// accept fractional epoch seconds while preserving the wall-clock instant.
 const EVM_SECONDS = 1_794_173_939
-const TRON_MS = 1_794_173_943_000
+const TRON_MS = 1_794_173_943_123
 
 function ctxWithTimestamp(
   current: { number: number; hash: string; timestamp?: number },
@@ -480,5 +523,40 @@ describe('PostgresState — fork cleanup', () => {
     expect(text).toMatch(/DELETE FROM/i)
     expect(text).toMatch(/"current_number" > \$\d/)
     expect(params).toEqual(['stream', 997])
+  })
+})
+
+describe('PostgresState — malformed persisted cursor', () => {
+  it.each(['garbage', '-2', '1.5', '9007199254740992'])('refuses numeric cursor %s before a write', async (number) => {
+    const query = vi.fn(async (_sql: string) => ({
+      rows: [
+        {
+          current_number: number,
+          current_hash: '0x7',
+          current_timestamp: null,
+          finalized: {},
+          rollback_chain: [],
+        },
+      ],
+    }))
+    const state = new PostgresState({ query } as any, {})
+    await expect(state.getCursor({ logger: testLogger() })).rejects.toMatchObject({ code: 'E2108' })
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(query.mock.calls[0]?.[0]).toMatch(/^SELECT /)
+  })
+})
+
+describe('PostgresState — persisted finalized validation', () => {
+  it.each(
+    [{ number: '40' }, { hash: '0x40' }, [], 'invalid', { number: -1 }, { number: 40, kind: 'unknown' }].map(
+      (finalized) => ({ finalized }),
+    ),
+  )('refuses malformed finalized %j rather than dropping the floor', async ({ finalized }) => {
+    const state = stateWithRow({ finalized })
+    await expect(state.getCursor({ logger: testLogger() })).rejects.toMatchObject({ code: 'E2108' })
+  })
+  it('preserves SQL NULL as an absent finalized head', async () => {
+    const state = stateWithRow({ finalized: null })
+    expect((await state.getCursor({ logger: testLogger() }))?.finalized).toBeNull()
   })
 })

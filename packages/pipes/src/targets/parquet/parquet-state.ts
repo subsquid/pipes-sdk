@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/pro
 import path from 'node:path'
 
 import { type BlockCursor, CursorKey, type Logger, type TargetState, formatBlock } from '~/core/index.js'
+import { isPersistedCursor, isPersistedHeight } from '~/internal/cursor.js'
 
 import { PARQUET_ERROR_CODES, ParquetTargetError } from './errors.js'
 import { fsyncDir, fsyncFile } from './fs-durable.js'
@@ -200,9 +201,32 @@ export class ParquetState {
 
     try {
       const parsed = JSON.parse(raw) as PersistedState
-      if (!parsed?.cursor || typeof parsed.cursor.number !== 'number') {
-        throw new Error('missing cursor.number')
+      const object = (value: unknown): value is Record<string, unknown> =>
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+      if (!object(parsed) || !object(parsed.cursor)) throw new Error('missing cursor')
+      const start = isStartCursor(parsed.cursor)
+      if (start) {
+        if (
+          !Number.isSafeInteger(parsed.cursor.number) ||
+          parsed.cursor.number < -1 ||
+          Object.keys(parsed.cursor).some((key) => key !== 'kind' && key !== 'number') ||
+          parsed.finalized !== undefined ||
+          parsed.coverage !== undefined
+        ) {
+          throw new Error('invalid start cursor')
+        }
+      } else if (!isPersistedCursor(parsed.cursor)) {
+        throw new Error('invalid cursor')
       }
+      if (parsed.finalized !== undefined && !isPersistedCursor(parsed.finalized))
+        throw new Error('invalid finalized cursor')
+      if (
+        parsed.coverage !== undefined &&
+        (!object(parsed.coverage) || !Object.values(parsed.coverage).every(isPersistedHeight))
+      ) {
+        throw new Error('invalid coverage')
+      }
+      if (parsed.id !== undefined && typeof parsed.id !== 'string') throw new Error('invalid id')
 
       return parsed
     } catch (error) {

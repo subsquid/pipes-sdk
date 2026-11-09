@@ -31,4 +31,6 @@ export const POSTGRES_ERROR_CODES = {
   CIRCULAR_DEPENDENCY: 'E2106',
   /** A column's real database name could not be resolved from the Drizzle dialect. */
   COLUMN_NAME_UNRESOLVED: 'E2107',
+  /** Persisted cursor state cannot be interpreted safely. */
+  STATE_CORRUPT: 'E2108',
 } as const

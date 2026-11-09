@@ -44,6 +44,7 @@ export function streamBigquery({
   logger,
   observe,
   onFork,
+  onRollback,
 }: {
   range: { from: number; to: number }
   url: string
@@ -52,12 +53,14 @@ export function streamBigquery({
   logger: Logger
   observe: (observation: Observation) => void
   onFork: (canonical: BlockCursor[]) => void
+  onRollback?: (cursor: BlockCursor) => void
 }): Promise<void> {
   const target = bigqueryTarget<Record<TableName, Erc20Row[]>>({
     client: { bigquery: new BigQuery({ projectId }) },
     projectId,
     dataset,
     tables: BIGQUERY_TABLES,
+    onAfterRollback: ({ cursor }) => onRollback?.(cursor),
     onData: ({ store, data }) => {
       for (const table of TABLE_NAMES) {
         if (data[table].length) {

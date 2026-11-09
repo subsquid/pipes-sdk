@@ -317,3 +317,77 @@ describe('BigQuerySyncState — fork records', () => {
     expect(resume).toEqual({ latest: block(5), finalized: null })
   })
 })
+
+describe('BigQuerySyncState — corrupt recovery ranges', () => {
+  it.each([null, '12garbage', '', '1.5', -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'refuses invalid low bound %j before any DELETE or recovery marker',
+    async (low) => {
+      const executeDml = vi.fn()
+      const commitSyncRow = vi.fn()
+      const row = { ...committedRow(block(40)), committed: false, range_low: low, range_high: 60 }
+      const store = { query: async () => [row], executeDml, commitSyncRow }
+      const state = new BigQuerySyncState({
+        store: store as any,
+        bigquery: {} as any,
+        trackedTables: [{ fqn: 'p.d.events', blockNumberColumn: 'blockNumber' }] as any,
+        options: { projectId: 'p', dataset: 'd' },
+      })
+      await expect(state.getCursor({ logger: testLogger() })).rejects.toMatchObject({ code: 'E2211' })
+      expect(executeDml).not.toHaveBeenCalled()
+      expect(commitSyncRow).not.toHaveBeenCalled()
+    },
+  )
+})
+
+describe('BigQuerySyncState — persisted format round-trip', () => {
+  it.each([undefined, block(40)])('reads a commit from a fresh state instance (floor %j)', async (floor) => {
+    const rows: Record<string, unknown>[] = []
+    const store = {
+      query: async () => rows.slice(-1),
+      commitSyncRow: async (_schema: unknown, row: Record<string, unknown>) =>
+        rows.push({ ...row, timestamp_micros: row['timestamp'] }),
+      executeDml: async () => ({ rowCount: 0 }),
+    }
+    const open = () =>
+      new BigQuerySyncState({
+        store: store as any,
+        bigquery: {} as any,
+        trackedTables: [],
+        options: { projectId: 'p', dataset: 'd' },
+      })
+    const current = { ...block(50), timestamp: 1_700_000_000 }
+    const chain = floor ? [block(41), current] : []
+    await open().saveCommitPost({ logger: testLogger(), cursor: current, finalized: floor, rollbackChain: chain })
+    expect(rows[0]).toMatchObject({
+      id: 'stream',
+      op: 'commit',
+      committed: true,
+      current: JSON.stringify(current),
+      finalized: floor ? JSON.stringify(floor) : null,
+      rollback_chain: JSON.stringify(chain),
+      range_low: null,
+      range_high: null,
+    })
+    expect(await open().getCursor({ logger: testLogger() })).toEqual({ latest: current, finalized: floor ?? null })
+  })
+})
+
+describe('bigquery — malformed persisted cursor', () => {
+  it.each(['not-json', '{}', '{"number":-2}', '{"number":1.5}', '{"number":"7"}', '{"number":7,"hash":42}'])(
+    'refuses %s before mutating the store',
+    async (raw) => {
+      const executeDml = vi.fn()
+      const commitSyncRow = vi.fn()
+      const store = { query: async () => [{ ...committedRow(block(40)), current: raw }], executeDml, commitSyncRow }
+      const state = new BigQuerySyncState({
+        store: store as any,
+        bigquery: {} as any,
+        trackedTables: [],
+        options: { projectId: 'p', dataset: 'd' },
+      })
+      await expect(state.getCursor({ logger: testLogger() })).rejects.toMatchObject({ code: 'E2214' })
+      expect(executeDml).not.toHaveBeenCalled()
+      expect(commitSyncRow).not.toHaveBeenCalled()
+    },
+  )
+})

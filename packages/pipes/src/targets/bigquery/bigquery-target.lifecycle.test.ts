@@ -1288,7 +1288,7 @@ describe('BigQuerySyncState — crash recovery on getCursor', () => {
   })
 
   it('throws CORRUPT_INFLIGHT_ROW when the in-flight row has NULL range_low / range_high', async () => {
-    const { state } = makeRecoveryFixture({
+    const { state, dmlCalls } = makeRecoveryFixture({
       op: 'commit',
       committed: false,
       range_low: null,
@@ -1296,11 +1296,12 @@ describe('BigQuerySyncState — crash recovery on getCursor', () => {
     })
 
     await expect(state.getCursor({ logger: testLogger() })).rejects.toThrow(
-      /sync row in commit IN_FLIGHT state has NULL range_low\/range_high/,
+      /sync row in commit IN_FLIGHT state has invalid range_low\/range_high/,
     )
     await expect(state.getCursor({ logger: testLogger() })).rejects.toMatchObject({
       code: BIGQUERY_ERROR_CODES.CORRUPT_INFLIGHT_ROW,
     })
+    expect(dmlCalls).toEqual([])
   })
 })
 

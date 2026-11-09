@@ -17,7 +17,7 @@ clickhouse/   class A: the ClickHouse sink, with and without the author's repair
 pubsub/       class C: the Pub/Sub sink, publishing to a stand-in bus in the test process
 ```
 
-Each store folder holds the same files:
+Store folders use the following files where the scenario applies:
 
 | File | What it is |
 |---|---|
@@ -27,6 +27,8 @@ Each store folder holds the same files:
 | `killed-run.ts` | the child process: the pipe with the kill switch armed |
 | `harness.ts` | fixtures, and `runToEnd`, `runKilled`, `crashAt`, `resumeToEnd` |
 | `<scenario>.test.ts` | one uninterrupted run (CT-1) |
+| `fork-depth.test.ts` | S3 at depths 1, 3 and 6 with different response partitions; crash/restart at the finality boundary |
+| `fork-history.test.ts` | partial canonical windows with missing finality or cascading rollback (ClickHouse and BigQuery) |
 | `<scenario>-crash.test.ts` | the run killed at each commit step, then restarted (CT-2) |
 
 ## What every run checks
@@ -41,7 +43,24 @@ The end state comes from the scenario, not from the pipe. An oracle that follows
 
 ## Where a new test goes
 
-If the test can be stated without naming a store, it belongs here: "after a crash at step X the store holds a commit point, and the restart ends in the scenario's end state". If it is about one sink's mechanism ("recovery deletes the rows in [low, high]"), it belongs next to that sink in `src/targets/`.
+Follow [Test placement and overlap](../TESTING.md). Pipeline scenarios belong here
+when they check observable guarantees against a controlled history and an
+independent expected result. Target-specific mechanisms and edge cases belong
+beside the target, even when exercising them requires the whole pipe.
+
+`oracle/*.test.ts`, `probe.test.ts`, `kill-switch.test.ts`, and `harness.test.ts`
+test the measuring tools themselves. Their location does not make them evidence
+that the pipeline passes the contract. A `CT-*` requirement may also have useful
+coverage in a component or adapter suite.
+
+The default S3 fork remains in `fork.test.ts`. Its depth/response-size combination
+is omitted from `fork-depth.test.ts`, which adds the other combinations and
+recovery at the finality boundary. Backfill restart tests use `runToEnd` before
+and after the restart, so they also assert the initial uninterrupted end state.
+
+`fork-history.test.ts` binds the shared missing-finalized and deep cascading-rollback
+histories to ClickHouse and BigQuery. Both retain two rollback boundaries and
+independent expected rows and state.
 
 A new store gets a folder of its own with the files above, and runs the existing scenarios.
 

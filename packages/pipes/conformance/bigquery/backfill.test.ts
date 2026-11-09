@@ -8,20 +8,11 @@ const RUN = !!process.env['BIGQUERY_TEST_PROJECT']
 const scenario = S1_BIGQUERY
 
 /**
- * One uninterrupted run of S1 into BigQuery (CT-1). `runToEnd` fails any run that does not end in
+ * An uninterrupted run and a no-op restart of S1 into BigQuery (CT-1). `runToEnd` fails any run that does not end in
  * S1's end state: the store and the oracle both hold every row of S1, the cursor at the range end
  * and the last floor, no WAL row in flight, and the store passes every structural validator.
  */
-describe.skipIf(!RUN)('BigQuery (class W) · S1 backfill · one uninterrupted run (CT-1)', () => {
-  it('leaves exactly S1 in the store: every row, the cursor at the range end, the last floor', {
-    timeout: 300_000,
-  }, async ({ simulateS1, database }) => {
-    const simulator = await simulateS1()
-
-    // The claim is the end state itself, which `runToEnd` checks.
-    await runToEnd({ scenario, simulator, database })
-  })
-
+describe.skipIf(!RUN)('BigQuery (class W) · S1 backfill · uninterrupted run and no-op restart (CT-1)', () => {
   it('a restart with nothing left to read sends no request and changes nothing (INV-10)', { timeout: 300_000 }, async ({
     simulateS1,
     database,

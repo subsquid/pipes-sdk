@@ -12,7 +12,7 @@ import { Replay } from '../oracle/replay.js'
 import type { BlockRange } from '../oracle/validators.js'
 import { RANGES, S1, type S1Simulator, S1_ROWS, endStateOf, follow, rowsAt } from './backfill.js'
 import type { Observation } from './erc20.js'
-import { S3, type S3Simulator, S3_RANGES, S3_ROWS, s3EndState, s3Oracle, s3RowsUpTo } from './fork.js'
+import { S3, type S3Options, type S3Simulator, S3_RANGES, s3EndState, s3Oracle, s3Rows, s3RowsUpTo } from './fork.js'
 
 /** The classes that read the full stream and commit at every batch: T, W, A and C. */
 export type FullStreamClass = Extract<DurabilityClass, 'T' | 'W' | 'A' | 'C'>
@@ -23,8 +23,11 @@ export type Follower = {
   fork(canonical: BlockCursor[]): void
 }
 
+/** The portal surface a completed run and its oracle consume. */
+export type ScenarioPortal = Pick<MockChainPortal, 'url' | 'requests'>
+
 /** What a run of a full-stream class needs to know of its scenario. */
-export type FullStreamScenario<Sim extends { chain: MockChainPortal }> = {
+export type FullStreamScenario<Sim extends { chain: ScenarioPortal }> = {
   range: { from: number; to: number }
   ranges: BlockRange[]
   oracle: () => ReferenceModel
@@ -55,13 +58,13 @@ export function s1FullStream(durability: FullStreamClass): FullStreamScenario<S1
 }
 
 /** S3 as a full-stream class: an unfinalized tail, a floor that rises once, one fork. */
-export function s3FullStream(durability: FullStreamClass): FullStreamScenario<S3Simulator> {
+export function s3FullStream(durability: FullStreamClass, options: S3Options = {}): FullStreamScenario<S3Simulator> {
   return {
     range: { from: S3.from, to: S3.to },
     ranges: S3_RANGES,
-    oracle: () => s3Oracle(durability),
-    end: () => ({ state: s3EndState(), rows: S3_ROWS }),
-    rowsUpTo: s3RowsUpTo,
+    oracle: () => s3Oracle(durability, options),
+    end: () => ({ state: s3EndState(options), rows: s3Rows(options) }),
+    rowsUpTo: (cursor) => s3RowsUpTo(cursor, options),
     follower: (model, simulator, from) => new Replay(model, simulator.chain.requests, from),
   }
 }
