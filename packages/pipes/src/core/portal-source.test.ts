@@ -1420,10 +1420,10 @@ describe('Portal stream restart with a fork below the request start', () => {
     const store = { cursor, seen: [] as BlockCursor[] }
     const records: RollbackRecord[] = [{ rollbackChain: [block(3), orphan], finalized }]
 
-    const run = (url: string, from: number | 'latest') =>
+    const run = (portal: string | PortalClient, from: number | 'latest' | Date) =>
       evmPortalStream({
         id: 'test',
-        portal: url,
+        portal,
         logger: 'silent',
         outputs: blockDecoder({ from, to: 6 }),
       }).pipeTo(
@@ -1493,6 +1493,38 @@ describe('Portal stream restart with a fork below the request start', () => {
       expect(store.cursor).toMatchObject(block(6, 'b'))
       expect(portal.requests[0]).toMatchObject({ status: 409, query: { fromBlock: 5, parentBlockHash: orphan.hash } })
       expect(portal.requests[1]?.query).toMatchObject({ fromBlock: 4, parentBlockHash: block(3).hash })
+    })
+  }
+
+  for (const [label, from, lookup] of [
+    ['latest', 'latest', 'getHead'],
+    ['a date', new Date(1000 * 1000), 'resolveTimestamp'],
+  ] as const) {
+    withPortal(`resolves a range start of ${label} once across a fork`, async ({ portal: serve }) => {
+      const portal = await serveChain(serve)
+      const { store, run } = storeAt(orphan)
+      const lookups: string[] = []
+
+      class CountingPortalClient extends PortalClient {
+        override getHead(...args: Parameters<PortalClient['getHead']>) {
+          lookups.push('getHead')
+          return super.getHead(...args)
+        }
+        override resolveTimestamp(...args: Parameters<PortalClient['resolveTimestamp']>) {
+          lookups.push('resolveTimestamp')
+          return super.resolveTimestamp(...args)
+        }
+        override getMetadata(...args: Parameters<PortalClient['getMetadata']>) {
+          lookups.push('getMetadata')
+          return super.getMetadata(...args)
+        }
+      }
+
+      await run(new CountingPortalClient({ url: portal.url }), from)
+
+      expect(portal.requests[0]).toMatchObject({ status: 409 })
+      expect(store.seen).toEqual(replacements)
+      expect(lookups.sort()).toEqual([lookup, 'getMetadata'].sort())
     })
   }
 
