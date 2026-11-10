@@ -1,4 +1,5 @@
 import type { BlockCursor } from '~/core/index.js'
+import type { EvmFallbackOptions } from '~/evm/evm-fallback.js'
 import type { MockChainPortal } from '~/testing/index.js'
 
 import {
@@ -37,6 +38,8 @@ export type FullStreamScenario<Sim extends { chain: ScenarioPortal }> = {
   rowsUpTo: (cursor: Cursor | undefined) => OracleRow[]
   /** A follower for one run, whose first request is `from` in the portal's log. */
   follower: (model: ReferenceModel, simulator: Sim, from: number) => Follower
+  /** A source list to read instead of `chain.url` (spec/16). */
+  source?: (simulator: Sim) => { url: string[]; fallback?: EvmFallbackOptions }
 }
 
 /** S1 as a full-stream class: one commit per batch, no fork. */
@@ -58,7 +61,10 @@ export function s1FullStream(durability: FullStreamClass): FullStreamScenario<S1
 }
 
 /** S3 as a full-stream class: an unfinalized tail, a floor that rises once, one fork. */
-export function s3FullStream(durability: FullStreamClass, options: S3Options = {}): FullStreamScenario<S3Simulator> {
+export function s3FullStream<Sim extends { chain: ScenarioPortal } = S3Simulator>(
+  durability: FullStreamClass,
+  options: S3Options = {},
+): FullStreamScenario<Sim> {
   return {
     range: { from: S3.from, to: S3.to },
     ranges: S3_RANGES,
