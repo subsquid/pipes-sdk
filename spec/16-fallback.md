@@ -168,7 +168,7 @@ A switch preserves the resume position exactly: the next source is asked for the
 after the last one delivered, anchored to its hash. No block is delivered twice and none
 is skipped, whatever the strategy returns.
 *Why:* a gap is silent data loss; an overlap corrupts append-only sinks.
-*Check:* CT-2 forced-switch scenarios asserting the requested start of every source read.
+*Check:* CT-1 forced-switch scenarios asserting the requested start of every source read.
 
 **INV-62 — Fork propagation.** [transition]
 A fork signalled by any source propagates to the pipe's fork path unchanged. It is never
@@ -176,7 +176,7 @@ converted into a source failure, never triggers a switch, and never selects a di
 source as a way of avoiding it.
 *Why:* a fork is a statement about the chain, not about the source; switching would
 resume from an invalid position (ADR-1).
-*Check:* CT-2 fork injected on the active source and on a source reached after a switch.
+*Check:* CT-3 fork injected on the active source and on a source reached after a switch.
 
 **INV-63 — Commitment is raise-only.** [state]
 A source list reports itself finalized only if *every* member is finalized-only. A
@@ -185,7 +185,7 @@ own: a source declared finalized-only never serves reorg-able blocks because the
 a whole is hot.
 *Why:* the reported value gates whether a sink keeps its rollback machinery, and whether
 a finalized-only sink forces the finalized route (ADR-25).
-*Check:* CT-1 assert the reported commitment over each combination; CT-2 assert a
+*Check:* CT-1 assert the reported commitment over each combination; CT-1 assert a
 finalized-only source is never read at a lower commitment.
 
 **INV-64 — Finality floor across sources.** [state]
@@ -201,7 +201,7 @@ A source list drives one read at a time. A second concurrent read MUST be refuse
 than interleaved, because the freshness state and the reported gauges describe the read
 in flight.
 *Why:* two reads silently reinterpret each other's commitment and freshness.
-*Check:* CT-2 second concurrent read rejected.
+*Check:* CT-1 second concurrent read rejected.
 
 **INV-66 — Verdicts describe the read that asked.** [response]
 A capability verdict is applied only to the read that requested it. A verdict arriving
@@ -209,7 +209,7 @@ after that read ended MUST NOT change any source's health.
 *Why:* probes outlive their read; a verdict about a previous query — possibly at a
 different commitment — would rule a source in or out for a query it was never asked
 about.
-*Check:* CT-2 probe resolved after the read completes; health unchanged.
+*Check:* CT-1 probe resolved after the read completes; health unchanged.
 
 **INV-67 — Evidence must be eligible.** [state]
 A source that is `unhealthy` contributes no freshness evidence: its last known head MUST
@@ -217,7 +217,7 @@ NOT be treated as a fresher alternative, because it is not a source the pipe may
 to.
 *Why:* otherwise the pipe abandons a working source in favour of one selection will
 refuse, and walks into an all-down gap.
-*Check:* CT-2 standby poisoned by capability failure while holding a head above the
+*Check:* CT-4 standby poisoned by capability failure while holding a head above the
 cursor; active source is retained.
 
 **INV-68 — Strategy faults are not source faults.** [response]
@@ -226,7 +226,7 @@ that error. It MUST NOT be attributed to the active source, retried, or allowed 
 re-drive the list.
 *Why:* attributing a programmer error to a source produces an unbounded retry loop and
 hides the defect.
-*Check:* CT-2 strategy throwing and aborting; error surfaces to the caller.
+*Check:* CT-4 strategy throwing and aborting; error surfaces to the caller.
 
 **INV-69 — Reported cause matches the trigger.** [response]
 The cause recorded when a source is abandoned names what actually tripped: a freshness
@@ -234,7 +234,7 @@ verdict, a classified transport or protocol failure, or the strategy. A cause MU
 attributed to a verdict that did not fire.
 *Why:* the cause is both an operator-facing signal and an input to later decisions
 (WP-63, ADR-25); a mislabel corrupts both.
-*Check:* CT-2 assert the recorded cause for each abandonment path.
+*Check:* CT-4 assert the recorded cause for each abandonment path.
 
 ## Liveness (LIV-60…)
 

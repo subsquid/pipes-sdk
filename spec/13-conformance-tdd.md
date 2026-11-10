@@ -33,7 +33,9 @@ oracle, the structural validators, store probes and kill-point injectors for eve
 live in `packages/pipes/conformance/`; CT-1 and CT-2 run S1
 against classes K, T, A and W, and S3 reduced to one fork against classes T, A and W. On S3
 the oracle replays the portal's request log: a batch's blocks and floor come from the
-answer that served it, a fork's canonical chain from the 409, never from the pipe. A
+answer that served it, a fork's canonical chain from the 409, never from the pipe. For a
+source list (16), two mock portals hold one chain, and the oracle replays the requests of
+both portals in the order they arrived; CT-1 runs S1 and S3 over such a list against class T. A
 kill is a true kill: a child process runs the pipe and stops itself with SIGKILL at one
 step of the commit protocol or of recovery — a file operation for class K, an SQL
 statement for class T, a Storage Write append or a query job for class W, an HTTP
@@ -158,7 +160,7 @@ establish pipeline conformance.
 | CT-2 | crash-recovery kill-point matrix (kill at every class commit-protocol step; double-kill; corrupted-state corpus) | INV-40…INV-44, CN-*, REQ-3, REQ-6 |
 | CT-3 | fork conformance (depth × timing × full-stream class; fork-storm; impossible-fork refusal on finalized-only routes) | REQ-4, WP-40…WP-47, INV-13, INV-14, LIV-4 |
 | CT-4 | input/dependency fault corpus (every FM row) | FM-*, LIV-2, LIV-7, INV-31, INV-32 |
-| CT-5 | interface conformance (wire fixtures IB-1…IB-11; persisted-format round-trips IB-20…IB-28 incl. cross-implementation resume; decode/selection fixtures; observability golden scrapes IB-40…IB-46; error-code registry sync IB-50…IB-52) | REQ-23, INV-5, INV-21, INV-23, CN-45 |
+| CT-5 | interface conformance (wire fixtures IB-1…IB-11; persisted-format round-trips IB-20…IB-28 incl. cross-implementation resume; decode/selection fixtures; observability golden scrapes IB-40…IB-47; error-code registry sync IB-50…IB-52) | REQ-23, INV-5, INV-21, INV-23, CN-45 |
 | CT-6 | performance benchmarks (S1–S6, SLO gates, saturation knee) | SLI-*, PF-*, LIV-3, LIV-5 |
 | CT-7 | soak/endurance (S4 sparse coverage honesty, memory plateau, reclamation) | INV-4, REQ-20, LIV-8, LIV-9, CN-24 |
 | CT-8 | isolation (co-resident pipes, dual-instance where lock declared, legacy-migration races) | INV-15, INV-35, LIV-10, RP-31, RP-32 |
@@ -225,7 +227,7 @@ gap-free unless the barrier is waived, RP-45; a repeated version is an outbox
 republish and must repeat the same operation) · no residue (nothing in flight left in
 the store, INV-42).
 
-## Traceability matrix (2026-11-02)
+## Traceability matrix (2026-11-11)
 
 Status: **C** covered · **P** partial · **U** unchecked. Suffix ⚠ = known-violated or
 known-suspect in the current implementation (see gap register).
@@ -284,11 +286,14 @@ known-suspect in the current implementation (see gap register).
 | RS-10, RS-11 (purity, stateful) | CT-2 | P | K recovery relies on it; factory rollback C |
 | RS-20…RS-25 (cache) | CT-5 | C | except overlap re-insert (U) |
 | FM corpus | CT-4 | P | scattered unit coverage; no systematic corpus |
-| INV-60…INV-64 (fallback stream safety) | CT-1/2 | C | switch continuity, fork propagation across a switch, conservative and raise-only commitment, floor across a switch |
-| INV-65…INV-69 (fallback isolation, faults) | CT-2 | C | concurrent-read refusal, late verdict discarded, ineligible-head exclusion, strategy fault surfacing, cause attribution |
-| LIV-60…LIV-64 (handoff, reclaim) | CT-2 | P | handoff, reclaim, no-permanent-demotion, fresh start and all-down covered against a simulated frontier; no soak |
-| WP-60…WP-69 (driving the list) | CT-2 | P | selection, resume, boundary/stall decisions, probing and range resolution covered; head-poll cadence not benchmarked |
-| OB-60…OB-66, IB-47 (fallback signals) | CT-1 | P | gauges and per-pipe labelling asserted; log-field redaction covered by the diagnostics suite, not end to end |
+| INV-60…INV-62, INV-64 (fallback stream safety) | CT-1/3 | C ⚠ | the class-T harness (`postgres/fallback.test.ts`) reads a list of two portals over one chain, and the primary fails part-way: on S1 and S3 the store and the oracle end in the single-source end state; the standby starts after the last delivered block, anchored on it; a primary that comes back starts after the last block of the standby; a fork that the standby sends after a switch rolls back to the ancestor; a standby with a shallower floor does not lower the floor of the pipe; unit suites assert the start and the anchor after each failover kind; no run uses the JSON-RPC source (GAP-46) |
+| INV-63 (raise-only commitment) | CT-1 | C | unit and mock-portal suites assert the reported commitment for each source mix; a consumer `false` does not lower a finalized-only source; a consumer `true` raises a hot source |
+| INV-65…INV-68 (fallback isolation, faults) | CT-1/4 | C | a second concurrent read fails; a late probe verdict does not change health; the head of an unhealthy standby causes no failover; a strategy throw, abort or bad index ends the read with that error |
+| INV-69 (cause attribution) | CT-4 | P | tests assert the cause for a stream error, a head-poll timeout and a strategy failover; no test asserts the cause after a lag or a stale failover |
+| LIV-60…LIV-64 (handoff, reclaim) | CT-4 | P | unit suites show handoff on a stall and at a finalized frontier, reclaim, refusal of a source that is behind, return of a level source, a fresh stall clock and the all-down failure; the class-T harness shows a reclaim after one failed request; no test reads the staleness at the first boundary (LIV-63); no test resumes after an all-down gap (LIV-64); no test measures a bound; no soak |
+| WP-60…WP-70 (driving the list) | CT-1/4 | P | tests cover selection, a bad index, resume, boundary and stall decisions, the boundary poll gate, health transitions, the cache refusal, the aggregate head lookup and the retry budget; no test asserts the probe interval or probe overlap (WP-65), the head-poll commitment (WP-66) or a timestamp bound over a list (WP-69); no benchmark for the head-poll cadence |
+| FM-60…FM-69 (fallback faults) | CT-4 | P | unit suites inject each fault; the class-T harness injects FM-60 as a 503 on a portal; no test selects an incapable standby as a last resort (FM-63); no test resumes after an all-down gap (FM-65) |
+| OB-60…OB-66, IB-47 (fallback signals) | CT-1/5 | P | tests assert the gauge export, the bounded cause labels and the per-pipe labels; client tests show no lag before the first block and in an all-down gap, but no gauge test reads an absent lag; the switch log goes to the pipe logger; no test asserts one line for each transition, or redaction in the line; no golden scrape |
 | SLI/PF | CT-6 | P | S2/S3 head-following and fork sweep (`packages/pipes/conformance/perf`): SLI-4 with its detect, rollback and resume parts, head lag and the saturation knee per class (memory, T, A), with portal and store latency injected; S1, S4–S6, SLI-7 and SLO gates not built |
 | IB-1…IB-11 wire | CT-5 | P | client-side tested, including finalized route selection; CT-1 S1 checks the IB-3 anchor of every request; no golden wire fixtures |
 | IB-20…IB-28 formats | CT-5 | P ⚠ | per-binding tests plus fresh-reader writer-output round-trips for T/A/W and file reopen for K/C; class-T timestamp-unit handling is covered by `conformance/postgres/cursor-timestamp`; second-implementation compatibility is unverified |
@@ -308,7 +313,7 @@ P2 bounded/rare · P3 polish. "First test" = cheapest failing-test-first entry p
 | GAP-28 | Required observability signals with no IB binding and no implementation: OB-6 head gauge, OB-20 lifecycle timestamps, OB-21 publication lag, OB-30 terminal-error level read, OB-32 capture-on-stall. OB-13 is partial: a stall watchdog logs a warning after a fixed delay, but exposes nothing a scraper can read and carries no reason code. /stats pre-first-batch zeros defeat OB-1/OB-4 on that surface | OB-6/13/20/21/30/32, REQ-10 | P2 | bind each in IB-41/IB-42, then golden scrapes (with GAP-16) |
 | GAP-38 | A class-C sink's producer sequence lives only in its local state, and the wire carries no producer-lineage field: a state that was lost or restored from a backup restarts the sequence, republishes low versions under ids consumers already hold at higher ones, and every affected row silently freezes while event topics keep looking healthy. The producer refuses to start on an empty state file (E2420), but a state restored from a backup opens as an ordinary resume and rewinds the sequence undetected; a bootstrap declared with `allowColdStart` under a namespace that has already published cannot be detected by either side in-band either. Both are handled operationally (`sqd_pubsub_cold_start` gauge + runbook), not structurally (ADR-21) | CN-17, CN-46, RP-24 | P2 | publish, wipe the state, resume under the same namespace → assert the refusal; restore an older state file → assert detection; declare the bootstrap and assert a consumer cannot distinguish the stale stream from a healthy one (documents the residual exposure) |
 | GAP-40 | The class-C block-order check walks a batch in sequencing order, which is route by route rather than block by block, so a second route on the same topic is refused (E2429) whenever it emits an operation below the previous route's last block in the batch. Nothing the mapper emits can avoid it — the concatenation order is the sink's — so several routes per topic and the sequence barrier are mutually exclusive in practice, currently by refusal and documentation rather than by ordering the operations before they are sequenced | RP-45, IB-28 | P2 | two routes on one topic, one batch spanning blocks *N*…*N+2* → assert the operations are sequenced in block order, not E2429 |
-| GAP-46 | The JSON-RPC source is tested only against simulated chains. The live parity test (`RPC_E2E=1`) compares one historical block with the portal and is not part of CI. No run has switched a real pipe between a portal and a JSON-RPC endpoint. A difference in field shape, or a fork that the adapter does not see, can go to the sink with no error. `evmStream` stays experimental until this gap closes | INV-60, INV-62, REQ-24 | P1 | run one pipe on a live chain: portal → JSON-RPC → portal; compare the sink output with a portal-only run over the same range |
+| GAP-46 | The JSON-RPC source is tested only against simulated chains. Two live tests run only with `RPC_E2E=1` and are not part of CI: the parity test compares one historical block with the portal, and the fallback test switches from a portal to a portal on finalized blocks. No run has switched a real pipe between a portal and a JSON-RPC endpoint. A difference in field shape, or a fork that the adapter does not see, can go to the sink with no error. `evmStream` stays experimental until this gap closes | INV-60, INV-62, REQ-24 | P1 | run one pipe on a live chain: portal → JSON-RPC → portal; compare the sink output with a portal-only run over the same range |
 
 ## Build order
 
