@@ -1,11 +1,13 @@
 import {
   ApiDataset,
+  BlockStreamClient,
   GetBlock,
   PortalBlockStream,
   PortalClient,
   PortalClientOptions,
   Query,
   StreamData,
+  isBlockStreamClient,
   isForkException,
 } from '~/portal-client/index.js'
 
@@ -20,7 +22,7 @@ import {
 } from './errors.js'
 import { FinalizedWatermark } from './finalized-watermark.js'
 import { formatBlock, formatDuration } from './formatters.js'
-import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
+import { LogLevel, Logger, defaultLogger, formatWarning, pipeLogger } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
@@ -195,7 +197,12 @@ export type PortalStreamOptions<Query> = {
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions | PortalClient
+  /**
+   * Where to read blocks from: a portal URL, portal client options, a ready `PortalClient`, or any
+   * custom {@link BlockStreamClient} (e.g. the RPC-backed EVM client or a fallback client
+   * multiplexing several sources).
+   */
+  portal: string | PortalClientOptions | BlockStreamClient
   query: Query
   logger?: Logger | LogLevel
   profiler?: boolean | SpanHooks
@@ -217,7 +224,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
   }
   readonly #queryBuilder: Q
   readonly #logger: Logger
-  readonly #portal: PortalClient
+  readonly #portal: BlockStreamClient
   readonly #metricServer: MetricsServer
   readonly #transformers: Transformer<any, any>[] = []
   // Single monotonic finalized high-watermark for the whole pipe. Owned here (not
@@ -236,35 +243,40 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     }
 
     this.#id = id
-    this.#logger = logger && typeof logger !== 'string' ? logger : defaultLogger({ id: this.#id, level: logger })
+    this.#logger = pipeLogger(this.#id, logger)
 
-    this.#portal =
-      portal instanceof PortalClient
-        ? portal
-        : new PortalClient(
-            typeof portal === 'string'
-              ? {
-                  url: portal,
-                  http: {
-                    logger: this.#logger,
-                    retryAttempts: Number.MAX_SAFE_INTEGER,
-                  },
-                }
-              : {
-                  ...portal,
-                  http: {
-                    logger: this.#logger,
-                    retryAttempts: Number.MAX_SAFE_INTEGER,
-                    ...portal.http,
-                  },
+    this.#portal = isBlockStreamClient(portal)
+      ? portal
+      : new PortalClient(
+          typeof portal === 'string'
+            ? {
+                url: portal,
+                http: {
+                  logger: this.#logger,
+                  retryAttempts: Number.MAX_SAFE_INTEGER,
                 },
-          )
+              }
+            : {
+                ...portal,
+                http: {
+                  logger: this.#logger,
+                  retryAttempts: Number.MAX_SAFE_INTEGER,
+                  ...portal.http,
+                },
+              },
+        )
 
     this.#queryBuilder = query
 
     this.#options = {
       cache: options.cache,
       profiler: typeof options.profiler === 'undefined' ? process.env.NODE_ENV !== 'production' : options.profiler,
+    }
+
+    if (this.#options.cache && !(this.#portal instanceof PortalClient)) {
+      // The cache both keys and *fetches* through a real portal client; a custom client
+      // (RPC-backed, fallback) has no portal to fetch through, so this cannot silently no-op.
+      throw new Error('portal cache requires a single Portal source; it cannot wrap a custom block stream client')
     }
 
     this.#metricServer = options.metrics ?? noopMetricsServer()
@@ -364,7 +376,8 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       const source = this.#options.cache
         ? // use cache if available
           this.#options.cache.getStream({
-            portal,
+            // The constructor rejects a cache over anything but a PortalClient.
+            portal: portal as PortalClient,
             logger: this.#logger,
             query,
             finalized,
