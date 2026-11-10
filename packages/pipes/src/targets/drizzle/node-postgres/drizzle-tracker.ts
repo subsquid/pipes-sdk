@@ -37,27 +37,31 @@ export class DrizzleTracker {
   }
 
   async cleanup(tx: Transaction, blockNumber: number) {
-    for (const plan of this.#plans.values()) {
-      await tx.execute(`DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" <= ${blockNumber};`)
-    }
+    const statements = [...this.#plans.values()].map(
+      (plan) => `DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" <= ${blockNumber};`,
+    )
+    if (!statements.length) return
+
+    await tx.execute(statements.join('\n'))
   }
 
   async fork(tx: Transaction, cursor: BlockCursor) {
     const plans = [...this.#plans.values()]
+    if (!plans.length) return
 
-    for (const plan of plans) {
-      await tx.execute(generateForkDeleteSQL(plan, cursor.number))
-    }
-
+    const deletes = plans.map((plan) => generateForkDeleteSQL(plan, cursor.number))
     // Reversed: a restored child row needs its parent back first.
-    for (const plan of plans.slice().reverse()) {
-      await tx.execute(generateForkRestoreSQL(plan, cursor.number))
-    }
-
+    const restores = plans
+      .slice()
+      .reverse()
+      .map((plan) => generateForkRestoreSQL(plan, cursor.number))
     // Drop the consumed snapshots; those at or below the cursor stay for a later deeper rollback.
-    for (const plan of plans) {
-      await tx.execute(`DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" > ${cursor.number}`)
-    }
+    const dropSnapshots = plans.map(
+      (plan) => `DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" > ${cursor.number};`,
+    )
+
+    // No bind parameters, so the driver sends the whole script in one round trip.
+    await tx.execute([...deletes, ...restores, ...dropSnapshots].join('\n'))
   }
 
   wrapTransaction(tx: any): Transaction {
