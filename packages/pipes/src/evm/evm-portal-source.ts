@@ -12,7 +12,7 @@ import {
 import { MetricsServer } from '~/core/metrics-server.js'
 import { ProgressTrackerOptions, progressTracker } from '~/core/progress-tracker.js'
 
-import { PortalClient, PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
+import { BlockStreamClient, PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
 import * as evm from '../portal-client/query/evm.js'
 import { EvmPortalData, EvmQueryBuilder } from './evm-query-builder.js'
 
@@ -22,7 +22,7 @@ export * as api from '../portal-client/query/evm.js'
 
 export type EvmOutputs = Outputs<evm.FieldSelection, EvmQueryBuilder<any>>
 
-type EvmPortalStream<T extends EvmOutputs> =
+export type EvmStreamData<T extends EvmOutputs> =
   T extends EvmQueryBuilder<infer Q>
     ? EvmPortalData<Q>
     : T extends Transformer<any, infer O>
@@ -53,7 +53,7 @@ export function evmPortalStream<Out extends EvmOutputs>({
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions | PortalClient
+  portal: string | PortalClientOptions | BlockStreamClient
   outputs: Out
   cache?: PortalCache
   metrics?: MetricsServer
@@ -66,7 +66,7 @@ export function evmPortalStream<Out extends EvmOutputs>({
     block: { hash: true, number: true },
   })
 
-  return new PortalStream<EvmQueryBuilder<F>, EvmPortalStream<Out>>({
+  return new PortalStream<EvmQueryBuilder<F>, EvmStreamData<Out>>({
     id,
     portal,
     query,
