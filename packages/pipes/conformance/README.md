@@ -29,6 +29,7 @@ Store folders use the following files where the scenario applies:
 | `<scenario>.test.ts` | one uninterrupted run (CT-1) |
 | `fork-depth.test.ts` | S3 at depths 1, 3 and 6 with different response partitions; crash/restart at the finality boundary |
 | `fork-history.test.ts` | partial canonical windows with missing finality or cascading rollback (ClickHouse and BigQuery) |
+| `fallback.test.ts` | S1 and S3 over a source list of two portals, where the primary fails part-way (spec/16): the store must end as a single-source run leaves it |
 | `<scenario>-crash.test.ts` | the run killed at each commit step, then restarted (CT-2) |
 
 ## What every run checks
