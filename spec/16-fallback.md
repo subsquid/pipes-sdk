@@ -5,7 +5,7 @@ specifies how the list is driven: which source is read, when the read moves to a
 source, and what must remain true of the delivered stream while it moves. It extends the
 single-source ingestion contract (04) — every property there continues to hold of the
 stream a source list produces — and adds nothing to the sink contract: a sink cannot tell
-a multi-source pipe from a single-source one (INV-60).
+a multi-source pipe from a single-source one (INV-60). This module serves REQ-24.
 
 Bands reserved for this module: `DEF-60…69`, `WP-60…79`, `INV-60…69`, `LIV-60…64`,
 `FM-60…69`, `OB-60…66`.

@@ -74,6 +74,19 @@ a cooldown.
 A source built for a list gets a short bounded budget (`P-FB-SOURCE-RETRIES`). Settings a
 caller supplies for a source win, and a ready-made transport client passes through untouched.
 
+## 6. A source that is not a portal checks linkage in its adapter
+
+ADR-1 gives the linkage check to the portal. The pipe sends a parent-hash anchor, and the
+portal sends a fork signal when the anchor is not on its chain. A JSON-RPC endpoint has no
+such check. If the pipe core did the check, the core would need chain knowledge, and ADR-1
+keeps that knowledge out of the core.
+
+So the source adapter does the check. The JSON-RPC adapter makes sure that each block links
+to the block before it, the anchor included. It reports a mismatch as the same fork signal
+that a portal sends. The pipe core does not change: it trusts the active source as it
+trusts a portal (01), and INV-62 sends the signal to the fork path. A custom client has
+the same duty (DEF-60).
+
 ## Consequences
 
 The stock strategy is a pure function of an event and a snapshot, testable without machinery.
