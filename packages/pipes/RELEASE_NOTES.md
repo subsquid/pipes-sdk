@@ -658,6 +658,36 @@ logs a warning and falls back to the previous `FINAL`-based cancel-row behavior.
 
 Solana `DecodedInstruction` exposes a `block` object with both `number` and `hash` (the old top-level `blockNumber` is removed — see breaking change 13).
 
+### 11. `evmStream` — RPC sources and multi-source fallback (experimental)
+
+`evmStream` reads EVM data from a portal, a JSON-RPC endpoint, or an ordered list of both. With a list,
+the pipe reads the first healthy source, fails over when it stalls or errors, and switches back when
+the preferred source recovers. Outputs, decoders, targets and fork handling behave as with a portal.
+
+```ts
+import { evmStream } from '@subsquid/pipes/evm'
+
+evmStream({
+  id: 'transfers',
+  source: [
+    'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    { type: 'rpc', url: process.env.RPC_URL!, rateLimit: 10 },
+  ],
+  outputs,
+})
+```
+
+`fallback.detection` tunes how failure and recovery are detected; `fallback.strategy` tunes or replaces
+the switching decision. RPC sources need the optional peers `@subsquid/evm-rpc`,
+`@subsquid/evm-normalization`, `@subsquid/rpc-client` and `@subsquid/http-client`.
+
+The API is experimental and can change in a minor release. `evmPortalStream` is unchanged and stays the
+recommended entry point for a single portal.
+
+`StartContext.portal` and `Factory.runPreindex` are now typed as `BlockStreamClient`, the contract
+`PortalClient` implements, because a pipe's source may be an RPC or fallback client. Narrow with
+`instanceof PortalClient` where portal-specific options are needed.
+
 ---
 
 ## Fixes
