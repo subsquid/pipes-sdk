@@ -1,6 +1,6 @@
 import { describe, expect } from 'vitest'
 
-import { numbers } from '../scenarios/erc20.js'
+import { TABLE_NAMES, numbers } from '../scenarios/erc20.js'
 import { S3 } from '../scenarios/fork.js'
 import {
   COMMIT,
@@ -125,7 +125,12 @@ describe('Postgres (class T) · S3 one fork · killed at each commit step (CT-2)
       point: POINTS.forkBeforeCommit,
     })
 
-    expect(killed.transaction).toEqual(expect.arrayContaining(['delete transfers', 'delete sync']))
+    // The rollback goes as one script, labelled by its first statement: a delete from a tracked table.
+    const rollbackDeletes = TABLE_NAMES.map((table) => `delete ${table}`)
+    const rolledBack = killed.transaction.some((label) => rollbackDeletes.includes(label))
+
+    expect(rolledBack).toBe(true)
+    expect(killed.transaction).toContain('delete sync')
     expect(forks).toHaveLength(1)
     expect(store.state?.current?.number).toBe(S3.latest)
 

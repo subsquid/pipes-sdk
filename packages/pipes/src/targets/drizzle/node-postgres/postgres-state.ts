@@ -395,10 +395,9 @@ export class PostgresState {
 
       while (true) {
         const res = await client.query<StateSelect>(
-          `SELECT * FROM ${fqnName} WHERE "id" = $1 ORDER BY "current_number" DESC LIMIT ${PAGE_SIZE} OFFSET ${offset}`,
+          `SELECT "rollback_chain", "finalized" FROM ${fqnName} WHERE "id" = $1 ORDER BY "current_number" DESC LIMIT ${PAGE_SIZE} OFFSET ${offset}`,
           [id],
         )
-        if (!res.rows.length) break
 
         for (const row of res.rows) {
           yield {
@@ -406,6 +405,9 @@ export class PostgresState {
             finalized: row.finalized,
           }
         }
+
+        const lastPage = res.rows.length < PAGE_SIZE
+        if (lastPage) break
 
         offset += PAGE_SIZE
       }
