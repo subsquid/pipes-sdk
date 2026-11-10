@@ -1,5 +1,5 @@
 import { Portal } from '~/core/query-builder.js'
-import { PortalClient, StreamData } from '~/portal-client/index.js'
+import { BlockRef, PortalClient, StreamData } from '~/portal-client/index.js'
 
 /**
  * A `Portal` with fixed answers and no server, for code that only reads the head or resolves a timestamp.
@@ -18,15 +18,20 @@ export const STUB_HEAD = { number: 100, hash: '0x100' }
 
 /**
  * A `PortalClient` that streams the given batches with no I/O, so a test owns every timer and every
- * batch boundary, a head-only batch included.
+ * batch boundary, a head-only batch included. `batches` gets the query of each `getStream` call.
  *
  * @internal
  */
 export class StubPortalClient extends PortalClient {
-  readonly #batches: () => AsyncIterable<StreamData<any>>
+  /** Every query `getStream` received, in order. */
+  readonly reads: any[] = []
+  readonly #batches: (query: any) => AsyncIterable<StreamData<any>>
 
-  constructor(batches: () => AsyncIterable<StreamData<any>>) {
-    super({ url: 'http://portal.invalid' })
+  constructor(
+    batches: (query: any) => AsyncIterable<StreamData<any>>,
+    { url = 'http://portal.invalid', finalized }: { url?: string; finalized?: boolean } = {},
+  ) {
+    super({ url, finalized })
 
     this.#batches = batches
   }
@@ -35,12 +40,14 @@ export class StubPortalClient extends PortalClient {
     return { dataset: 'test', aliases: [], real_time: true, start_block: 0 } as any
   }
 
-  override async getHead() {
+  override async getHead(): Promise<BlockRef | undefined> {
     return STUB_HEAD
   }
 
-  override getStream(): any {
-    return this.#batches()
+  override getStream(query: any): any {
+    this.reads.push(query)
+
+    return this.#batches(query)
   }
 }
 

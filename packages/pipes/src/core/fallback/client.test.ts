@@ -1,0 +1,1396 @@
+import { describe, expect, it, vi } from 'vitest'
+
+import { BlockRef, ForkException, StreamData } from '~/portal-client/index.js'
+import { StubPortalClient } from '~/testing/stub-portal.js'
+
+import { defaultLogger } from '../logger.js'
+import { BlockCursor } from '../types.js'
+import { FallbackClient, FallbackClientOptions, FallbackClientSource, FallbackMetrics } from './client.js'
+
+/**
+ * Unit tests for the fallback meta-client, using mock `BlockStreamClient`s (async generators
+ * yielding raw `StreamData` batches). No HTTP is mocked here; the Portal/RPC clients are exercised
+ * separately.
+ */
+
+/** Keep the default cause-logging (warn) out of the test output. */
+const silent = defaultLogger({ level: 'silent' })
+
+function cursor(n: number, hash = `0x${n}`): BlockRef {
+  return { number: n, hash }
+}
+
+type WireBlock = { header: { number: number; hash: string } }
+
+function emptyBatch(): StreamData<WireBlock> {
+  return {
+    blocks: [],
+    head: {},
+    meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
+  }
+}
+
+function batch(n: number, opts: { hash?: string; finalized?: number } = {}): StreamData<WireBlock> {
+  return {
+    blocks: [{ header: { number: n, hash: opts.hash ?? `0x${n}` } }],
+    head: opts.finalized != null ? { finalized: { number: opts.finalized, hash: `0x${opts.finalized}` } } : {},
+    meta: { bytes: 0, requestedFromBlock: n, lastBlockReceivedAt: new Date(), requests: {} },
+  }
+}
+
+type StreamFn = (query: any) => AsyncGenerator<StreamData<WireBlock>>
+type HeadFn = () => Promise<BlockRef | undefined>
+type ProbeFn = () => Promise<{ ok: boolean; cause?: any }>
+
+type MockSource = FallbackClientSource & { reads: any[] }
+
+/** A source over a stub client; `reads` records every `getStream` query it received. */
+function source(name: string, stream: StreamFn, getHead?: HeadFn, probeCapability?: ProbeFn): MockSource {
+  const client = new StubPortalClient(stream, { url: `http://${name}.invalid` })
+  vi.spyOn(client, 'getHead').mockImplementation(getHead ?? (async () => undefined))
+
+  return { name, client, reads: client.reads, ...(probeCapability ? { probeCapability: probeCapability as any } : {}) }
+}
+
+const QUERY: any = { type: 'evm', fromBlock: 0 }
+
+function fallback(
+  sources: FallbackClientSource[],
+  detection?: FallbackClientOptions['detection'],
+  extra?: Partial<FallbackClientOptions>,
+): FallbackClient {
+  // Probes default off in these tests — the generic probe issues real `getStream` slices, which
+  // would pollute the mocks' read records. Probe behavior is exercised via per-source overrides.
+  return new FallbackClient({ sources, detection: { capabilityProbe: false, ...detection }, logger: silent, ...extra })
+}
+
+/** The active source when each batch arrived, by client: the client reports none once the stream ends. */
+const activeAtBatch = new WeakMap<FallbackClient, number | undefined>()
+
+async function collect(fb: FallbackClient, query: any = QUERY, abort?: AbortSignal): Promise<number[]> {
+  const out: number[] = []
+  for await (const b of fb.getStream(query, abort ? { request: { abort } } : undefined)) {
+    out.push(...b.blocks.map((x: any) => x.header.number))
+    activeAtBatch.set(fb, fb.metrics().activeIndex)
+  }
+  return out
+}
+
+/** The source that served the last batch. */
+function servedLast(fb: FallbackClient): number | undefined {
+  return activeAtBatch.get(fb)
+}
+
+/** Never resolves — models a source whose request hangs forever. */
+const hang = (): Promise<never> => new Promise<never>(() => {})
+/** Resolves after `ms` — models a slow request / a bounded delay before an error. */
+const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+describe('FallbackClient — supervisor', () => {
+  it('drives the lowest-index source; standbys are untouched', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(99)
+    })
+    const fb = fallback([s0, s1])
+
+    expect(await collect(fb)).toEqual([1, 2])
+    expect(s1.reads).toHaveLength(0)
+  })
+
+  it('resumes the next source just past the last delivered block on a non-fork error', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+      throw new Error('boom')
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(3)
+    })
+    const fb = fallback([s0, s1])
+
+    expect(await collect(fb)).toEqual([1, 2, 3])
+    expect(s1.reads).toHaveLength(1)
+    expect(s1.reads[0]).toMatchObject({ fromBlock: 3, parentBlockHash: '0x2' })
+  })
+
+  it('cascades through multiple failing sources', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      throw new Error('e0')
+    })
+    const s1 = source('s1', async function* () {
+      throw new Error('e1')
+    })
+    const s2 = source('s2', async function* () {
+      yield batch(2)
+    })
+    const fb = fallback([s0, s1, s2])
+
+    expect(await collect(fb)).toEqual([1, 2])
+    expect(s1.reads[0]).toMatchObject({ fromBlock: 2, parentBlockHash: '0x1' })
+    expect(s2.reads[0]).toMatchObject({ fromBlock: 2, parentBlockHash: '0x1' })
+  })
+
+  it('propagates ForkException instead of switching', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      throw new ForkException([cursor(1)], { fromBlock: 2, parentBlockHash: '0x1' })
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(99)
+    })
+    const fb = fallback([s0, s1])
+
+    const seen: number[] = []
+    await expect(
+      (async () => {
+        for await (const b of fb.getStream(QUERY)) {
+          seen.push(...b.blocks.map((x: any) => x.header.number))
+        }
+      })(),
+    ).rejects.toBeInstanceOf(ForkException)
+    expect(seen).toEqual([1])
+    expect(s1.reads).toHaveLength(0)
+  })
+
+  it('passes batch heads through untouched — the finalized watermark is the PortalStream’s job', async () => {
+    // Unlike the pre-facade supervisor, the client does NOT own the monotonic finalized watermark:
+    // the consuming PortalStream clamps every batch (source switches included). This guards that the
+    // client stays a pure pass-through, so the clamp happens exactly once, in one place.
+    const s0 = source('s0', async function* () {
+      yield batch(1, { finalized: 2 })
+      throw new Error('s0 down')
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(3, { finalized: 1 }) // shallower head right after the switch — passed through as-is
+    })
+    const fb = fallback([s0, s1])
+
+    const finalizedSeen: (number | undefined)[] = []
+    for await (const b of fb.getStream(QUERY)) {
+      finalizedSeen.push(b.head.finalized?.number)
+    }
+
+    expect(finalizedSeen).toEqual([2, 1])
+  })
+
+  it('propagates a ForkException thrown by a source reached AFTER a switch (fork straddles the switch)', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      throw new Error('s0 down') // non-fork error → fail over to s1
+    })
+    // s1 resumes at the last delivered block and detects a reorg right there. A fork thrown by the
+    // switched-in source must propagate untouched (the target/consumer rewinds), never trigger
+    // another source switch.
+    const s1 = source('s1', async function* () {
+      throw new ForkException([cursor(1)], { fromBlock: 2, parentBlockHash: '0x1' })
+    })
+    const fb = fallback([s0, s1])
+
+    const seen: number[] = []
+    await expect(
+      (async () => {
+        for await (const b of fb.getStream(QUERY)) {
+          seen.push(...b.blocks.map((x: any) => x.header.number))
+        }
+      })(),
+    ).rejects.toBeInstanceOf(ForkException)
+    expect(seen).toEqual([1]) // s0's block delivered; then s1's fork propagated
+  })
+
+  it('reclaims a recovered higher-preference source once its capability probe confirms it', async () => {
+    let now = 0
+    let s0reads = 0
+    let probes = 0
+    const s0 = source(
+      's0',
+      async function* () {
+        s0reads++
+        if (s0reads === 1) {
+          throw new Error('s0 down') // initial failure → fail over to s1
+        }
+        yield batch(50) // reclaimed after the probe confirms capability
+      },
+      undefined,
+      async () => {
+        probes++
+        return { ok: true }
+      },
+    )
+    const s1 = source('s1', async function* () {
+      for (let n = 1; n <= 6; n++) {
+        yield batch(n)
+        now += 100 // advance the (injected) clock so s0's cooldown elapses between batches
+      }
+    })
+
+    const fb = fallback([s0, s1], {
+      clock: () => now,
+      cooldownMs: 50,
+      capabilityProbeIntervalMs: 0,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1, // one successful probe is enough to confirm + recover
+    })
+
+    const out = await collect(fb)
+
+    expect(probes).toBeGreaterThan(0) // the standby s0 was probed
+    expect(out).toContain(50) // and reclaimed once healthy
+    expect(fb.metrics().switchCount).toBe(2) // s0 → s1 (failover) → s0 (switch-up)
+  })
+
+  it('eager: reclaims a recovered probe-less higher-preference source via head-poll liveness alone', async () => {
+    let now = 0
+    let s0reads = 0
+    // s0 has NO capability probe — its recovery must come from head-poll liveness only (the head
+    // fetch doubles as the liveness signal that promotes a probe-less source back to healthy).
+    const s0 = source(
+      's0',
+      async function* () {
+        s0reads++
+        if (s0reads === 1) {
+          throw new Error('s0 down') // initial failure → fail over to s1
+        }
+        yield batch(50) // reclaimed once head-poll liveness promotes it
+      },
+      async () => cursor(50),
+    )
+    const s1 = source('s1', async function* () {
+      for (let n = 1; n <= 6; n++) {
+        yield batch(n)
+        now += 100 // advance clock so s0's cooldown elapses and it gets head-polled between batches
+      }
+    })
+
+    const fb = fallback([s0, s1], {
+      clock: () => now,
+      cooldownMs: 50,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1, // one head-poll liveness pass is enough for a probe-less source
+      maxLagBlocks: null,
+      maxStalenessMs: null,
+    })
+
+    const out = await collect(fb)
+
+    expect(out).toContain(50) // s0 reclaimed without ever running a capability probe
+    expect(fb.metrics().switchCount).toBe(2) // s0 → s1 (failover) → s0 (switch-up)
+  })
+
+  it('onFailureOnly: does not switch up to a recovered higher-preference source', async () => {
+    let now = 0
+    let s0reads = 0
+    const s0 = source(
+      's0',
+      async function* () {
+        s0reads++
+        if (s0reads === 1) {
+          throw new Error('s0 down')
+        }
+        yield batch(50) // would be reclaimed under 'eager' — must NOT be under 'onFailureOnly'
+      },
+      undefined,
+      async () => ({ ok: true }),
+    )
+    const s1 = source('s1', async function* () {
+      for (let n = 1; n <= 4; n++) {
+        yield batch(n)
+        now += 100
+      }
+    })
+
+    const fb = fallback(
+      [s0, s1],
+      { clock: () => now, cooldownMs: 50, capabilityProbeIntervalMs: 0, headTtlMs: 0, livenessRecoverThreshold: 1 },
+      { strategy: { preferPrimary: 'onFailureOnly' } }, // sticky: only switch on failure, never reclaim
+    )
+
+    const out = await collect(fb)
+
+    expect(out).toEqual([1, 2, 3, 4]) // stayed on s1 the whole time
+    expect(out).not.toContain(50) // s0 never reclaimed
+    expect(fb.metrics().switchCount).toBe(1) // only the initial failover — no switch-up
+  })
+
+  it('does not switch up to a standby whose capability probe keeps failing', async () => {
+    let now = 0
+    let probes = 0
+    const s0 = source(
+      's0',
+      async function* () {
+        throw new Error('s0 down') // always fails the real query
+      },
+      undefined,
+      async () => {
+        probes++
+        // reachable-but-incapable: never confirms, and reports a classified cause
+        return { ok: false, cause: { check: 'capability' as const, reason: 'http' as const, code: 400, detail: 'x' } }
+      },
+    )
+    const s1 = source('s1', async function* () {
+      for (let n = 1; n <= 4; n++) {
+        yield batch(n)
+        now += 100
+      }
+    })
+
+    const fb = fallback([s0, s1], {
+      clock: () => now,
+      cooldownMs: 50,
+      capabilityProbeIntervalMs: 0,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+    })
+
+    const out = await collect(fb)
+
+    expect(probes).toBeGreaterThan(0) // s0 was probed but never confirmed
+    expect(out).toEqual([1, 2, 3, 4]) // stayed on s1 the whole time
+    expect(fb.metrics().switchCount).toBe(1) // only the initial failover — no churn back to s0
+  })
+
+  it('survives a capability probe that throws synchronously (fails as capability, flag not stranded)', async () => {
+    let now = 0
+    let probes = 0
+    const s0 = source(
+      's0',
+      async function* () {
+        throw new Error('s0 down') // always fails the real query
+      },
+      undefined,
+      // A misbehaving custom probe that throws *synchronously*, before returning a Promise.
+      (() => {
+        probes++
+        throw new Error('sync boom')
+      }) as any,
+    )
+    const s1 = source('s1', async function* () {
+      for (let n = 1; n <= 4; n++) {
+        yield batch(n)
+        now += 100
+      }
+    })
+
+    const fb = fallback([s0, s1], {
+      clock: () => now,
+      cooldownMs: 50,
+      capabilityProbeIntervalMs: 0,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+    })
+
+    const out = await collect(fb)
+
+    // A synchronous throw escaping #maybeProbeCapability would stall the read loop (and strand
+    // #capabilityProbing at true). Normalizing it into a rejection keeps the supervisor streaming
+    // s1 to completion, and the probe having run proves the fire-and-forget path executed.
+    expect(probes).toBeGreaterThan(0)
+    expect(out).toEqual([1, 2, 3, 4])
+    expect(fb.metrics().switchCount).toBe(1) // never churned back to the incapable s0
+  })
+
+  it('throws AllSourcesDown after a finite timeout', async () => {
+    const down: StreamFn = async function* () {
+      throw new Error('down')
+    }
+    const fb = fallback(
+      [source('s0', down), source('s1', down)],
+      { allDownPollMs: 1 },
+      { strategy: { allDownTimeoutMs: 0 } },
+    )
+
+    await expect(collect(fb)).rejects.toThrowError(/all fallback data sources/)
+  })
+
+  it('ends the stream on abort during an all-down gap, without waiting for the cooldown', async () => {
+    const down = source('down', async function* () {
+      throw new Error('down')
+    })
+    const fb = fallback([down], { cooldownMs: 60_000 })
+    const stop = new AbortController()
+
+    const started = Date.now()
+    const ended = collect(fb, QUERY, stop.signal)
+    await wait(50)
+    stop.abort()
+
+    expect(await ended).toEqual([])
+    expect(Date.now() - started).toBeLessThan(1000)
+  }, 5000)
+
+  it('clears the active source and freshness gauges during an all-down gap', async () => {
+    // One source that global-stalls (no other source ⇒ nothing fresher) then errors. On the error
+    // there is no eligible source left, so the all-down path — not a switch — is the only thing that
+    // can clear the freshness gauges it left set.
+    const s0 = source('s0', async function* () {
+      yield batch(50)
+      await wait(60)
+      throw new Error('s0 down')
+    })
+    const fb = fallback(
+      [s0],
+      { maxStalenessMs: 30, freshnessTickMs: 5, allDownPollMs: 1, cooldownMs: 60_000 },
+      { strategy: { allDownTimeoutMs: 0 } },
+    )
+
+    const it = fb.getStream(QUERY)[Symbol.asyncIterator]()
+    expect((await it.next()).value.blocks[0].header.number).toBe(50)
+
+    // Pull the next batch so the staleness clock runs: s0 stalls past maxStalenessMs with no fresher
+    // alternative → global stall flagged on the active.
+    const pending = it.next()
+    await wait(45)
+    expect(fb.metrics().chainStalled).toBe(true)
+    expect(fb.metrics().activeIndex).toBe(0)
+
+    // s0 then errors; nothing eligible remains → all-down. The gauges must not keep reporting s0.
+    await expect(pending).rejects.toThrowError(/all fallback data sources/)
+    expect(fb.metrics().activeIndex).toBeUndefined()
+    expect(fb.metrics().sources.every((s) => !s.active)).toBe(true)
+    expect(fb.metrics().chainStalled).toBe(false)
+    expect(fb.metrics().staleness).toBe(0)
+    expect(fb.metrics().lag).toBeUndefined() // nothing is being driven ⇒ nothing to measure
+    expect(fb.metrics().chainHead).toBeUndefined()
+  }, 5000)
+})
+
+describe('FallbackClient — metrics', () => {
+  it('reports no active source and no freshness gauges once the stream ends (OB-60, OB-63)', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(5),
+    )
+    const fb = fallback([s0, s1], { headTtlMs: 0 })
+
+    expect(await collect(fb)).toEqual([1])
+    expect(servedLast(fb)).toBe(0)
+
+    const m = fb.metrics()
+    expect(m.activeIndex).toBeUndefined()
+    expect(m.sources.map((s) => s.active)).toEqual([false, false])
+    expect(m.lag).toBeUndefined()
+    expect(m.chainHead).toBeUndefined()
+    expect(fb.getUrl()).toBe(s0.client.getUrl()) // the last source driven
+  })
+
+  it('reports the active source, switch count, and per-source health', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      throw new Error('boom')
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(2)
+    })
+    const fb = fallback([s0, s1])
+
+    let m: FallbackMetrics | undefined
+    for await (const b of fb.getStream(QUERY)) {
+      if (b.blocks[0]?.header.number === 2) {
+        m = fb.metrics()
+      }
+    }
+
+    if (!m) {
+      throw new Error('block 2 never arrived')
+    }
+
+    expect(m.activeIndex).toBe(1)
+    expect(m.switchCount).toBe(1)
+    expect(m.sources).toMatchObject([
+      { name: 's0', health: 'unhealthy', active: false },
+      { name: 's1', health: 'unknown', active: true },
+    ])
+    // The unhealthy source carries its classified cause; the healthy/unknown one does not.
+    expect(m.sources[0].cause).toMatchObject({ check: 'stream', reason: 'unknown' })
+    expect(m.sources[0].cause?.detail).toContain('boom')
+    expect(m.sources[1].cause).toBeUndefined()
+  })
+})
+
+describe('FallbackClient — freshness', () => {
+  it('(a) lag: fails over once it falls behind the independent head (after arming at the tip)', async () => {
+    const s1heads = [95, 110] // first boundary arms (lag 5), second trips (lag 19)
+    const s0 = source('s0', async function* () {
+      yield batch(90)
+      yield batch(91)
+      yield batch(92) // not reached
+    })
+    const s1 = source(
+      's1',
+      async function* () {
+        yield batch(92)
+        yield batch(93)
+      },
+      async () => cursor(s1heads.shift() ?? 110),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    expect(await collect(fb)).toEqual([90, 91, 92, 93])
+    expect(servedLast(fb)).toBe(1)
+    expect(s1.reads[0]).toMatchObject({ fromBlock: 92, parentBlockHash: '0x91' }) // resumed after last delivered
+  })
+
+  it('(b) historical sync: a huge lag during backfill never fails over (never armed)', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+      yield batch(3)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(1_000_000),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    expect(await collect(fb)).toEqual([1, 2, 3])
+    expect(servedLast(fb)).toBe(0)
+  })
+
+  it('(c) staleness: fails over a stalled source when a fresher source is ahead', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      await hang()
+    })
+    const s1 = source(
+      's1',
+      async function* () {
+        yield batch(2)
+      },
+      async () => cursor(100),
+    )
+    const fb = fallback([s0, s1], { maxStalenessMs: 30, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null })
+
+    expect(await collect(fb)).toEqual([1, 2])
+    expect(servedLast(fb)).toBe(1)
+  }, 5000)
+
+  it('(e) slow-handler immunity: a slow downstream consumer between yields does not mark the source stale', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+      yield batch(3)
+    })
+    // A fresher standby exists, so staleness *could* fire — but the staleness clock spans a single
+    // source `next()`, not wall-clock across yields, so time spent in a slow consumer must not count.
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(100),
+    )
+    const fb = fallback([s0, s1], { maxStalenessMs: 30, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null })
+
+    const got: number[] = []
+    for await (const b of fb.getStream(QUERY)) {
+      got.push(...b.blocks.map((x: any) => x.header.number))
+      activeAtBatch.set(fb, fb.metrics().activeIndex)
+      await wait(50) // slow handler (> maxStalenessMs), but parked at yield — clock not running on s0
+    }
+    expect(got).toEqual([1, 2, 3]) // all served by s0
+    expect(servedLast(fb)).toBe(0) // never failed over
+  }, 5000)
+
+  it('(d) global stall: no fresher source → holds + flags chainStalled, no churn', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(50)
+      await wait(120)
+      throw new Error('client timeout') // eventually errors, like a real client
+    })
+    const s1 = source(
+      's1',
+      async function* () {
+        yield batch(51)
+      },
+      async () => cursor(50), // same head → global stall
+    )
+    const fb = fallback([s0, s1], { maxStalenessMs: 30, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null })
+
+    const it = fb.getStream(QUERY)[Symbol.asyncIterator]()
+    expect((await it.next()).value.blocks[0].header.number).toBe(50)
+
+    const pending = it.next() // hangs; staleness climbs but no fresher source exists
+    await wait(80)
+    expect(fb.metrics().chainStalled).toBe(true)
+    expect(fb.metrics().activeIndex).toBe(0) // held — did NOT churn
+
+    // s0 finally errors → ordinary failover to s1
+    expect((await pending).value.blocks[0].header.number).toBe(51)
+    expect(fb.metrics().activeIndex).toBe(1)
+    expect(fb.metrics().chainStalled).toBe(false) // cleared once progress resumed on the new source
+  }, 5000)
+
+  it('(d2) global stall: keeps probing the held source, and recovers when one becomes fresher', async () => {
+    // The active hangs forever; recovery must come from continued probing of the other source.
+    const s0 = source('s0', async function* () {
+      yield batch(50)
+      await hang()
+    })
+
+    // Global stall (same head) for a while... Head polls run once per tick past the staleness
+    // threshold (~35ms in), so this script keeps the stall going past the 60ms checkpoint below.
+    const s1heads = [50, 50, 50, 50, 50, 50, 50, 50]
+    let probedCapability = 0
+    const s1 = source(
+      's1',
+      async function* () {
+        yield batch(51)
+      },
+      async () => cursor(s1heads.shift() ?? 51), // ...then it advances to 51
+      async () => (probedCapability++, { ok: true }),
+    )
+    const fb = fallback([s0, s1], { maxStalenessMs: 30, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null })
+
+    const it = fb.getStream(QUERY)[Symbol.asyncIterator]()
+    expect((await it.next()).value.blocks[0].header.number).toBe(50)
+
+    // While held, the supervisor keeps polling the other source — liveness *and* capability —
+    // so it is positioned to notice recovery.
+    const next = it.next()
+    await wait(60)
+    expect(fb.metrics().chainStalled).toBe(true)
+    // s1's head was (re)polled repeatedly during the hold (liveness). The polls here all come from
+    // stall ticks: the boundary after batch(50) no longer polls (lag off, not yet stale, stock
+    // strategy, most-preferred source active).
+    expect(s1heads.length).toBeLessThan(4)
+    expect(probedCapability).toBeGreaterThan(0) // capability probe fired during the hold
+
+    // s1's head advances past us → fail over to it, recovering without the active ever resolving.
+    expect((await next).value.blocks[0].header.number).toBe(51)
+    expect(fb.metrics().activeIndex).toBe(1)
+    expect(fb.metrics().chainStalled).toBe(false)
+  }, 5000)
+
+  it('(f) thresholds disabled: neither lag nor staleness fires', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(1_000_000),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: null, maxStalenessMs: null, headTtlMs: 0 })
+
+    expect(await collect(fb)).toEqual([1, 2])
+    expect(servedLast(fb)).toBe(0)
+  })
+
+  it('(g) resets freshness gauges on a switch (no stale lag from the old source)', async () => {
+    const s1heads = [95, 110] // arm at lag 5, then trip at lag 19
+    const s0 = source('s0', async function* () {
+      yield batch(90)
+      yield batch(91)
+    })
+    // A batch arrives before its boundary is observed, so the lag seen with s1's first batch is
+    // whatever the switch itself left.
+    const s1 = source(
+      's1',
+      async function* () {
+        yield batch(92)
+      },
+      async () => cursor(s1heads.shift() ?? 110),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    let lagOnSwitch: number | undefined = -1
+    for await (const b of fb.getStream(QUERY)) {
+      if (b.blocks[0]?.header.number === 92) {
+        lagOnSwitch = fb.metrics().lag
+      }
+    }
+
+    expect(lagOnSwitch).toBeUndefined() // not the stale 19 the lag trigger recorded against s0
+  })
+
+  it('(h) re-arms lag per stream: a reused instance does not inherit "at tip" for a backfill', async () => {
+    let phase = 1
+    const s0 = source('s0', async function* () {
+      if (phase === 1) {
+        yield batch(100)
+      } else {
+        yield batch(1)
+        yield batch(2)
+      }
+    })
+    // Phase 1: head sits at s0 (arms the lag trigger). Phase 2: head is far ahead (backfill).
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(phase === 1 ? 100 : 1_000_000),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    // Stream 1 reaches the tip → arms the lag trigger on the instance.
+    expect(await collect(fb, { ...QUERY, fromBlock: 100 })).toEqual([100])
+
+    // Stream 2 on the SAME instance backfills far behind head. If the armed state leaked, the first
+    // boundary would trip (lag ~1e6 > 10) and fail over; a per-stream reset prevents that.
+    phase = 2
+    expect(await collect(fb)).toEqual([1, 2])
+    expect(servedLast(fb)).toBe(0) // stayed on s0 — no spurious failover
+  })
+
+  it('(j) reports no lag/head before the first block, even at a boundary after an empty batch', async () => {
+    // A source may yield an empty batch (the portal answers HTTP 204 that way), so a boundary can
+    // be reached with nothing delivered yet. Measuring from a `-1` sentinel would publish a
+    // chain-height-sized lag on the gauges.
+    const seen: { lag: number | undefined; chainHead: number | undefined }[] = []
+    const s0 = source('s0', async function* () {
+      yield {
+        blocks: [],
+        head: {},
+        meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
+      }
+      yield batch(1_000)
+      yield batch(1_001)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(1_000),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    const active: (number | undefined)[] = []
+    for await (const b of fb.getStream(QUERY)) {
+      void b
+      seen.push({ lag: fb.metrics().lag, chainHead: fb.metrics().chainHead })
+      active.push(fb.metrics().activeIndex)
+    }
+
+    // A batch is yielded *before* its boundary is observed, so each entry shows the state left by
+    // the PREVIOUS boundary: nothing has been observed yet at [0], and [1] is the boundary that
+    // followed the empty batch — the one with no cursor to measure from. Measuring from `-1` there
+    // would have reported a 1,001-block lag against s1's head; reporting `0` would claim we are
+    // level with the chain, which is equally untrue. Not computable ⇒ absent.
+    expect(seen[0]).toEqual({ lag: undefined, chainHead: undefined })
+    expect(seen[1]).toEqual({ lag: undefined, chainHead: 1_000 })
+    // The boundary with a real cursor at s1's head: caught up, and now measurable.
+    expect(seen[2]).toEqual({ lag: 0, chainHead: 1_000 })
+    expect(active).toEqual([0, 0, 0]) // never failed over
+  })
+
+  it('(i) does not arm lag while the reference is behind us (stale standby) — no spurious failover', async () => {
+    // The standby is first *behind* the active (negative lag), then jumps to the real tip while the
+    // active is still backfilling. Arming on the negative lag would let that jump trip a spurious
+    // failover; gating arming on `lag >= 0` keeps us on the active.
+    const s1heads = [40, 1_000] // behind us at 50 (lag -10), then far ahead
+    const s0 = source('s0', async function* () {
+      yield batch(50)
+      yield batch(51)
+      yield batch(52)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(s1heads.shift() ?? 1_000),
+    )
+    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
+
+    expect(await collect(fb, { ...QUERY, fromBlock: 50 })).toEqual([50, 51, 52])
+    expect(servedLast(fb)).toBe(0) // never armed (was ahead of the reference) ⇒ no lag failover
+  })
+})
+
+describe('FallbackClient — reclaim and abort correctness', () => {
+  it('reclaims a recovered primary that trails the cursor by normal ingestion lag', async () => {
+    // The canonical topology: a portal primary blips, a hot standby takes over at the tip, the
+    // primary recovers. A portal's head always trails the block a hot source just delivered, so a
+    // reclaim rule demanding `head >= cursor` would strand the pipe on the expensive standby
+    // forever. Only a source that is *structurally* behind should be refused.
+    let now = 0
+    let attempts = 0
+    const primary = source(
+      'primary',
+      async function* () {
+        attempts++
+        if (attempts === 1) {
+          throw new Error('blip')
+        }
+        yield batch(500) // reclaimed
+      },
+      async () => cursor(97), // head trails the standby's cursor by a few blocks
+    )
+    const standby = source(
+      'standby',
+      async function* () {
+        for (let n = 98; n <= 103; n++) {
+          yield batch(n)
+          now += 50 // let the primary's cooldown elapse
+        }
+      },
+      async () => cursor(103),
+    )
+    const fb = fallback([primary, standby], {
+      clock: () => now,
+      cooldownMs: 20,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+      maxStalenessMs: null,
+      maxLagBlocks: 10,
+    })
+
+    const got = await collect(fb)
+
+    expect(got).toContain(500) // the primary was taken back
+    expect(fb.metrics().switchCount).toBe(2) // primary → standby → primary
+  })
+
+  it('refuses to reclaim a source that is structurally behind the pipe', async () => {
+    let now = 0
+    let attempts = 0
+    const exhausted = source(
+      'exhausted',
+      async function* () {
+        attempts++
+        if (attempts === 1) {
+          throw new Error('blip')
+        }
+        yield batch(500) // must NOT be reached
+      },
+      async () => cursor(3), // stuck far behind, e.g. a finalized-only source past its frontier
+    )
+    const tip = source(
+      'tip',
+      async function* () {
+        for (let n = 98; n <= 103; n++) {
+          yield batch(n)
+          now += 50
+        }
+      },
+      async () => cursor(103),
+    )
+    const fb = fallback([exhausted, tip], {
+      clock: () => now,
+      cooldownMs: 20,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+      maxStalenessMs: null,
+      maxLagBlocks: 10,
+    })
+
+    const got = await collect(fb)
+
+    expect(got).not.toContain(500)
+    expect(fb.metrics().switchCount).toBe(1) // handed off once and stayed
+  })
+
+  it("does not carry one source's unproductive wait into the next source it drives", async () => {
+    // A failover can re-select the SAME source (single source, or an all-down gap it recovers from
+    // first). Inheriting the previous run's stall clock judges it stale on its very first empty
+    // batch — before it has had any chance to deliver — and with nothing else eligible that is a
+    // livelock, not a failover.
+    let now = 0
+    let runs = 0
+    const only = source('only', async function* () {
+      runs++
+      if (runs === 1) {
+        for (let i = 0; i < 5; i++) {
+          yield emptyBatch()
+          now += 40
+        }
+        throw new Error('dropped')
+      }
+      // The fresh run also starts unproductive: it must get the full window of its own.
+      yield emptyBatch()
+      now += 10
+      yield batch(1)
+    })
+    const fb = fallback([only], {
+      clock: () => now,
+      cooldownMs: 0,
+      maxStalenessMs: 100,
+      freshnessTickMs: 10,
+      maxLagBlocks: null,
+      allDownPollMs: 1,
+    })
+
+    expect(await collect(fb)).toEqual([1])
+    expect(fb.metrics().switchCount).toBe(0)
+  })
+
+  it('ignores the cached head of an unhealthy source when deciding if anything is ahead', async () => {
+    // A source can report a head far ahead and then go unhealthy through its *capability* probe,
+    // which leaves that head sitting in the cache. Treating it as "fresher" fails the active source
+    // over towards a source the selector will refuse to pick — an all-down gap caused by a standby
+    // that was never eligible.
+    let now = 0
+    const active = source('active', async function* () {
+      yield batch(10)
+      for (let i = 0; i < 8; i++) {
+        yield emptyBatch() // answering, not progressing
+        now += 40
+      }
+      yield batch(11)
+    })
+    const poisoned = source(
+      'poisoned',
+      async function* () {},
+      async () => cursor(9_999), // always reachable, always looks far ahead
+      async () => ({
+        ok: false,
+        cause: { check: 'capability' as const, reason: 'http' as const, code: 400, detail: 'x' },
+      }),
+    )
+    const fb = fallback([active, poisoned], {
+      clock: () => now,
+      maxStalenessMs: 100,
+      freshnessTickMs: 10,
+      headTtlMs: 0,
+      capabilityProbeIntervalMs: 0,
+      maxLagBlocks: null,
+      cooldownMs: 60_000,
+    })
+
+    expect(await collect(fb)).toEqual([10, 11])
+    expect(servedLast(fb)).toBe(0) // never chased a source that could not be selected
+    expect(fb.metrics().switchCount).toBe(0)
+  })
+})
+
+describe('FallbackClient — head-poll timeout (robustness)', () => {
+  // A head poll that never resolves — models a sick standby: TCP up, no response.
+  const hangHead = (): Promise<BlockRef | undefined> => new Promise<BlockRef | undefined>(() => {})
+
+  it('a sick standby whose getHead hangs does not stall the healthy active source', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      yield batch(2)
+      yield batch(3)
+    })
+    // Its head poll hangs; without the timeout, the per-batch lag check would block s0 forever.
+    const s1 = source('s1', async function* () {}, hangHead)
+    const fb = fallback([s0, s1], {
+      maxLagBlocks: 10,
+      maxStalenessMs: null,
+      headTtlMs: 0,
+      headPollTimeoutMs: 20,
+      livenessFailThreshold: 1, // one timed-out poll condemns the sick standby
+      cooldownMs: 60_000,
+    })
+
+    expect(await collect(fb)).toEqual([1, 2, 3]) // the healthy primary streamed to completion
+    expect(servedLast(fb)).toBe(0)
+    const s1health = fb.metrics().sources[1]
+    expect(s1health.health).toBe('unhealthy')
+    expect(s1health.cause).toMatchObject({ check: 'liveness', reason: 'timeout' })
+  }, 5000)
+})
+
+describe('FallbackClient — active capability confirmation', () => {
+  it('reaches healthy by serving batches, without the standby capability probe ever running', async () => {
+    let probed = 0
+    const s0 = source(
+      's0',
+      async function* () {
+        yield batch(1)
+        yield batch(2)
+        yield batch(3)
+        yield batch(4)
+      },
+      undefined,
+      async () => {
+        probed++
+        return { ok: true }
+      },
+    )
+    const fb = fallback([s0], { livenessRecoverThreshold: 3, maxLagBlocks: null, maxStalenessMs: null })
+
+    expect(await collect(fb)).toEqual([1, 2, 3, 4])
+    // The active source proved capability by serving the query — the standby probe never ran for it,
+    // yet it still left `unknown` for `healthy`.
+    expect(probed).toBe(0)
+    expect(fb.metrics().sources[0].health).toBe('healthy')
+  })
+})
+
+describe('FallbackClient — BlockStreamClient surface', () => {
+  it('getHead returns the highest head any source reports; getMetadata the first that answers', async () => {
+    const s0 = source(
+      's0',
+      async function* () {},
+      async () => cursor(10),
+    )
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(42),
+    )
+    for (const s of [s0, s1]) {
+      vi.spyOn(s.client, 'getMetadata').mockResolvedValue({
+        dataset: s.name,
+        aliases: [],
+        real_time: true,
+        start_block: 0,
+      })
+    }
+    const fb = fallback([s0, s1])
+
+    expect((await fb.getHead())?.number).toBe(42)
+    expect((await fb.getMetadata()).dataset).toBe('s0')
+  })
+
+  it('reports finality conservatively: hot unless EVERY source is finalized-only', () => {
+    // The flag tells a target whether a fork can arrive — it gates the target's rollback machinery
+    // and whether a finalized-requiring target forces the finalized stream. One hot source in the
+    // list is enough to make a fork reachable, so a mixed set must report hot.
+    const hot = () => source('hot', async function* () {})
+    const finalizedOnly = () => ({
+      name: 'final',
+      client: new StubPortalClient(async function* () {}, { finalized: true }),
+    })
+
+    expect(fallback([finalizedOnly(), hot()]).finalized).toBe(false) // mixed ⇒ hot
+    expect(fallback([hot(), finalizedOnly()]).finalized).toBe(false) // order does not matter
+    expect(fallback([finalizedOnly(), finalizedOnly()]).finalized).toBe(true)
+    expect(fallback([hot(), hot()]).finalized).toBe(false)
+  })
+
+  it('getUrl names the active source', async () => {
+    const s0 = source('s0', async function* () {
+      throw new Error('down')
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(1)
+    })
+    const fb = fallback([s0, s1])
+
+    expect(fb.getUrl()).toBe(s0.client.getUrl()) // nothing driven yet → primary
+    await collect(fb)
+    expect(fb.getUrl()).toBe(s1.client.getUrl())
+  })
+})
+
+describe('FallbackClient — standby traffic', () => {
+  it('skips boundary head polls entirely when nothing can consume them', async () => {
+    // Lag detection off, not stale, most-preferred source active: the polled heads would feed no
+    // verdict and no reclaim. Before the gate this cost one
+    // `eth_getBlockByNumber`-class call per block per standby at tip pace (batch cadence > headTtlMs).
+    let polls = 0
+    const s0 = source('s0', async function* () {
+      for (let n = 1; n <= 5; n++) {
+        yield batch(n)
+      }
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => {
+        polls++
+        return cursor(1000)
+      },
+    )
+
+    const fb = fallback([s0, standby], { headTtlMs: 0, maxLagBlocks: null, maxStalenessMs: null })
+
+    const out = await collect(fb)
+
+    expect(out).toEqual([1, 2, 3, 4, 5])
+    expect(polls).toBe(0)
+  })
+
+  it('keeps polling at the boundary while lag detection is on', async () => {
+    let polls = 0
+    const s0 = source('s0', async function* () {
+      for (let n = 1; n <= 3; n++) {
+        yield batch(n)
+      }
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => {
+        polls++
+        return cursor(3)
+      },
+    )
+
+    // Default detection (maxLagBlocks on); headTtlMs 0 so every boundary re-polls.
+    const fb = fallback([s0, standby], { headTtlMs: 0 })
+    await collect(fb)
+
+    expect(polls).toBeGreaterThan(0)
+  })
+
+  it('skips boundary head polls on a standby when the strategy never reclaims (onFailureOnly)', async () => {
+    const pollsIn = async (preferPrimary: 'eager' | 'onFailureOnly') => {
+      let polls = 0
+      const head = async () => {
+        polls++
+        return cursor(1000)
+      }
+      const s0 = source(
+        's0',
+        async function* () {
+          throw new Error('s0 down')
+        },
+        head,
+      )
+      const s1 = source('s1', async function* () {
+        for (let n = 1; n <= 5; n++) {
+          yield batch(n)
+        }
+      })
+      const s2 = source('s2', async function* () {}, head)
+
+      const fb = fallback(
+        [s0, s1, s2],
+        { headTtlMs: 0, maxLagBlocks: null, maxStalenessMs: null },
+        { strategy: { preferPrimary } },
+      )
+      expect(await collect(fb)).toEqual([1, 2, 3, 4, 5])
+
+      return polls
+    }
+
+    // WP-63: with no reclaim possible, a non-primary active source is no reason to poll.
+    expect(await pollsIn('onFailureOnly')).toBe(0)
+    expect(await pollsIn('eager')).toBeGreaterThan(0)
+  })
+
+  it("prefers a source's cheap `getHeight` over `getHead` for the poll", async () => {
+    // On an RPC source `getHeight` is `eth_blockNumber` while `getHead` is a block lookup; only
+    // the number is consumed, so the cheap call must win whenever the client offers it.
+    let heights = 0
+    let heads = 0
+    const s0 = source('s0', async function* () {
+      for (let n = 1; n <= 3; n++) {
+        yield batch(n)
+      }
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => {
+        heads++
+        return cursor(1000)
+      },
+    )
+    // A PortalClient has no `getHeight`; an RPC client does.
+    Object.assign(standby.client, {
+      getHeight: async () => {
+        heights++
+        return 1000
+      },
+    })
+
+    const fb = fallback([s0, standby], { headTtlMs: 0 })
+    await collect(fb)
+
+    expect(heights).toBeGreaterThan(0)
+    expect(heads).toBe(0)
+  })
+})
+
+describe('FallbackClient — probes, reclaim and head lookup', () => {
+  it('ignores a capability probe that answers after its stream has ended', async () => {
+    // Probes are fire-and-forget and outlive their stream (30s timeout by default). A late verdict
+    // describes the query — and possibly the commitment — of a stream that is no longer running,
+    // so letting it rule a source healthy or unhealthy would corrupt the next stream's view.
+    const resolvers: ((r: { ok: boolean; cause?: any }) => void)[] = []
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => cursor(50),
+      (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
+    )
+    // Lag detection keeps the standby polls (and so its probe) flowing at every boundary.
+    const fb = fallback([s0, standby], { headTtlMs: 0, capabilityProbeIntervalMs: 0 })
+
+    await collect(fb) // stream 1: drives s0, fires the standby's probe, then ends
+    expect(resolvers).toHaveLength(1)
+    await collect(fb) // stream 2 fires its own probe; stream 1's is still pending
+
+    const before = fb.metrics().sources[1].health
+    // Answer stream 1's probe, long after stream 1 is gone.
+    resolvers[0]({ ok: false, cause: { check: 'capability', reason: 'http', code: 400, detail: 'stale verdict' } })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(fb.metrics().sources[1].health).toBe(before) // the late answer changed nothing
+    expect(fb.metrics().sources[1].cause).toBeUndefined()
+  }, 10_000)
+
+  it('ignores a capability probe that answers after its stream ended, before any other read', async () => {
+    const resolvers: ((r: { ok: boolean; cause?: any }) => void)[] = []
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => cursor(50),
+      (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
+    )
+    const fb = fallback([s0, standby], { headTtlMs: 0, capabilityProbeIntervalMs: 0 })
+
+    await collect(fb)
+    expect(resolvers).toHaveLength(1)
+
+    const before = fb.metrics().sources[1].health
+    resolvers[0]({ ok: false, cause: { check: 'capability', reason: 'http', code: 400, detail: 'stale verdict' } })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(fb.metrics().sources[1].health).toBe(before)
+    expect(fb.metrics().sources[1].cause).toBeUndefined()
+  }, 10_000)
+
+  it('reclaims a source dropped for stalling once it is level with the pipe again', async () => {
+    // Demanding it be *ahead* of the cursor is a bar nothing can clear: the cursor is set by the
+    // source currently driving at the tip, so a recovered primary that has caught up sits exactly
+    // level with it and would stay demoted for the life of the stream.
+    let caughtUp = false
+    let currentTip = 100
+    let runs = 0
+    const primary = source(
+      'primary',
+      async function* () {
+        runs++
+        if (runs === 1) {
+          yield batch(100)
+          await hang() // stops progressing ⇒ dropped for staleness
+        }
+        yield batch(500) // must be reclaimed
+      },
+      // Level with the pipe once caught up — never ahead of a source driving at the tip.
+      async () => cursor(caughtUp ? currentTip : 100),
+    )
+    const standby = source(
+      'standby',
+      async function* () {
+        // Keeps delivering, so nothing ever fails it over: the ONLY way back to the primary is an
+        // eager reclaim, which is what this test is about.
+        for (let n = 101; n <= 140; n++) {
+          currentTip = n
+          yield batch(n)
+          if (n === 103) {
+            caughtUp = true // the primary has ingested up to the tip too
+          }
+          await wait(12)
+        }
+      },
+      async () => cursor(140),
+    )
+
+    const fb = fallback([primary, standby], {
+      cooldownMs: 20,
+      headTtlMs: 0,
+      livenessRecoverThreshold: 1,
+      maxStalenessMs: 60,
+      freshnessTickMs: 10,
+      maxLagBlocks: 10,
+    })
+
+    const got: number[] = []
+    const drain = (async () => {
+      for await (const b of fb.getStream(QUERY)) {
+        got.push(...b.blocks.map((x: any) => x.header.number))
+        activeAtBatch.set(fb, fb.metrics().activeIndex)
+      }
+    })()
+    drain.catch(() => {})
+    await wait(600)
+
+    expect(got).toContain(500) // the recovered primary was taken back
+    expect(servedLast(fb)).toBe(0)
+  }, 10_000)
+
+  it('does not let one hung endpoint block the aggregate head lookup', async () => {
+    // `from: 'latest'` resolves through getHead, so a source whose head poll never settles would
+    // hang the pipe at startup even though another source can answer.
+    const hung = source(
+      'hung',
+      async function* () {},
+      () => new Promise<BlockRef | undefined>(() => {}),
+    )
+    const good = source(
+      'good',
+      async function* () {},
+      async () => cursor(77),
+    )
+    const fb = fallback([hung, good], { headPollTimeoutMs: 20 })
+
+    expect((await fb.getHead())?.number).toBe(77)
+  }, 5000)
+
+  it('waits for the first head without a limit when every source is slow', async () => {
+    // A cold start (DNS, TLS, a lazy import) can exceed the head-poll guard on every source; the
+    // `from: 'latest'` lookup must wait for it instead of failing the pipe at startup.
+    const slow = (n: number) =>
+      source(
+        `slow-${n}`,
+        async function* () {},
+        async () => {
+          await wait(60)
+          return cursor(n)
+        },
+      )
+    const fb = fallback([slow(10), slow(20)], { headPollTimeoutMs: 20 })
+
+    expect((await fb.getHead())?.number).toBe(20)
+  }, 5000)
+
+  it('throws rather than reporting "no head" when every source failed to answer', async () => {
+    // Reporting `undefined` here would resolve `from: 'latest'` to block 0 and silently backfill
+    // the entire chain — "we could not ask" must not be passed off as "there is no head".
+    const broken = (name: string) =>
+      source(
+        name,
+        async function* () {},
+        async () => {
+          throw new Error('head down')
+        },
+      )
+    const fb = fallback([broken('broken-0'), broken('broken-1')], { headPollTimeoutMs: 20 })
+
+    await expect(fb.getHead()).rejects.toThrowError(/no fallback source could report a chain head/)
+  }, 5000)
+
+  it('still reports "no head" when a source genuinely answers that it has none', async () => {
+    const empty = source(
+      'empty',
+      async function* () {},
+      async () => undefined,
+    )
+    const fb = fallback([empty], { headPollTimeoutMs: 20 })
+
+    await expect(fb.getHead()).resolves.toBeUndefined()
+  }, 5000)
+})
+
+describe('FallbackClient — abort', () => {
+  it('ends the stream on abort instead of failing over', async () => {
+    const controller = new AbortController()
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+      controller.abort()
+      throw new Error('request aborted')
+    })
+    const s1 = source('s1', async function* () {
+      yield batch(2)
+    })
+
+    const out: number[] = []
+    const fb = fallback([s0, s1])
+    const stream = fb.getStream(QUERY, { request: { abort: controller.signal } })
+    for await (const b of stream) {
+      out.push(...b.blocks.map((x: any) => x.header.number))
+    }
+
+    expect(out).toEqual([1])
+    expect(s1.reads).toHaveLength(0)
+    // The error that the abort caused is not the source's fault.
+    expect(fb.metrics().sources[0].health).not.toBe('unhealthy')
+  })
+})
