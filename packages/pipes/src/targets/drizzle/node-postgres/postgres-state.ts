@@ -142,14 +142,32 @@ export class PostgresState {
   }
 
   /**
-   * Acquires a PostgreSQL advisory lock for the current state ID using
-   * the pg_try_advisory_xact_lock function. This ensures that only one
-   * process can write to this state at a time. The lock is automatically
-   * released at the end of the transaction.
+   * Opens a batch in one statement: takes the transaction-scoped advisory lock that keeps a single
+   * writer on this state, tags the undo log with the batch's block, and inserts the cursor row.
+   * The cursor row goes before `onData`; the transaction keeps the batch atomic either way.
    */
-  async acquireLock(tx: Transaction): Promise<void> {
-    const res = await tx.execute<{ got_lock: boolean }>(
-      sql`SELECT pg_try_advisory_xact_lock(hashtext(${this.#key.value})::bigint) AS got_lock;`,
+  async beginBatch(
+    tx: Transaction,
+    { stream, profiler }: BatchContext,
+    { snapshotEnabled }: { snapshotEnabled: boolean },
+    parentSpan: Profiler = profiler,
+  ): Promise<void> {
+    // Literals, not parameters, as with `SET LOCAL`: the statement text names the batch's block.
+    const enabled = sql.raw(`'${snapshotEnabled}'`)
+    const blockNumber = sql.raw(`'${Number(stream.state.current.number)}'`)
+
+    const res = await parentSpan.measure({ name: 'begin batch', labels: 'db' }, () =>
+      tx.execute<{ got_lock: boolean }>(sql`
+        WITH batch AS (
+          SELECT
+            pg_try_advisory_xact_lock(hashtext(${this.#key.value})::bigint) AS got_lock,
+            set_config('sqd.snapshot_enabled', ${enabled}, true),
+            set_config('sqd.snapshot_block_number', ${blockNumber}, true)
+        ), cursor AS (
+          ${this.#insertCursorFrom(stream, sql`batch WHERE got_lock`)}
+        )
+        SELECT got_lock FROM batch
+      `),
     )
 
     if (res.rows[0]?.got_lock) return
@@ -164,23 +182,34 @@ export class PostgresState {
     )
   }
 
-  async saveCursor(
-    tx: Transaction,
-    {
+  /** `saveCursor` as `INSERT ... SELECT`, so the row can depend on a CTE in the same statement. */
+  #insertCursorFrom({ state: { current, rollbackChain }, head }: BatchContext['stream'], from: SQL): SQL {
+    return sql`
+      INSERT INTO ${sql.raw(this.#sync.fqnName)} (
+         id, current_number, current_hash, "current_timestamp", finalized, rollback_chain
+      )
+      SELECT
+          ${this.#key.value}::text,
+          ${current.number}::numeric,
+          ${current.hash}::text,
+          ${syncTimestampValue(current.timestamp)}::timestamptz,
+          ${JSON.stringify(head.finalized || {})}::jsonb,
+          ${JSON.stringify(rollbackChain || [])}::jsonb
+      FROM ${from}
+    `
+  }
+
+  async saveCursor(tx: Transaction, ctx: BatchContext, parentSpan: Profiler = ctx.profiler) {
+    const {
       stream: {
         state: { current, rollbackChain },
         head,
       },
       logger,
-      profiler,
-    }: BatchContext,
-    parentSpan: Profiler = profiler,
-  ) {
+    } = ctx
     // The source has already clamped this finalized head + rollback chain through the
     // pipe's monotonic watermark, so persist them verbatim — the stored finalized floor
     // stays non-regressing without a target-local clamp.
-    const finalizedBlock = head.finalized?.number
-
     logger.debug(`Saving cursor at block ${current.number} for ${this.#key.value} row...`)
     await parentSpan.measure({ name: 'insert cursor', labels: 'db' }, async () => {
       await tx.execute(
@@ -199,31 +228,38 @@ export class PostgresState {
         `,
       )
     })
+
+    return this.cleanupCursors(tx, ctx, parentSpan)
+  }
+
+  /** Every 25th save, drop the sync rows below the retention window. */
+  async cleanupCursors(
+    tx: Transaction,
+    { stream: { state, head }, logger, profiler }: BatchContext,
+    parentSpan: Profiler = profiler,
+  ): Promise<{ safeBlockNumber: number }> {
     this.#saves++
-    if (this.#saves === 1 || this.#saves % 25 === 0) {
-      // Clean up old unfinalized blocks beyond retention
-      const safeBlockNumber = Math.max(
-        Math.min(current.number, finalizedBlock ?? Infinity) - this.options.unfinalizedBlocksRetention,
-        0,
-      )
+    const due = this.#saves === 1 || this.#saves % 25 === 0
+    if (!due) return { safeBlockNumber: -1 }
 
-      logger.info(`Cleaning up old offsets less than ${safeBlockNumber} block for ${this.#key.value} row...`)
+    const finalizedBlock = head.finalized?.number
+    const safeBlockNumber = Math.max(
+      Math.min(state.current.number, finalizedBlock ?? Infinity) - this.options.unfinalizedBlocksRetention,
+      0,
+    )
 
-      const res = await parentSpan.measure({ name: 'cleanup cursors', labels: 'db' }, async () => {
-        return tx.execute<DeleteResult>(sql`
-          DELETE FROM ${sql.raw(this.#sync.fqnName)}
-          WHERE "id" = ${this.#key.value} AND "current_number" <= ${safeBlockNumber}
-        `)
-      })
+    logger.info(`Cleaning up old offsets less than ${safeBlockNumber} block for ${this.#key.value} row...`)
 
-      logger.debug(`Removed unused offsets from ${res.rowCount} rows from ${this.options.table}`)
+    const res = await parentSpan.measure({ name: 'cleanup cursors', labels: 'db' }, async () => {
+      return tx.execute<DeleteResult>(sql`
+        DELETE FROM ${sql.raw(this.#sync.fqnName)}
+        WHERE "id" = ${this.#key.value} AND "current_number" <= ${safeBlockNumber}
+      `)
+    })
 
-      return { safeBlockNumber }
-    }
+    logger.debug(`Removed unused offsets from ${res.rowCount} rows from ${this.options.table}`)
 
-    return {
-      safeBlockNumber: -1,
-    }
+    return { safeBlockNumber }
   }
 
   async getCursor({ logger }: { logger: Logger }): Promise<TargetState | undefined> {

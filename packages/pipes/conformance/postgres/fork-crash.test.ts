@@ -2,17 +2,7 @@ import { describe, expect } from 'vitest'
 
 import { numbers } from '../scenarios/erc20.js'
 import { S3 } from '../scenarios/fork.js'
-import {
-  COMMIT,
-  CURSOR_WRITE,
-  FORKED_ROWS,
-  type PostgresStore,
-  S3_POSTGRES,
-  batchAt,
-  crashAt,
-  it,
-  resumeToEnd,
-} from './harness.js'
+import { COMMIT, FORKED_ROWS, type PostgresStore, S3_POSTGRES, batchAt, crashAt, it, resumeToEnd } from './harness.js'
 import type { StatementKillPoint } from './kill-switch.js'
 
 /**
@@ -21,9 +11,9 @@ import type { StatementKillPoint } from './kill-switch.js'
  * rows above the ancestor (CN-34). Above the floor every block is a batch of its own.
  */
 const POINTS = {
-  undoBeforeCursor: {
+  undoBeforeCommit: {
     name: 'inside a batch above the floor, after its rows and undo records',
-    statement: CURSOR_WRITE,
+    statement: COMMIT,
     inTransaction: batchAt(22),
     at: 1,
     when: 'before',
@@ -81,10 +71,10 @@ describe('Postgres (class T) · S3 one fork · killed at each commit step (CT-2)
       simulator,
       database,
       model,
-      point: POINTS.undoBeforeCursor,
+      point: POINTS.undoBeforeCommit,
     })
 
-    expect(killed.statement).toBe('insert sync')
+    expect(killed.statement).toBe('commit')
     expect(killed.transaction).toContain('insert transfers')
     expect(batches.at(-1)?.current.number).toBe(22)
     expect(store.state?.current?.number).toBe(21)
