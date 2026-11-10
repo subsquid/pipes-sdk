@@ -12,7 +12,7 @@ import {
 import { MetricsServer } from '~/core/metrics-server.js'
 import { ProgressTrackerOptions, progressTracker } from '~/core/progress-tracker.js'
 
-import { PortalClient, PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
+import { BlockStreamClient, PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
 import * as evm from '../portal-client/query/evm.js'
 import { EvmPortalData, EvmQueryBuilder } from './evm-query-builder.js'
 
@@ -22,7 +22,7 @@ export * as api from '../portal-client/query/evm.js'
 
 export type EvmOutputs = Outputs<evm.FieldSelection, EvmQueryBuilder<any>>
 
-type EvmPortalStream<T extends EvmOutputs> =
+export type EvmStreamData<T extends EvmOutputs> =
   T extends EvmQueryBuilder<infer Q>
     ? EvmPortalData<Q>
     : T extends Transformer<any, infer O>
@@ -37,6 +37,22 @@ type EvmPortalStream<T extends EvmOutputs> =
           }
         : never
 
+export interface EvmPortalStreamOptions<Out extends EvmOutputs> {
+  /**
+   * Globally unique, stable identifier for this pipe.
+   * Targets use it as a cursor key to persist progress — two pipes with the
+   * same `id` will share (and overwrite) each other's cursor.
+   */
+  id: string
+  portal: string | PortalClientOptions | BlockStreamClient
+  outputs: Out
+  cache?: PortalCache
+  metrics?: MetricsServer
+  logger?: Logger | LogLevel
+  profiler?: boolean | SpanHooks
+  progress?: ProgressTrackerOptions
+}
+
 export function evmPortalStream<Out extends EvmOutputs>({
   id,
   portal,
@@ -46,27 +62,13 @@ export function evmPortalStream<Out extends EvmOutputs>({
   metrics,
   profiler,
   progress,
-}: {
-  /**
-   * Globally unique, stable identifier for this pipe.
-   * Targets use it as a cursor key to persist progress — two pipes with the
-   * same `id` will share (and overwrite) each other's cursor.
-   */
-  id: string
-  portal: string | PortalClientOptions | PortalClient
-  outputs: Out
-  cache?: PortalCache
-  metrics?: MetricsServer
-  logger?: Logger | LogLevel
-  profiler?: boolean | SpanHooks
-  progress?: ProgressTrackerOptions
-}) {
+}: EvmPortalStreamOptions<Out>) {
   type F = { block: { hash: true; number: true } }
   const query = new EvmQueryBuilder<F>().addFields({
     block: { hash: true, number: true },
   })
 
-  return new PortalStream<EvmQueryBuilder<F>, EvmPortalStream<Out>>({
+  return new PortalStream<EvmQueryBuilder<F>, EvmStreamData<Out>>({
     id,
     portal,
     query,
