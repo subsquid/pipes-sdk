@@ -10,7 +10,7 @@ import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
 import { evmPortalStream } from '~/evm/evm-portal-source.js'
 import { clickhouseTarget } from '~/targets/clickhouse/index.js'
-import { drizzleTarget } from '~/targets/drizzle/node-postgres/index.js'
+import { chunkForInsert, drizzleTarget } from '~/targets/drizzle/node-postgres/index.js'
 
 import { now } from './protocol.js'
 
@@ -125,7 +125,9 @@ export function postgresTarget({ pool, schema }: { pool: pg.Pool; schema: string
     tables: [transfers],
     settings: { state: { schema } },
     onData: async ({ tx, data }) => {
-      if (data.length) await tx.insert(transfers).values(data)
+      for (const values of chunkForInsert(data)) {
+        await tx.insert(transfers).values(values)
+      }
     },
   })
 }
