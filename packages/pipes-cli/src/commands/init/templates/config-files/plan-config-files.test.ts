@@ -111,4 +111,36 @@ describe('planConfigFiles', () => {
     const pkg = specs.find((s) => s.path === 'package.json')!
     expect(pkg.contents).not.toContain('"db:migrate": "drizzle-kit migrate"')
   })
+
+  describe('rpcFallback', () => {
+    const rpcPeers = [
+      '@subsquid/evm-rpc',
+      '@subsquid/evm-normalization',
+      '@subsquid/rpc-client',
+      '@subsquid/http-client',
+    ]
+
+    const contentsOf = (specs: ReturnType<typeof planConfigFiles>, path: string) =>
+      specs.find((s) => s.path === path)!.contents
+
+    it('package.json gains the optional RPC peers of @subsquid/pipes when on, none when off', () => {
+      const on = planConfigFiles(makeConfig({ rpcFallback: true }), 'proj')
+      const off = planConfigFiles(makeConfig(), 'proj')
+      for (const peer of rpcPeers) {
+        expect(contentsOf(on, 'package.json')).toContain(`"${peer}"`)
+        expect(contentsOf(off, 'package.json')).not.toContain(`"${peer}"`)
+      }
+    })
+
+    it('README documents the fallback and RPC_URL only when on', () => {
+      expect(contentsOf(planConfigFiles(makeConfig({ rpcFallback: true }), 'proj'), 'README.md')).toContain('RPC_URL')
+      expect(contentsOf(planConfigFiles(makeConfig(), 'proj'), 'README.md')).not.toContain('RPC_URL')
+    })
+
+    it('docker-compose passes RPC_URL through to the indexer container only when on', () => {
+      const composeOn = contentsOf(planConfigFiles(makeConfig({ rpcFallback: true }), 'proj'), 'docker-compose.yml')
+      expect(composeOn).toContain('RPC_URL: ${RPC_URL:-}')
+      expect(contentsOf(planConfigFiles(makeConfig(), 'proj'), 'docker-compose.yml')).not.toContain('RPC_URL')
+    })
+  })
 })

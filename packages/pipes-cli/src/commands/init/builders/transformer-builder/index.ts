@@ -85,6 +85,7 @@ export class TransformerBuilder<N extends NetworkType> {
        * will be the same for all transformers
        */
       network: this.config.defaultNetwork,
+      rpcFallback: this.config.rpcFallback === true,
       deduplicatedImports,
       envTemplate: envCode,
       transformerTemplates: transformersCode,
