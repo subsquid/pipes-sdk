@@ -1,4 +1,4 @@
-import { input, select } from '@inquirer/prompts'
+import { confirm, input, select } from '@inquirer/prompts'
 import chalk from 'chalk'
 
 import type { Config, PackageManager } from '~/types/init.js'
@@ -9,14 +9,15 @@ import { prepareConfig } from './config/prepare-config.js'
 import { targets } from './config/targets.js'
 import { templatePromptLoop } from './config/template-prompt-loop.js'
 import { validateProjectFolder } from './config/validate-project-folder.js'
+import { validateRpcUrl } from './config/validate-rpc-url.js'
 import { InitHandler } from './init.handler.js'
 
 export class InitPrompt {
   async run() {
     try {
-      const config = await this.promptConfig()
+      const { config, rpcUrl } = await this.promptConfig()
       await prepareConfig(config)
-      const handler = new InitHandler(config)
+      const handler = new InitHandler(config, { rpcUrl })
       await handler.handle()
     } catch (error) {
       if (error instanceof Error) {
@@ -26,7 +27,7 @@ export class InitPrompt {
     }
   }
 
-  async promptConfig(): Promise<Config<NetworkType>> {
+  async promptConfig(): Promise<{ config: Config<NetworkType>; rpcUrl?: string }> {
     const projectFolder = await input({
       message: `Where should we create your new project? ${chalk.dim('Enter a folder name or path:')}`,
       validate: validateProjectFolder,
@@ -60,6 +61,25 @@ export class InitPrompt {
       pageSize: 15,
     })
 
+    // EVM only: the Solana SDK has no fallback support. The URL is returned
+    // out-of-band of the config — it may embed an API key and must never reach
+    // the committed pipes.config.json; it only lands in the generated .env.
+    let rpcFallback = false
+    let rpcUrl: string | undefined
+    if (networkType === 'evm') {
+      rpcFallback = await confirm({
+        message: `Add an RPC fallback source? ${chalk.dim('The pipe keeps running from your RPC endpoint while the Portal is unavailable')}`,
+        default: false,
+      })
+      if (rpcFallback) {
+        const answer = await input({
+          message: `RPC endpoint URL ${chalk.dim('(press Enter to skip — set RPC_URL in .env later)')}`,
+          validate: validateRpcUrl,
+        })
+        rpcUrl = answer.trim() || undefined
+      }
+    }
+
     const selectedTemplates = await templatePromptLoop(networkType, network)
 
     const target = await select({
@@ -68,12 +88,16 @@ export class InitPrompt {
     })
 
     return {
-      projectFolder,
-      networkType,
-      defaultNetwork: network,
-      templates: selectedTemplates,
-      target,
-      packageManager,
+      config: {
+        projectFolder,
+        networkType,
+        defaultNetwork: network,
+        templates: selectedTemplates,
+        target,
+        packageManager,
+        ...(rpcFallback ? { rpcFallback } : {}),
+      },
+      rpcUrl,
     }
   }
 }

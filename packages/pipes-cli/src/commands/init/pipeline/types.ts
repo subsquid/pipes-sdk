@@ -12,6 +12,13 @@ export type InitContext = {
    * failure since it predates this run.
    */
   regenerate?: boolean
+  /**
+   * RPC endpoint URL from the interactive prompt. In-memory only: written to
+   * the generated .env, never serialized to pipes.config.json (it may embed
+   * an API key). Absent on the --config / --config-id paths — the .env then
+   * gets a blank RPC_URL= placeholder when config.rpcFallback is on.
+   */
+  rpcUrl?: string
 }
 
 export type InitStage = {

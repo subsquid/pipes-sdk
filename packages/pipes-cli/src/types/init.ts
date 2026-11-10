@@ -39,4 +39,11 @@ export interface Config<N extends NetworkType> {
    * `prepareConfig()` fills it in when absent.
    */
   pipeId?: string
+  /**
+   * EVM only: generate the pipe with an RPC fallback source — the Portal stays
+   * primary and an RPC endpoint takes over while it is unavailable. The
+   * endpoint URL is NOT part of this config (it may embed an API key); it
+   * lives only in the generated .env as RPC_URL.
+   */
+  rpcFallback?: boolean
 }

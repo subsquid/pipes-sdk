@@ -6,7 +6,8 @@ import { postgresDefaults } from '../../templates/config-files/dynamic/docker-co
 import { drizzleConfigTemplate } from '../../templates/config-files/static/drizzle-config.js'
 import { type RenderedTemplate, renderTemplates } from '../render-templates.js'
 import { renderSchemasTemplate } from '../schema-builder/index.js'
-import type { TargetArtifacts } from './target-artifacts.js'
+import { rpcEnvFileLine, rpcEnvSchemaField } from './rpc-env.js'
+import type { TargetArtifacts, TargetBuildOptions } from './target-artifacts.js'
 import { insertEntries, uniqueSchemaNames } from './target-tables.js'
 
 const targetTemplate = `
@@ -34,13 +35,15 @@ drizzleTarget({
     },
   })`
 
-const envSchema = `
+function renderEnvSchema(config: Config<NetworkType>): string {
+  return `
 import { z } from 'zod'
 
 const env = z.object({
   DB_CONNECTION_STR: z.string(),
-}).parse(process.env)
+${rpcEnvSchemaField(config)}}).parse(process.env)
 `
+}
 
 function renderTargetCode(rendered: RenderedTemplate[]): string {
   return Mustache.render(targetTemplate, {
@@ -49,22 +52,22 @@ function renderTargetCode(rendered: RenderedTemplate[]): string {
   })
 }
 
-function renderEnvFile(): string {
-  return `DB_CONNECTION_STR=postgresql://${postgresDefaults.user}:${postgresDefaults.password}@localhost:${postgresDefaults.port}/${postgresDefaults.db}\n`
+function renderEnvFile(config: Config<NetworkType>, options?: TargetBuildOptions): string {
+  return `DB_CONNECTION_STR=postgresql://${postgresDefaults.user}:${postgresDefaults.password}@localhost:${postgresDefaults.port}/${postgresDefaults.db}\n${rpcEnvFileLine(config, options?.rpcUrl)}`
 }
 
 function renderSchemasFile(rendered: RenderedTemplate[]): string {
   return renderSchemasTemplate(rendered.map(({ artifacts }) => artifacts.postgresSchema))
 }
 
-export function buildPostgresTarget(config: Config<NetworkType>): TargetArtifacts {
+export function buildPostgresTarget(config: Config<NetworkType>, options?: TargetBuildOptions): TargetArtifacts {
   const rendered = renderTemplates(config)
 
   return {
     targetCode: renderTargetCode(rendered),
-    envSchema,
+    envSchema: renderEnvSchema(config),
     files: [
-      { path: '.env', content: renderEnvFile(), preserveExisting: true },
+      { path: '.env', content: renderEnvFile(config, options), preserveExisting: true },
       { path: 'src/schemas.ts', content: renderSchemasFile(rendered) },
       { path: 'drizzle.config.ts', content: drizzleConfigTemplate },
     ],

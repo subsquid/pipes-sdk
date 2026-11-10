@@ -5,6 +5,28 @@ import { makeTestContext } from '../testing/make-context.js'
 import { writeTargetFilesStage } from './write-target-files.js'
 
 describe('writeTargetFilesStage', () => {
+  it('writes the prompted RPC URL into .env when the fallback is on', async () => {
+    const { ctx, writer } = makeTestContext({
+      target: 'clickhouse',
+      rpcFallback: true,
+      rpcUrl: 'https://rpc.example.com/v2/KEY',
+    })
+
+    await writeTargetFilesStage.run(ctx)
+
+    const env = writer.createFileIfAbsentCalls.find((c) => c.relativePath === '.env')
+    expect(env?.content).toContain('RPC_URL=https://rpc.example.com/v2/KEY')
+  })
+
+  it('writes a blank RPC_URL placeholder when the fallback is on but no URL was prompted', async () => {
+    const { ctx, writer } = makeTestContext({ target: 'postgresql', rpcFallback: true })
+
+    await writeTargetFilesStage.run(ctx)
+
+    const env = writer.createFileIfAbsentCalls.find((c) => c.relativePath === '.env')
+    expect(env?.content).toContain('RPC_URL=\n')
+  })
+
   it('creates the .env file for a clickhouse target', async () => {
     const erc20 = getTemplate('evm', 'erc20Transfers')!
     const { ctx, writer } = makeTestContext({
