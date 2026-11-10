@@ -245,6 +245,64 @@ describe('StreamBuffer', () => {
     })
   })
 
+  describe('immediate flush while the consumer is busy', () => {
+    it('joins the chunks that arrive before the consumer takes the batch', async () => {
+      const buffer = new StreamBuffer({ maxBytes: 10000, maxIdleTime: 300, maxWaitTime: 5000 })
+
+      await buffer.put(makeData(['a'], 10), true)
+      await buffer.put(makeData(['b'], 10), true)
+
+      const result = await buffer.take()
+      expect(result?.blocks).toEqual(['a', 'b'])
+
+      buffer.close()
+    })
+
+    it('holds the producer once the waiting batch reaches maxBytes', async () => {
+      const buffer = new StreamBuffer({ maxBytes: 100, maxIdleTime: 300, maxWaitTime: 5000 })
+
+      await buffer.put(makeData(['a'], 50), true)
+
+      let held = true
+      const putPromise = buffer.put(makeData(['b'], 60), true).then(() => {
+        held = false
+      })
+      await Promise.resolve()
+      expect(held).toBe(true)
+
+      const result = await buffer.take()
+      await putPromise
+
+      expect(result?.blocks).toEqual(['a', 'b'])
+      expect(held).toBe(false)
+
+      buffer.close()
+    })
+
+    it('does not flush the next batch with the idle timer of the batch taken', async () => {
+      const buffer = new StreamBuffer({ maxBytes: 10000, maxIdleTime: 300, maxWaitTime: 5000 })
+
+      await buffer.put(makeData(['a'], 10), true)
+      expect((await buffer.take())?.blocks).toEqual(['a'])
+
+      let next: unknown[] | undefined
+      const takePromise = buffer.take().then((data) => {
+        next = data?.blocks
+      })
+
+      await vi.advanceTimersByTimeAsync(301)
+      await buffer.put(makeData(['b'], 10))
+      await vi.advanceTimersByTimeAsync(100)
+      expect(next).toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(300)
+      await takePromise
+      expect(next).toEqual(['b'])
+
+      buffer.close()
+    })
+  })
+
   describe('close', () => {
     it('should return undefined from take after close', async () => {
       const buffer = new StreamBuffer({ maxBytes: 1000, maxIdleTime: 100, maxWaitTime: 5000 })
