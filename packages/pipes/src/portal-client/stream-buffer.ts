@@ -69,6 +69,11 @@ export class StreamBuffer<B> {
       clearTimeout(this.waitTimeout)
       this.waitTimeout = undefined
     }
+    // Armed for the batch taken now; left set, it would flush the next batch early.
+    if (this.idleTimeout != null) {
+      clearTimeout(this.idleTimeout)
+      this.idleTimeout = undefined
+    }
 
     const result = this.buffer
     this.buffer = undefined
@@ -122,7 +127,13 @@ export class StreamBuffer<B> {
 
     this.hasDataSignal.resolve()
 
-    if (flushImmediate || this.buffer.meta.bytes >= this.maxBytes) {
+    // An immediate flush makes the batch available but does not wait for it: chunks that arrive
+    // while the consumer is busy join the waiting batch. Only a full buffer holds the producer.
+    if (flushImmediate) {
+      this.flushSignal.resolve()
+    }
+
+    if (this.buffer.meta.bytes >= this.maxBytes) {
       this.flushSignal.resolve()
       await this.consumedSignal.promise()
     }
