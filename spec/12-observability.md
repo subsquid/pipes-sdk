@@ -1,6 +1,6 @@
 # 12 — Observability (OB-n)
 
-Required signals. Concrete metric names, routes, and payload schemas: IB-40…IB-46.
+Required signals. Concrete metric names, routes, and payload schemas: IB-40…IB-47.
 Bands: 1–9 progress, 10–19 pressure & errors, 20–29 lifecycle, 30–39 alarm states.
 
 ## Progress

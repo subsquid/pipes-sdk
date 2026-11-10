@@ -13,7 +13,14 @@ import type { PersistedState, ReferenceModel } from '../oracle/reference-model.j
 import { type PostgresSnapshot, validatePostgresSnapshot } from '../oracle/validators.js'
 import { type Observation, PIPE_ID, TABLE_NAMES, type TableName, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
-import { type FullStreamScenario, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
+import {
+  type FullStreamScenario,
+  type ScenarioPortal,
+  childSourceOf,
+  s1FullStream,
+  s3FullStream,
+  sourceOf,
+} from '../scenarios/full-stream.js'
 import type { KillEvidence, StatementJournalEntry, StatementKillPoint } from './kill-switch.js'
 import { postgresDdl, postgresPool, streamPostgres } from './pipe.js'
 import { readPostgresSnapshot, rowsOfPostgres } from './probe.js'
@@ -91,7 +98,7 @@ function applicationName(): string {
  * The end state comes from the scenario and the simulator, not the pipe: the oracle follows the
  * pipe, so it agrees with a pipe that stopped early.
  */
-export async function runToEnd<Sim extends { chain: MockChainPortal }>({
+export async function runToEnd<Sim extends { chain: ScenarioPortal }>({
   scenario,
   simulator,
   database,
@@ -107,11 +114,12 @@ export async function runToEnd<Sim extends { chain: MockChainPortal }>({
   model.recover(persistedOf(before))
 
   const follower = scenario.follower(model, simulator, simulator.chain.requests.length)
+  const source = sourceOf(scenario, simulator)
   const pool = postgresPool({ dsn: database.dsn, schema: database.schema, application: applicationName() })
   try {
     await streamPostgres({
       range: scenario.range,
-      url: simulator.chain.url,
+      ...source,
       pool,
       schema: database.schema,
       logger: testLogger(),
@@ -154,7 +162,7 @@ export async function runUnwatched<Sim extends { chain: MockChainPortal }>({
   try {
     await streamPostgres({
       range: scenario.range,
-      url: simulator.chain.url,
+      ...sourceOf(scenario, simulator),
       pool,
       schema: database.schema,
       logger: testLogger(),
@@ -210,7 +218,7 @@ export async function runKilled<Sim extends { chain: MockChainPortal }>({
     point,
     options: {
       range: scenario.range,
-      url: simulator.chain.url,
+      ...childSourceOf(scenario, simulator),
       dsn: database.dsn,
       schema: database.schema,
       application,

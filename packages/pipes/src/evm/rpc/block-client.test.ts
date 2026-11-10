@@ -1,9 +1,13 @@
+import { setTimeout as wait } from 'node:timers/promises'
+
 import { EvmRpcDataSource, Rpc } from '@subsquid/evm-rpc'
-import { test as base, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
+import { makeCapabilityProbe } from '~/core/fallback/capability.js'
 import { ForkException } from '~/portal-client/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
 
-import { EvmRpcBlockClient } from './block-client.js'
+import { EvmRpcBlockClient, RPC_FORK_WINDOW } from './block-client.js'
 
 /**
  * Network-free surface tests for the RPC block client — construction, identity, and the synthetic
@@ -87,11 +91,9 @@ describe('EvmRpcBlockClient', () => {
 type InnerBatch = { blocks: unknown[]; finalizedHead?: { number: number; hash: string } }
 
 /** Replaces the evm-rpc hot stream with `batches`, then throws `end` if it is an error, or waits forever on `'hang'`. */
-const withInnerStream = base.extend<{ innerStream: (batches: InnerBatch[], end?: Error | 'hang') => void }>({
+const withInnerStream = withPortal.extend<{ innerStream: (batches: InnerBatch[], end?: Error | 'hang') => void }>({
   innerStream: async ({}, use) => {
     const spy = vi.spyOn(EvmRpcDataSource.prototype, 'getStream')
-    // The stream reads the finalized head before its first batch.
-    const finalizedHead = vi.spyOn(Rpc.prototype, 'getLatestBlockhash').mockResolvedValue({ number: 0, hash: '0x00' })
 
     await use((batches, end) => {
       spy.mockImplementation(async function* () {
@@ -106,7 +108,6 @@ const withInnerStream = base.extend<{ innerStream: (batches: InnerBatch[], end?:
     })
 
     spy.mockRestore()
-    finalizedHead.mockRestore()
   },
 })
 
@@ -124,11 +125,12 @@ async function collect(client: EvmRpcBlockClient) {
 describe('EvmRpcBlockClient stream', () => {
   withInnerStream(
     'ends the stream on abort while evm-rpc waits for the next block',
-    async ({ innerStream }) => {
+    async ({ innerStream, portal: open }) => {
       // evm-rpc cannot cancel a request; without the race a graceful stop waits for a block forever.
       innerStream([{ blocks: [], finalizedHead: { number: 90, hash: '0x5a' } }], 'hang')
+      const portal = await open({ latest: 100, finalized: 2 })
       const abort = new AbortController()
-      const client = new EvmRpcBlockClient({ rpc: { url: KEYED_URL } })
+      const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
 
       let batches = 0
       for await (const _ of client.getStream(evmQuery, { request: { abort: abort.signal } })) {
@@ -141,37 +143,113 @@ describe('EvmRpcBlockClient stream', () => {
     2000,
   )
 
-  withInnerStream('passes a finality update that carries no blocks', async ({ innerStream }) => {
+  withInnerStream('passes a finality update that carries no blocks', async ({ innerStream, portal: open }) => {
     const finalizedHead = { number: 90, hash: '0x5a' }
     innerStream([{ blocks: [] }, { blocks: [], finalizedHead }])
+    const portal = await open({ latest: 100, finalized: 2 })
 
-    const batches = await collect(new EvmRpcBlockClient({ rpc: { url: KEYED_URL } }))
+    const batches = await collect(new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } }))
 
     expect(batches).toHaveLength(1)
     expect(batches[0]).toMatchObject({ blocks: [], head: { finalized: finalizedHead } })
   })
 
-  withInnerStream('gives the translated fork error the number of the forked block', async ({ innerStream }) => {
-    // The canonical window read fails, so the error keeps the blocks that evm-rpc sent.
-    const read = vi.spyOn(Rpc.prototype, 'getBlockBatch').mockRejectedValue(new Error('unreachable'))
-    const sqdFork = Object.assign(new Error('fork'), {
+  /** The fork that evm-rpc throws: only the parent of the forked block. */
+  function sqdFork(parent: { number: number; hash: string }) {
+    return Object.assign(new Error('fork'), {
       isSqdForkException: true,
       expectedParentHash: '0xbb',
-      previousBlocks: [
-        { number: 98, hash: '0x98' },
-        { number: 99, hash: '0x99' },
-      ],
+      previousBlocks: [parent],
     })
-    innerStream([], sqdFork)
+  }
 
-    const error = await collect(new EvmRpcBlockClient({ rpc: { url: KEYED_URL } })).catch((e) => e)
+  withInnerStream(
+    'gives the translated fork error the forked block and the canonical window below it',
+    async ({ innerStream, portal: open }) => {
+      const portal = await open({ latest: 40, finalized: 2 })
+      const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+      const parent = await client.getHead()
+      innerStream([], sqdFork(parent!))
+
+      const error = await collect(client).catch((e) => e)
+      const numbers = error.canonicalBlocks.map((block: { number: number }) => block.number)
+
+      expect(error).toBeInstanceOf(ForkException)
+      expect(error.query).toEqual({ fromBlock: 41, parentBlockHash: '0xbb' })
+      expect(numbers).toEqual(Array.from({ length: RPC_FORK_WINDOW }, (_, i) => 41 - RPC_FORK_WINDOW + i))
+      expect(error.canonicalBlocks.at(-1)).toEqual(parent)
+    },
+  )
+
+  withInnerStream(
+    'keeps the one parent block when the chain no longer holds it',
+    async ({ innerStream, portal: open }) => {
+      const portal = await open({ latest: 8, finalized: 2 })
+      const replaced = { number: 5, hash: '0x05' }
+      innerStream([], sqdFork(replaced))
+
+      const error = await collect(new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })).catch((e) => e)
+
+      expect(error).toBeInstanceOf(ForkException)
+      expect(error.canonicalBlocks).toEqual([replaced])
+    },
+  )
+
+  withInnerStream('keeps the one parent block when the window read fails', async ({ innerStream, portal: open }) => {
+    const portal = await open({ latest: 8, finalized: 2 })
+    const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+    const parent = await client.getHead()
+    innerStream([], sqdFork(parent!))
+    const read = vi.spyOn(Rpc.prototype, 'getBlockBatch').mockRejectedValue(new Error('unreachable'))
+
+    const error = await collect(client).catch((e) => e)
     read.mockRestore()
 
     expect(error).toBeInstanceOf(ForkException)
-    expect(error.query).toEqual({ fromBlock: 100, parentBlockHash: '0xbb' })
-    expect(error.canonicalBlocks).toEqual([
-      { number: 98, hash: '0x98' },
-      { number: 99, hash: '0x99' },
-    ])
+    expect(error.canonicalBlocks).toEqual([parent])
+  })
+
+  withPortal('gives hot blocks above the finalized head the finalized head of the chain', async ({ portal: open }) => {
+    // Without it, a pipe with no stored watermark keeps no rollback chain for these blocks.
+    const portal = await open({ latest: 110, finalized: 100 })
+    const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+    const finalized = await client.getHead({ finalized: true })
+    const query = { type: 'evm', fields: {}, includeAllBlocks: true, fromBlock: 101, toBlock: 103 } as never
+
+    const first = await client.getStream(query)[Symbol.asyncIterator]().next()
+
+    expect(first.value.blocks[0].header.number).toBe(101)
+    expect(first.value.head.finalized).toEqual(finalized)
+  })
+
+  withPortal('stops polling the endpoint once the stream is stopped', async ({ portal: open }) => {
+    // The stream asks past the head, so evm-rpc polls the head until it is stopped.
+    const portal = await open({ latest: 5, finalized: 5 })
+    const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+    const abort = new AbortController()
+    const query = { type: 'evm', fields: {}, fromBlock: 10 } as never
+
+    setTimeout(() => abort.abort(), 50)
+    for await (const _ of client.getStream(query, { request: { abort: abort.signal } })) {
+    }
+    await wait(150)
+    const callsAtStop = portal.rpcCalls.length
+    await wait(400)
+
+    expect(portal.rpcCalls.length).toBe(callsAtStop)
+  })
+
+  withPortal('stops polling the endpoint after a capability probe times out', async ({ portal: open }) => {
+    const portal = await open({ latest: 5, finalized: 5 })
+    const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+    const probe = makeCapabilityProbe(client, { type: 'evm', fields: {}, fromBlock: 0 } as never, { timeoutMs: 50 })
+
+    const result = await probe({ number: 10, hash: '0x10' })
+    await wait(150)
+    const callsAtStop = portal.rpcCalls.length
+    await wait(400)
+
+    expect(result.ok).toBe(false)
+    expect(portal.rpcCalls.length).toBe(callsAtStop)
   })
 })

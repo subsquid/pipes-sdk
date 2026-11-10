@@ -317,6 +317,19 @@ is a pre-serialized JSON **string**; `dataSize` is its length.
 **IB-46 — Sentinels.** `sqd_processed_block = −1` means "no batch processed yet";
 consumers MUST NOT read it as a block number.
 
+**IB-47 — Fallback metrics.** A pipe with a source list (16) adds these gauges to
+`GET /metrics`. A single-source pipe does not have them. All carry the label `id`:
+
+- `sqd_fallback_active` (+ label `source`): 1 for the active source, 0 for a standby (OB-60).
+- `sqd_fallback_source_health` (+ labels `source`, `state` ∈ healthy|unhealthy|unknown,
+  `check`, `reason`, `code`): 1 for the current state, 0 for the others. Only the
+  `unhealthy` series carries the cause labels. The other series carry empty values (OB-61).
+- `sqd_fallback_switches`: the cumulative switch count. It is a gauge, so it has no
+  `_total` suffix (OB-62).
+- `sqd_fallback_lag_blocks` (OB-63) and `sqd_fallback_staleness_ms` (OB-64). A pipe has no
+  series for a value that is not available.
+- `sqd_fallback_chain_stalled`: 1 while the chain stalls, 0 at other times (OB-65).
+
 *(This whole surface currently lacks golden fixtures and version markers — GAP-16.)*
 
 ## Error registry

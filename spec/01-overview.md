@@ -8,6 +8,8 @@ applies user-composed decoding/transformation, and delivers the result to a **si
 that persists both the data and a resume cursor. The hot path is: portal stream →
 batch assembly → decode/transform → sink commit → cursor advance — repeated from the
 resume point to the head of the chain, then following the head in real time.
+A pipe can also read from an ordered list of sources: portals, JSON-RPC endpoints or
+custom clients (16).
 
 The system exists for one job: converting raw on-chain history into user-shaped
 datasets **exactly once per block**, surviving process crashes, portal outages, and
@@ -17,7 +19,7 @@ chain reorganizations without human intervention.
 
 | Actor | Role | Direction |
 |---|---|---|
-| Portal | block-data producer; sole source of chain truth (ordering, linkage, finality, canonical chain on fork) | in |
+| Block source | block-data producer: a portal, or the active member of a source list (16); sole source of chain truth (ordering, linkage, finality, canonical chain on fork) | in |
 | Pipeline author | declares queries, transforms, sink configuration; supplies `onData`-style callbacks | in (code) |
 | Sink storage | the system the sink writes to (database, warehouse, files) | out |
 | Dashboard / monitoring | consumes the observability HTTP surface and metrics | out |
@@ -44,8 +46,9 @@ chain reorganizations without human intervention.
 ## Non-goals
 
 - **NG1 — Chain-integrity verification.** The pipe does not independently verify
-  parent-hash linkage or block authenticity; the portal is trusted for ordering,
-  linkage, and canonical-chain selection (ADR-1).
+  parent-hash linkage or block authenticity; the block source is trusted for ordering,
+  linkage, and canonical-chain selection (ADR-1). A source that is not a portal does the
+  linkage check in its own adapter (ADR-25).
 - **NG2 — Multi-writer coordination.** Two concurrently running pipes with the same
   pipe id are not a supported configuration; behavior is defined only where a binding
   provides an explicit lock (see INV-15, IB-24).
@@ -62,7 +65,7 @@ chain reorganizations without human intervention.
 
 | Party | Verified | Trusted | Must never be able to cause |
 |---|---|---|---|
-| Portal | response envelope shape (schema-validated per block); fork signal consistency at the level of CN/INV guards (e.g. INV-14's ancestor rule) | block ordering, parent linkage, finality assignment, canonical chain content | silent data corruption that violates a structural invariant — contract violations MUST halt with a coded error, not corrupt state (FM-11, FM-13…FM-16) |
+| Block source (a portal, or each member of a source list: 16) | response envelope shape (schema-validated per block); fork signal consistency at the level of CN/INV guards (e.g. INV-14's ancestor rule) | block ordering, parent linkage, finality assignment, canonical chain content | silent data corruption that violates a structural invariant — contract violations MUST halt with a coded error, not corrupt state (FM-11, FM-13…FM-16) |
 | Pipeline author code | nothing (arbitrary code in-process) | purity where declared (RS-10), schema of produced rows (validated per binding) | corruption of *another* pipe's state; violation of cursor/data atomicity provided by the sink harness |
 | Sink storage | startup compatibility checks (engine/schema preconditions) | transactional/append semantics it advertises | — (its failures map to FM-20…FM-27) |
 | Dashboard | — | read-only consumer | any state change (the observability surface is read-only) |

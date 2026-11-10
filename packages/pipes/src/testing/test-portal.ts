@@ -8,6 +8,7 @@ import {
   PortalChain,
   type StreamEndpoint,
 } from './portal-chain.js'
+import { type MockRpcCall, type RpcRequest, answerRpc } from './portal-rpc.js'
 import {
   LOOPBACK,
   WireHead,
@@ -103,11 +104,23 @@ export type MockPortalOptions = {
   maxAddresses?: number
   /** Called before a stream request is answered, to hold it back. */
   delay?: (request: { endpoint: StreamEndpoint; query: MockPortalRequest['query'] }) => Promise<void> | void
+  /** Called before a JSON-RPC request (one call or a batch) is answered, to hold it back. */
+  rpcDelay?: (calls: readonly MockRpcCall[]) => Promise<void> | void
 }
+
+export type { MockRpcCall } from './portal-rpc.js'
 
 export type MockChainPortal = MockPortal & {
   /** Every stream request, in the order the portal received them, with the status it got. */
   requests: MockPortalRequest[]
+  /**
+   * The JSON-RPC endpoint over the same chain: an EVM node answering `eth_chainId`,
+   * `eth_blockNumber`, `eth_getBlockByNumber` and `eth_getLogs`. A fault set with `fail` reaches the
+   * next request of either kind.
+   */
+  rpcUrl: string
+  /** Every JSON-RPC call, in the order the portal received them, with what it answered. */
+  rpcCalls: MockRpcCall[]
   /** Extends the chain above the head and moves the head to the last new block. */
   append(...blocks: MockPortalBlock[]): void
   /**
@@ -173,6 +186,7 @@ export function mockPortal(
 
 async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal> {
   const chain = new PortalChain(options)
+  const rpcCalls: MockRpcCall[] = []
 
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     const body = await readBody(req)
@@ -202,6 +216,27 @@ async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal>
       return
     }
 
+    if (url === '/rpc') {
+      const parsed = JSON.parse(body) as RpcRequest | RpcRequest[]
+      const batch = Array.isArray(parsed)
+      const requests = batch ? parsed : [parsed]
+      const calls: MockRpcCall[] = requests.map(({ method, params }) => ({ method, params: params ?? [] }))
+      rpcCalls.push(...calls)
+
+      await options.rpcDelay?.(calls)
+      const fault = chain.takeFault()
+      const replies =
+        fault !== undefined && 'status' in fault ? [] : requests.map((request) => answerRpc(chain, request))
+      const envelopes = requests.map((request, i) => ({ jsonrpc: '2.0', id: request.id ?? null, ...replies[i] }))
+
+      writeRpc(res, batch ? envelopes : envelopes[0], fault)
+      for (const [i, call] of calls.entries()) {
+        Object.assign(call, fault === undefined ? replies[i] : { fault: faultName(fault) })
+      }
+
+      return
+    }
+
     if (url === '/stream' || url === '/finalized-stream') {
       const endpoint: StreamEndpoint = url === '/stream' ? 'stream' : 'finalized-stream'
       const query = JSON.parse(body)
@@ -225,10 +260,14 @@ async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal>
     })
   })
 
+  const url = getServerAddress(server)
+
   return {
     server,
-    url: getServerAddress(server),
+    url,
+    rpcUrl: `${url}/rpc`,
     requests: chain.requests,
+    rpcCalls,
     append: (...blocks) => chain.append(blocks),
     fork: (at, branch) => chain.fork(at, branch),
     setHead: (head) => chain.setHead(head),
@@ -239,6 +278,42 @@ async function chainPortal(options: MockPortalOptions): Promise<MockChainPortal>
         server.closeAllConnections()
         server.close((err) => (err ? reject(err) : resolve()))
       }),
+  }
+}
+
+function faultName(fault: ChainFault): string {
+  if ('status' in fault) {
+    return `status ${fault.status}`
+  }
+
+  return 'stallAfter' in fault ? 'stall' : 'cutAfter' in fault ? 'cut' : 'line'
+}
+
+/**
+ * A JSON-RPC answer, or the fault that replaces it: an error status, a response held open, half the
+ * body, or a line in place of the body. A JSON-RPC body has no blocks to send first, so the
+ * counts of a stall, a cut or a line do not apply.
+ */
+function writeRpc(res: ServerResponse, body: unknown, fault: ChainFault | undefined) {
+  if (fault !== undefined && 'status' in fault) {
+    res.writeHead(fault.status, fault.retryAfter != null ? { 'Retry-After': fault.retryAfter } : {})
+    res.end()
+
+    return
+  }
+
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  const text = JSON.stringify(body)
+
+  if (fault === undefined) {
+    res.end(text)
+  } else if ('stallAfter' in fault) {
+    // Held open until the client gives up on it or the portal closes.
+    res.flushHeaders()
+  } else if ('cutAfter' in fault) {
+    res.end(text.slice(0, Math.floor(text.length / 2)))
+  } else {
+    res.end(fault.line)
   }
 }
 

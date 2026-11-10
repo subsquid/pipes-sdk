@@ -6,8 +6,10 @@ import { resolveForkCursor } from '~/core/fork.js'
 import { TargetState, createTarget } from '~/core/target.js'
 import { BlockCursor } from '~/core/types.js'
 import { evmPortalStream } from '~/evm/index.js'
+import { EvmRpcBlockClient } from '~/evm/rpc/block-client.js'
 import { HttpError } from '~/http-client/index.js'
 import { PortalClient } from '~/portal-client/client.js'
+import { ForkException } from '~/portal-client/index.js'
 
 import { MOCK_GENESIS_TIMESTAMP, mockBlock } from './evm/mock-block.js'
 import { withPortal } from './portal-fixture.js'
@@ -377,6 +379,97 @@ describe('mockPortal over a chain', () => {
     ])
     expect(before?.number).toBe(10)
     expect(state?.latest.number).toBe(12)
+  })
+})
+
+async function rpc(portal: MockChainPortal, method: string, params: unknown[] = []) {
+  return fetch(portal.rpcUrl, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
+}
+
+async function rpcResult(portal: MockChainPortal, method: string, params: unknown[] = []) {
+  const body = (await (await rpc(portal, method, params)).json()) as { result: any }
+
+  return body.result
+}
+
+/** Every block with logs an RPC reader of `query` delivers, as the block number and its log addresses. */
+async function rpcLogBlocks(portal: MockChainPortal, query: Record<string, unknown>) {
+  const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+  const stream = client.getStream({ type: 'evm', fromBlock: 0, fields: FIELDS, ...query } as any)
+
+  const result: { number: number; addresses: string[] }[] = []
+  for await (const batch of stream) {
+    for (const block of batch.blocks as any[]) {
+      if ((block.logs ?? []).length > 0) {
+        result.push({ number: block.header.number, addresses: block.logs.map((l: any) => l.address) })
+      }
+    }
+  }
+
+  return result
+}
+
+describe('mockPortal over JSON-RPC', () => {
+  withPortal('serves an RPC reader the logs it serves a portal reader', async ({ portal: open }) => {
+    const portal = await open({ blocks, latest: 8, finalized: 8 })
+    const query = { toBlock: 8, logs: [{}] }
+
+    const overStream = (await streamAll(portal, query))
+      .filter((block) => (block.logs ?? []).length > 0)
+      .map((block) => ({ number: block.header.number, addresses: block.logs.map((l: any) => l.address) }))
+    const overRpc = await rpcLogBlocks(portal, query)
+
+    expect(overRpc).toEqual(overStream)
+    expect(overRpc.map(({ number }) => number)).toEqual([3, 5, 7])
+  })
+
+  withPortal('reports a fork to an RPC reader anchored on a replaced block', async ({ portal: open }) => {
+    const portal = await open({ latest: 8, finalized: 2 })
+    const anchor = await rpcResult(portal, 'eth_getBlockByNumber', ['0x5', false])
+
+    portal.fork(3)
+    const client = new EvmRpcBlockClient({ rpc: { url: portal.rpcUrl } })
+    const read = async () => {
+      const stream = client.getStream({ type: 'evm', fromBlock: 6, toBlock: 8, parentBlockHash: anchor.hash } as any)
+      for await (const _ of stream) {
+      }
+    }
+
+    await expect(read()).rejects.toBeInstanceOf(ForkException)
+  })
+
+  withPortal('answers heights and blocks by tag, and no block past the head', async ({ portal: open }) => {
+    const portal = await open({ latest: 8, finalized: 5 })
+
+    const height = await rpcResult(portal, 'eth_blockNumber')
+    const finalized = await rpcResult(portal, 'eth_getBlockByNumber', ['finalized', false])
+    const pastHead = await rpcResult(portal, 'eth_getBlockByNumber', ['0x9', false])
+    const child = await rpcResult(portal, 'eth_getBlockByNumber', ['0x6', false])
+
+    expect(height).toBe('0x8')
+    expect(finalized.number).toBe('0x5')
+    expect(pastHead).toBeNull()
+    expect(child.parentHash).toBe((await rpcResult(portal, 'eth_getBlockByNumber', ['0x5', false])).hash)
+  })
+
+  withPortal('serves a queued fault to the next JSON-RPC request, and records it', async ({ portal: open }) => {
+    const portal = await open({ latest: 8 })
+    portal.fail({ status: 503 })
+
+    const failed = await rpc(portal, 'eth_blockNumber')
+    const answered = await rpcResult(portal, 'eth_blockNumber')
+
+    expect(failed.status).toBe(503)
+    expect(answered).toBe('0x8')
+    expect(portal.rpcCalls.map(({ fault, result }) => fault ?? result)).toEqual(['status 503', '0x8'])
+  })
+
+  withPortal('answers a method it does not know with a JSON-RPC error', async ({ portal: open }) => {
+    const portal = await open({ latest: 8 })
+
+    const body = (await (await rpc(portal, 'debug_traceBlockByNumber', ['0x1'])).json()) as { error: { code: number } }
+
+    expect(body.error.code).toBe(-32601)
   })
 })
 

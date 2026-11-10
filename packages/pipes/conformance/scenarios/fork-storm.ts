@@ -4,7 +4,7 @@ import { type MockChainPortal, mockPortal } from '~/testing/index.js'
 import { type Cursor, type OracleRow, ReferenceModel } from '../oracle/reference-model.js'
 import { Replay } from '../oracle/replay.js'
 import { erc20Logs, inStoreOrder, numbers } from './erc20.js'
-import type { FullStreamClass, FullStreamScenario } from './full-stream.js'
+import type { FullStreamClass, FullStreamScenario, ScenarioPortal } from './full-stream.js'
 
 /** Three replacements, each deeper than the previous one, ending at the finalized floor. */
 export const STORM = { from: 0, to: 21, floor: 3, heads: [9, 13, 17], ancestors: [7, 5, 3] } as const
@@ -37,7 +37,9 @@ function block(number: number, branch: number) {
   })
 }
 
-export function forkStorm(durability: FullStreamClass): FullStreamScenario<StormSimulator> {
+export function forkStorm<Sim extends { chain: ScenarioPortal } = StormSimulator>(
+  durability: FullStreamClass,
+): FullStreamScenario<Sim> {
   const ranges = [{ from: STORM.from, to: STORM.to }]
   const rowsUpTo = (at: Cursor | undefined) => {
     if (at === undefined) return []
@@ -68,6 +70,19 @@ export function forkStorm(durability: FullStreamClass): FullStreamScenario<Storm
 }
 
 export async function forkStormPortal(): Promise<StormSimulator> {
+  return { chain: await stormPortal() }
+}
+
+/**
+ * One portal of the storm. A request moves it through every fork whose head the request has
+ * passed: one portal meets them one at a time, and the second portal of a pair, which the pipe may
+ * first ask past several heads, catches up to the same branch. `onRequest` runs after the forks.
+ */
+export async function stormPortal({
+  onRequest,
+}: {
+  onRequest?: (query: { fromBlock: number }) => void
+} = {}): Promise<MockChainPortal> {
   let branch = 0
   const chain: MockChainPortal = await mockPortal({
     blocks: numbers(0, STORM.heads[0]).map((number) => block(number, 0)),
@@ -76,7 +91,7 @@ export async function forkStormPortal(): Promise<StormSimulator> {
     blocksPerResponse: 3,
     previousBlocks: 32,
     delay: ({ query }) => {
-      if (branch < STORM.heads.length && query.fromBlock > STORM.heads[branch]) {
+      while (branch < STORM.heads.length && query.fromBlock > STORM.heads[branch]) {
         const ancestor = STORM.ancestors[branch]
         branch++
         const end = branch < STORM.heads.length ? STORM.heads[branch] : STORM.to
@@ -85,8 +100,10 @@ export async function forkStormPortal(): Promise<StormSimulator> {
           numbers(ancestor + 1, end).map((number) => block(number, branch)),
         )
       }
+
+      onRequest?.(query)
     },
   })
 
-  return { chain }
+  return chain
 }

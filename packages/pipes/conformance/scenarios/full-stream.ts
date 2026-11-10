@@ -1,4 +1,5 @@
 import type { BlockCursor } from '~/core/index.js'
+import type { EvmFallbackOptions, EvmSourceSpec } from '~/evm/evm-fallback.js'
 import type { MockChainPortal } from '~/testing/index.js'
 
 import {
@@ -37,6 +38,49 @@ export type FullStreamScenario<Sim extends { chain: ScenarioPortal }> = {
   rowsUpTo: (cursor: Cursor | undefined) => OracleRow[]
   /** A follower for one run, whose first request is `from` in the portal's log. */
   follower: (model: ReferenceModel, simulator: Sim, from: number) => Follower
+  /** A source list to read instead of `chain.url` (spec/16): portal URLs, or specs such as an RPC source. */
+  source?: (simulator: Sim) => { source: EvmSourceSpec[]; fallback?: EvmFallbackOptions }
+}
+
+/** What a run reads: one portal URL, or a source list with its fallback options. */
+export type RunSource = { source: string | EvmSourceSpec[]; fallback?: EvmFallbackOptions }
+
+/** The scenario's source list, or the simulator's one portal. Every run reads its source here. */
+export function sourceOf<Sim extends { chain: ScenarioPortal }>(
+  scenario: FullStreamScenario<Sim>,
+  simulator: Sim,
+): RunSource {
+  return scenario.source?.(simulator) ?? { source: simulator.chain.url }
+}
+
+/** The simulator's one portal, for a store whose harness reads no source list: it refuses a scenario with one. */
+export function onePortalOf<Sim extends { chain: ScenarioPortal }>(
+  scenario: FullStreamScenario<Sim>,
+  simulator: Sim,
+): string {
+  if (scenario.source !== undefined) {
+    throw new Error('this store runs no source-list scenario: its harness reads one portal')
+  }
+
+  return simulator.chain.url
+}
+
+/**
+ * The source as a killed run's child reads it. A function does not cross the process boundary, so
+ * a fallback clock stays behind and the child's fallback runs on the real clock.
+ */
+export function childSourceOf<Sim extends { chain: ScenarioPortal }>(
+  scenario: FullStreamScenario<Sim>,
+  simulator: Sim,
+): RunSource {
+  const source = sourceOf(scenario, simulator)
+  if (source.fallback === undefined) {
+    return source
+  }
+
+  const { clock: _, ...detection } = source.fallback.detection ?? {}
+
+  return { source: source.source, fallback: { ...source.fallback, detection } }
 }
 
 /** S1 as a full-stream class: one commit per batch, no fork. */
@@ -58,7 +102,10 @@ export function s1FullStream(durability: FullStreamClass): FullStreamScenario<S1
 }
 
 /** S3 as a full-stream class: an unfinalized tail, a floor that rises once, one fork. */
-export function s3FullStream(durability: FullStreamClass, options: S3Options = {}): FullStreamScenario<S3Simulator> {
+export function s3FullStream<Sim extends { chain: ScenarioPortal } = S3Simulator>(
+  durability: FullStreamClass,
+  options: S3Options = {},
+): FullStreamScenario<Sim> {
   return {
     range: { from: S3.from, to: S3.to },
     ranges: S3_RANGES,

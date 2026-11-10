@@ -19,17 +19,19 @@ pubsub/       class C: the Pub/Sub sink, publishing to a stand-in bus in the tes
 
 Store folders use the following files where the scenario applies:
 
-| File | What it is |
-|---|---|
-| `pipe.ts` | the ERC-20 pipe into this store |
-| `probe.ts` | reads the store back: state, rows, residue |
-| `kill-switch.ts` | stops the child at one step of this store's commit protocol: a file operation for Parquet, an SQL statement for Postgres, a Storage Write append or a query job for BigQuery, an HTTP request for ClickHouse, a statement on the state file or a publish call for Pub/Sub |
-| `killed-run.ts` | the child process: the pipe with the kill switch armed |
-| `harness.ts` | fixtures, and `runToEnd`, `runKilled`, `crashAt`, `resumeToEnd` |
-| `<scenario>.test.ts` | one uninterrupted run (CT-1) |
-| `fork-depth.test.ts` | S3 at depths 1, 3 and 6 with different response partitions; crash/restart at the finality boundary |
-| `fork-history.test.ts` | partial canonical windows with missing finality or cascading rollback (ClickHouse and BigQuery) |
-| `<scenario>-crash.test.ts` | the run killed at each commit step, then restarted (CT-2) |
+| File                       | What it is                                                                                                                                                                                                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pipe.ts`                  | the ERC-20 pipe into this store                                                                                                                                                                                                                                           |
+| `probe.ts`                 | reads the store back: state, rows, residue                                                                                                                                                                                                                                |
+| `kill-switch.ts`           | stops the child at one step of this store's commit protocol: a file operation for Parquet, an SQL statement for Postgres, a Storage Write append or a query job for BigQuery, an HTTP request for ClickHouse, a statement on the state file or a publish call for Pub/Sub |
+| `killed-run.ts`            | the child process: the pipe with the kill switch armed                                                                                                                                                                                                                    |
+| `harness.ts`               | fixtures, and `runToEnd`, `runKilled`, `crashAt`, `resumeToEnd`                                                                                                                                                                                                           |
+| `<scenario>.test.ts`       | one uninterrupted run (CT-1)                                                                                                                                                                                                                                              |
+| `fork-depth.test.ts`       | S3 at depths 1, 3 and 6 with different response partitions; crash/restart at the finality boundary                                                                                                                                                                        |
+| `fork-history.test.ts`     | partial canonical windows with missing finality or cascading rollback (ClickHouse and BigQuery)                                                                                                                                                                           |
+| `fallback.test.ts`         | S1, S3 at every fork depth and the fork storm over a source list (spec/16): two portals, or a portal and an RPC source; the primary fails part-way, and the store must end as a single-source run leaves it                                                               |
+| `random-faults.test.ts`    | S1 and S3 over a source list of three sources, one of them read over JSON-RPC, where every request may fail at random (CT-4); a seed fixes the faults, and a failed run logs them                                                                                         |
+| `<scenario>-crash.test.ts` | the run killed at each commit step, then restarted (CT-2)                                                                                                                                                                                                                 |
 
 ## What every run checks
 
@@ -48,8 +50,8 @@ when they check observable guarantees against a controlled history and an
 independent expected result. Target-specific mechanisms and edge cases belong
 beside the target, even when exercising them requires the whole pipe.
 
-`oracle/*.test.ts`, `probe.test.ts`, `kill-switch.test.ts`, and `harness.test.ts`
-test the measuring tools themselves. Their location does not make them evidence
+`oracle/*.test.ts`, `scenarios/*.test.ts`, `probe.test.ts`, `kill-switch.test.ts`, and
+`harness.test.ts` test the measuring tools themselves. Their location does not make them evidence
 that the pipeline passes the contract. A `CT-*` requirement may also have useful
 coverage in a component or adapter suite.
 
@@ -68,12 +70,12 @@ Pub/Sub cannot take a message back, so its store is two parts: the producer's st
 
 ## Names
 
-| Code | Meaning |
-|---|---|
-| CT-1, CT-2 | one uninterrupted run; a run killed at each commit step |
+| Code                | Meaning                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------- |
+| CT-1, CT-2          | one uninterrupted run; a run killed at each commit step                            |
 | class K, T, W, A, C | the durability classes (spec/06): Parquet, Postgres, BigQuery, ClickHouse, Pub/Sub |
-| S1 (`backfill`) | a steady backfill over deep history |
-| S3 (`fork`) | an unfinalized tail, a floor that rises once, and one fork below the head |
+| S1 (`backfill`)     | a steady backfill over deep history                                                |
+| S3 (`fork`)         | an unfinalized tail, a floor that rises once, and one fork below the head          |
 
 ## Running
 

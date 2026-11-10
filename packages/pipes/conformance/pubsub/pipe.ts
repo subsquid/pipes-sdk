@@ -74,7 +74,7 @@ export function streamPubsub({
   })
   const resolveFork = target.resolveFork as NonNullable<typeof target.resolveFork>
 
-  return erc20Stream({ range, url, logger, observe })
+  return erc20Stream({ range, source: url, logger, observe })
     .pipe((tables) => ({ rows: inBlockOrder(tables) }))
     .pipeTo({
       ...target,

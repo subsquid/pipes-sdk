@@ -7,7 +7,9 @@ import { type StatementJournalEntry, type StatementKillRunOptions, armStatementK
  * whatever transaction it held open, as after a real crash. Every batch and every fork is
  * journaled before the store sees it, with a synchronous write, so the journal survives the kill.
  */
-const { range, url, dsn, schema, application, journal, point } = JSON.parse(process.argv[2]) as StatementKillRunOptions
+const { range, source, fallback, dsn, schema, application, journal, point } = JSON.parse(
+  process.argv[2],
+) as StatementKillRunOptions
 
 const record = journalTo<StatementJournalEntry>(journal)
 
@@ -27,7 +29,8 @@ const pool = postgresPool({ dsn, schema, application })
 try {
   await streamPostgres({
     range,
-    url,
+    source,
+    fallback,
     pool,
     schema,
     logger: childLogger(),

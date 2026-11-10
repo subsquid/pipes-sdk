@@ -1,5 +1,8 @@
+import { isDeepStrictEqual } from 'node:util'
+
+import type { BlockCursor } from '~/core/index.js'
 import { MOCK_GENESIS_TIMESTAMP, mockBlock } from '~/testing/evm/index.js'
-import { type MockChainPortal, mockPortal } from '~/testing/index.js'
+import { type MockChainPortal, type MockPortalOptions, type MockRpcCall, mockPortal } from '~/testing/index.js'
 
 import {
   type Cursor,
@@ -8,7 +11,8 @@ import {
   type OracleState,
   ReferenceModel,
 } from '../oracle/reference-model.js'
-import { erc20Logs, inStoreOrder, numbers } from './erc20.js'
+import { type Observation, erc20Logs, inStoreOrder, numbers } from './erc20.js'
+import type { Follower } from './full-stream.js'
 
 /**
  * S3 reduced to one fork (spec/11), for a full-stream class. The run starts at a head whose tail is
@@ -141,6 +145,69 @@ export function s3EndState({ ancestor = S3.ancestor }: S3Options = {}): OracleSt
   }
 }
 
+function requireSame(label: string, actual: unknown, expected: unknown): void {
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new Error(`${label} is ${JSON.stringify(actual)}, the S3 chain has ${JSON.stringify(expected)}`)
+  }
+}
+
+/** A finalized head as the chain reports it: number and hash, no timestamp. */
+function floorAt(number: number) {
+  return { number, hash: hashAt(number, 0) }
+}
+
+/**
+ * Feeds the oracle a run's batches and forks, checked against the S3 chain rather than a request
+ * log. It is for a run no log can order: in a source list, a prefetch that a switch abandons stays
+ * in the log, unanswered or unread; an RPC source finds a fork itself and answers no 409.
+ *
+ * A batch's blocks must be the chain's, on the branch its last block is on. A fork's canonical
+ * chain must be the chain the run ends on. The pipe's floor must be one the chain reported
+ * (INV-2), and the oracle gets the floor the chain last reported, never the pipe's view.
+ */
+export function s3ChainFollower(
+  model: ReferenceModel,
+  reported: () => readonly number[],
+  ancestor: number = S3.ancestor,
+): Follower {
+  return {
+    batch({ current, finalized }: Observation) {
+      if (current.hash === undefined) {
+        throw new Error(`the batch cursor ${current.number} has no hash`)
+      }
+
+      const branch = branchOf({ number: current.number, hash: current.hash }, ancestor)
+      const previous = model.readState().current?.number
+      const first = previous === undefined ? S3.from : previous + 1
+      const covered = numbers(first, current.number).map((number) => cursorAt(number, number > ancestor ? branch : 0))
+
+      requireSame('the batch cursor', current, covered.at(-1))
+
+      const floors = reported()
+      const invented =
+        finalized !== undefined && !floors.some((number) => isDeepStrictEqual(finalized, floorAt(number)))
+      if (invented) {
+        throw new Error(
+          `INV-2: the pipe holds the finalized head ${JSON.stringify(finalized)}, which the chain never reported`,
+        )
+      }
+
+      const last = floors.at(-1)
+      model.batch(covered, last === undefined ? {} : { finalized: floorAt(last) })
+    },
+    fork(canonical: BlockCursor[]) {
+      const expected = canonical.map((block) => {
+        const { number, hash } = canonicalAt(block.number, ancestor)
+
+        return { number, hash }
+      })
+
+      requireSame('the canonical chain', canonical, expected)
+      model.fork(expected)
+    },
+  }
+}
+
 /** The oracle for S3, as a full-stream class. */
 export function s3Oracle(durability: DurabilityClass, { ancestor = S3.ancestor }: S3Options = {}): ReferenceModel {
   return new ReferenceModel({
@@ -187,4 +254,109 @@ export async function s3Portal({
   })
 
   return portal
+}
+
+/** The highest block a JSON-RPC request asks for, by number or as the end of a log range; -1 for none. */
+export function highestAsked(calls: readonly MockRpcCall[]): number {
+  const asked = calls.flatMap(({ method, params }) => {
+    const block = method === 'eth_getLogs' ? (params[0] as { toBlock?: unknown } | undefined)?.toBlock : params[0]
+    const byNumber = (method === 'eth_getBlockByNumber' || method === 'eth_getLogs') && typeof block === 'string'
+
+    return byNumber && block.startsWith('0x') ? [Number.parseInt(block, 16)] : []
+  })
+
+  return Math.max(-1, ...asked)
+}
+
+type WorldHooks = {
+  delay?: (
+    request: Parameters<NonNullable<MockPortalOptions['delay']>>[0],
+    portal: MockChainPortal,
+  ) => Promise<void> | void
+  rpcDelay?: (calls: readonly MockRpcCall[], portal: MockChainPortal) => Promise<void> | void
+}
+
+/** A request that polls the head: the call an RPC reader makes between two fetch rounds. */
+function isHeadPoll(calls: readonly MockRpcCall[]): boolean {
+  return calls.some(
+    ({ method, params }) =>
+      method === 'eth_blockNumber' || (method === 'eth_getBlockByNumber' && params[0] === 'latest'),
+  )
+}
+
+/**
+ * One S3 chain behind several mock portals, as one real chain behind several providers: the first
+ * request of any portal that reaches a step raises the floor or forks the chain on all of them. A
+ * stream request reaches the fork past the head. A JSON-RPC reader never asks past the head, so it
+ * reaches the fork at its first head poll after it asked for the head block: between two fetch
+ * rounds. Inside a round, the blocks and their logs would come from two branches, and the reader
+ * would deliver the old branch's blocks without their logs, which S3's oracle, expecting every
+ * block, cannot follow.
+ */
+export type S3World = {
+  portals: MockChainPortal[]
+  /** Every floor the chain has reported, in order. */
+  reported: number[]
+  /** Opens one more portal over the chain. Its hooks run after the chain has taken the step. */
+  portal(hooks?: WorldHooks): Promise<MockChainPortal>
+}
+
+export function s3World(): S3World {
+  const portals: MockChainPortal[] = []
+  const reported: number[] = [S3.finalized]
+  let raised = false
+  let forked = false
+  let headAsked = false
+
+  const reach = (block: number) => {
+    if (!raised && block >= S3.raiseAt) {
+      raised = true
+      reported.push(S3.raisedTo)
+      for (const portal of portals) {
+        portal.setHead({ finalized: S3.raisedTo })
+      }
+    }
+
+    if (!forked && block >= S3.forkAt) {
+      forked = true
+      for (const portal of portals) {
+        portal.fork(
+          S3.ancestor,
+          numbers(S3.ancestor + 1, S3.to).map((number) => blockAt(number, 1)),
+        )
+      }
+    }
+  }
+
+  return {
+    portals,
+    reported,
+    async portal({ delay, rpcDelay }: WorldHooks = {}) {
+      const portal: MockChainPortal = await mockPortal({
+        blocks: numbers(S3.from, S3.latest).map((number) => blockAt(number, 0)),
+        latest: S3.latest,
+        finalized: S3.finalized,
+        blocksPerResponse: S3.blocksPerResponse,
+        delay: async (request) => {
+          reach(request.query.fromBlock)
+
+          await delay?.(request, portal)
+        },
+        rpcDelay: async (calls) => {
+          const asked = highestAsked(calls)
+          reach(asked)
+          if (headAsked && isHeadPoll(calls)) {
+            reach(S3.forkAt)
+          }
+
+          headAsked ||= asked >= S3.latest
+
+          await rpcDelay?.(calls, portal)
+        },
+      })
+      portals.push(portal)
+
+      return portal
+    },
+  }
 }
