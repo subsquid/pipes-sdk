@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MalformedPortalResponseError, MissingForkAncestorError } from '~/core/errors.js'
 import { defaultLogger } from '~/core/logger.js'
 import { HttpClient, HttpError } from '~/http-client/index.js'
-import { PortalClient } from '~/portal-client/client.js'
+import { PortalClient, isBlockStreamClient } from '~/portal-client/client.js'
 import { isForkException } from '~/portal-client/fork-exception.js'
 import { streamBodyTimeout } from '~/portal-client/stream-timeout.js'
 import { MockPortal, MockResponse, mockPortal } from '~/testing/index.js'
@@ -622,5 +622,37 @@ describe('PortalClient.getStream abort', () => {
 
     expect(batches.flatMap((batch) => batch.blocks)).toHaveLength(1)
     expect(getEventListeners(signal, 'abort')).toHaveLength(0)
+  })
+})
+
+describe('isBlockStreamClient', () => {
+  const complete = {
+    finalized: false,
+    getUrl: () => 'mock://x',
+    getMetadata: async () => ({ dataset: 'x', aliases: [], real_time: true, start_block: 0 }),
+    getHead: async () => undefined,
+    resolveTimestamp: async () => 0,
+    getStream: () => ({ [Symbol.asyncIterator]: async function* () {} }),
+  }
+
+  it('accepts a real PortalClient and any complete implementation', () => {
+    expect(isBlockStreamClient(new PortalClient({ url: 'http://localhost:1/datasets/x' }))).toBe(true)
+    expect(isBlockStreamClient(complete)).toBe(true)
+  })
+
+  it('rejects a partial implementation — every member of the contract is required', () => {
+    // A `PortalStream` reads `finalized` and calls all five methods, so classifying a half-built
+    // object as a client would defer the failure to deep inside a stream.
+    for (const missing of ['finalized', 'getUrl', 'getMetadata', 'getHead', 'resolveTimestamp', 'getStream']) {
+      const partial: Record<string, unknown> = { ...complete }
+      delete partial[missing]
+      expect(isBlockStreamClient(partial), `missing ${missing}`).toBe(false)
+    }
+  })
+
+  it('rejects non-objects', () => {
+    expect(isBlockStreamClient(undefined)).toBe(false)
+    expect(isBlockStreamClient(null)).toBe(false)
+    expect(isBlockStreamClient('http://portal.example/datasets/x')).toBe(false)
   })
 })

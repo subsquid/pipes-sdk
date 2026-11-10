@@ -20,3 +20,5 @@ coverage
 
 # Ignore SQLite DB created during tests
 *.db
+*.db-shm
+*.db-wal
