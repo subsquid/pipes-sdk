@@ -6,7 +6,7 @@ import { type RequestJournalEntry, type RequestKillRunOptions, armRequestKillSwi
  * armed to die with SIGKILL at one request. Every batch and every fork is journaled before the
  * store sees it, with a synchronous write, so the journal survives the kill.
  */
-const { range, url, server, database, application, repair, journal, point } = JSON.parse(
+const { range, source, fallback, server, database, application, repair, journal, point } = JSON.parse(
   process.argv[2],
 ) as RequestKillRunOptions
 
@@ -28,7 +28,8 @@ const client = clickhouseClient({ server, database, application })
 try {
   await streamClickhouse({
     range,
-    url,
+    source,
+    fallback,
     client,
     repair,
     logger: childLogger(),

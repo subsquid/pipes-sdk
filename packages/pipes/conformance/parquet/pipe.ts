@@ -23,7 +23,7 @@ export function streamParquet({
   logger: Logger
   observe: (observation: Observation) => void
 }): Promise<void> {
-  return erc20Stream({ range, url, logger, observe }).pipeTo(
+  return erc20Stream({ range, source: url, logger, observe }).pipeTo(
     parquetTarget({
       dir,
       tables: TABLES,

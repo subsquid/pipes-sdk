@@ -1,6 +1,7 @@
 import { type ClickHouseClient, createClient } from '@clickhouse/client'
 
 import type { BlockCursor, Logger } from '~/core/index.js'
+import type { EvmFallbackOptions, EvmSourceSpec } from '~/evm/evm-fallback.js'
 import type { ClickhouseStore } from '~/targets/clickhouse/clickhouse-store.js'
 import { clickhouseTarget } from '~/targets/clickhouse/index.js'
 
@@ -76,7 +77,8 @@ const REPAIRS: Record<Repair, ((ctx: RepairContext) => Promise<void>) | undefine
  */
 export function streamClickhouse({
   range,
-  url,
+  source,
+  fallback,
   client,
   repair,
   logger,
@@ -85,7 +87,8 @@ export function streamClickhouse({
   onRollback,
 }: {
   range: { from: number; to: number }
-  url: string
+  source: string | EvmSourceSpec[]
+  fallback?: EvmFallbackOptions
   client: ClickHouseClient
   repair: Repair
   logger: Logger
@@ -114,7 +117,7 @@ export function streamClickhouse({
   })
   const resolveFork = target.resolveFork as NonNullable<typeof target.resolveFork>
 
-  return erc20Stream({ range, url, logger, observe }).pipeTo({
+  return erc20Stream({ range, source, fallback, logger, observe }).pipeTo({
     ...target,
     resolveFork: (canonical) => {
       onFork(canonical)

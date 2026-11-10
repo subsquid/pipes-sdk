@@ -1,6 +1,7 @@
 import pg from 'pg'
 
 import type { BlockCursor } from '~/core/index.js'
+import type { EvmFallbackOptions, EvmSourceSpec } from '~/evm/evm-fallback.js'
 
 import type { Observation } from '../scenarios/erc20.js'
 
@@ -47,7 +48,8 @@ export type StatementJournalEntry =
 /** What the parent hands the child, as JSON in its one argument. */
 export type StatementKillRunOptions = {
   range: { from: number; to: number }
-  url: string
+  source: string | EvmSourceSpec[]
+  fallback?: EvmFallbackOptions
   dsn: string
   schema: string
   /** The child's `application_name`, so the parent can wait for the server to drop its connections. */

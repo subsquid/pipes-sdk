@@ -121,6 +121,14 @@ halt with a coded error. A stall never exceeds the stall budget silently.
 *Acceptance:* fault-injection corpus (CT-4) — each FM row produces its required response.
 *Trace:* FM-1…FM-43, LIV-2, LIV-7.
 
+**REQ-24 — Ingestion through a source outage.** [SHOULD]
+A pipe that reads from a source list continues delivery when its active source fails.
+It goes back to a preferred source when that source recovers. The pipe author writes no
+code for the switch, and a sink cannot see it.
+*Acceptance:* CT-2 forced-switch and reclaim scenarios (16), and a live run that switches
+between a portal and a JSON-RPC endpoint.
+*Trace:* DEF-62, WP-60…WP-69, INV-60, INV-61, LIV-60…LIV-64; ADR-25.
+
 **REQ-23 — Cross-implementation conformance.** [MUST]
 An implementation in any language is conforming iff it passes the CT suite and can
 resume from persistent state (cursor rows, state files, cache) written by the reference

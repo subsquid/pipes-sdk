@@ -74,7 +74,7 @@ export class Replay {
         throw new Error(`the pipe delivered block ${number} past the fork answered to request ${this.#at}`)
       }
 
-      const blocks = answer.kind === 'blocks' ? answer.blocks.map(({ header }) => cursorOf(header)) : []
+      const blocks = sentBlocks(answer).map(({ header }) => cursorOf(header))
       if (blocks.some((block) => block.number === number)) {
         return { index: this.#at, blocks, finalized: head?.finalized }
       }
@@ -105,6 +105,23 @@ export class Replay {
     }
 
     throw new Error('the pipe resolved a fork the portal never answered')
+  }
+}
+
+/**
+ * The whole blocks an answer sent. A stalled, cut or malformed answer sends whole blocks before it
+ * breaks, and the pipe may deliver them; the fork check reads full answers only, since the pipe may
+ * drop a broken answer's blocks and ask again.
+ */
+function sentBlocks(answer: NonNullable<MockPortalRequest['answer']>) {
+  switch (answer.kind) {
+    case 'blocks':
+    case 'stalled':
+    case 'cut':
+    case 'line':
+      return answer.blocks
+    default:
+      return []
   }
 }
 

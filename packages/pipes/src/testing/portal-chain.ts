@@ -147,6 +147,11 @@ export class PortalChain {
     return madeUpHash(number, branch)
   }
 
+  /** The block at `number` as the chain holds it now: the given one, or an empty block it makes up. */
+  block(number: number): ChainBlock {
+    return this.#blocks.get(number) ?? { header: this.header(number) }
+  }
+
   header(number: number): ChainBlock['header'] {
     return (
       this.#blocks.get(number)?.header ?? {
@@ -269,14 +274,24 @@ export class PortalChain {
     return answer
   }
 
-  #answer(endpoint: StreamEndpoint, query: StreamQuery): ChainAnswer {
+  /** The next queued fault, counted as spent by the request that takes it. Stream and JSON-RPC requests share the queue. */
+  takeFault(): ChainFault | undefined {
     const fault = this.#faults[0]
-    if (fault) {
-      fault.times--
-      if (fault.times <= 0) {
-        this.#faults.shift()
-      }
+    if (fault === undefined) {
+      return undefined
+    }
 
+    fault.times--
+    if (fault.times <= 0) {
+      this.#faults.shift()
+    }
+
+    return fault
+  }
+
+  #answer(endpoint: StreamEndpoint, query: StreamQuery): ChainAnswer {
+    const fault = this.takeFault()
+    if (fault) {
       if ('stallAfter' in fault) {
         const answer = this.#serve(endpoint, query)
         const blocks = answer.kind === 'blocks' ? answer.blocks.slice(0, fault.stallAfter) : []

@@ -3,6 +3,7 @@ import { bigint, pgTable, text } from 'drizzle-orm/pg-core'
 import pg from 'pg'
 
 import type { BlockCursor, Logger } from '~/core/index.js'
+import type { EvmFallbackOptions, EvmSourceSpec } from '~/evm/evm-fallback.js'
 import { drizzleTarget } from '~/targets/drizzle/node-postgres/index.js'
 
 import { type Erc20Row, type Observation, TABLE_NAMES, type TableName, erc20Stream } from '../scenarios/erc20.js'
@@ -44,7 +45,8 @@ export function postgresPool({ dsn, schema, application }: { dsn: string; schema
  */
 export function streamPostgres({
   range,
-  url,
+  source,
+  fallback,
   pool,
   schema,
   logger,
@@ -52,7 +54,8 @@ export function streamPostgres({
   onFork,
 }: {
   range: { from: number; to: number }
-  url: string
+  source: string | EvmSourceSpec[]
+  fallback?: EvmFallbackOptions
   pool: pg.Pool
   schema: string
   logger: Logger
@@ -73,7 +76,7 @@ export function streamPostgres({
   })
   const resolveFork = target.resolveFork as NonNullable<typeof target.resolveFork>
 
-  return erc20Stream({ range, url, logger, observe }).pipeTo({
+  return erc20Stream({ range, source, fallback, logger, observe }).pipeTo({
     ...target,
     resolveFork: (canonical) => {
       onFork(canonical)

@@ -15,7 +15,14 @@ import type { Cursor, OracleRow, PersistedState, ReferenceModel } from '../oracl
 import { type ClickhouseSnapshot, validateClickhouseSnapshot } from '../oracle/validators.js'
 import { type Observation, PIPE_ID, TABLE_NAMES, type TableName, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
-import { type FullStreamScenario, type ScenarioPortal, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
+import {
+  type FullStreamScenario,
+  type ScenarioPortal,
+  childSourceOf,
+  s1FullStream,
+  s3FullStream,
+  sourceOf,
+} from '../scenarios/full-stream.js'
 import type { KillEvidence, RequestJournalEntry, RequestKillPoint } from './kill-switch.js'
 import { type ClickhouseServer, type Repair, clickhouseClient, clickhouseDdl, streamClickhouse } from './pipe.js'
 import { readClickhouseSnapshot, rowsOfClickhouse } from './probe.js'
@@ -146,7 +153,7 @@ export async function runToEnd<Sim extends { chain: ScenarioPortal }>({
   try {
     await streamClickhouse({
       range: scenario.range,
-      url: simulator.chain.url,
+      ...sourceOf(scenario, simulator),
       client,
       repair,
       logger: testLogger(),
@@ -194,7 +201,7 @@ export async function runUnwatched<Sim extends { chain: MockChainPortal }>({
   try {
     await streamClickhouse({
       range: scenario.range,
-      url: simulator.chain.url,
+      ...sourceOf(scenario, simulator),
       client,
       repair,
       logger,
@@ -265,7 +272,7 @@ export async function runKilled<Sim extends { chain: MockChainPortal }>({
     point,
     options: {
       range: scenario.range,
-      url: simulator.chain.url,
+      ...childSourceOf(scenario, simulator),
       server: database.server,
       database: database.name,
       application,

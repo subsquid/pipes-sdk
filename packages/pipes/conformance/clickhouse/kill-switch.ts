@@ -5,6 +5,7 @@ import { NodeBaseConnection } from '@clickhouse/client/dist/connection/node_base
 import { NodeHttpConnection } from '@clickhouse/client/dist/connection/node_http_connection.js'
 
 import type { BlockCursor } from '~/core/index.js'
+import type { EvmFallbackOptions, EvmSourceSpec } from '~/evm/evm-fallback.js'
 
 import type { Observation } from '../scenarios/erc20.js'
 import type { ClickhouseServer, Repair } from './pipe.js'
@@ -52,7 +53,8 @@ export type RequestJournalEntry = { batch: Observation } | { fork: BlockCursor[]
 /** What the parent hands the child, as JSON in its one argument. */
 export type RequestKillRunOptions = {
   range: { from: number; to: number }
-  url: string
+  source: string | EvmSourceSpec[]
+  fallback?: EvmFallbackOptions
   server: ClickhouseServer
   database: string
   /** The child's application name, so the parent can wait until the server runs none of its queries. */

@@ -71,7 +71,7 @@ export function streamBigquery({
   })
   const resolveFork = target.resolveFork as NonNullable<typeof target.resolveFork>
 
-  return erc20Stream({ range, url, logger, observe }).pipeTo({
+  return erc20Stream({ range, source: url, logger, observe }).pipeTo({
     ...target,
     resolveFork: (canonical) => {
       onFork(canonical)

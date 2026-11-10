@@ -14,7 +14,7 @@ import type { ReferenceModel } from '../oracle/reference-model.js'
 import { type ChangelogOperation, type PubsubSnapshot, validatePubsubSnapshot } from '../oracle/validators.js'
 import { type Observation, PIPE_ID, inStoreOrder } from '../scenarios/erc20.js'
 import { it as scenarios } from '../scenarios/fixtures.js'
-import { type FullStreamScenario, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
+import { type FullStreamScenario, onePortalOf, s1FullStream, s3FullStream } from '../scenarios/full-stream.js'
 import { type Bus, type BusMessage, startBus } from './bus.js'
 import type { KillEvidence, StepJournalEntry, StepKillPoint } from './kill-switch.js'
 import { PROJECT_ID, TOPIC, streamPubsub } from './pipe.js'
@@ -91,7 +91,7 @@ export async function runToEnd<Sim extends { chain: MockChainPortal }>({
   const follower = scenario.follower(model, simulator, simulator.chain.requests.length)
   await streamPubsub({
     range: scenario.range,
-    url: simulator.chain.url,
+    url: onePortalOf(scenario, simulator),
     bus: pubsub.bus,
     statePath: pubsub.statePath,
     coldStart: coldStart(pubsub),
@@ -157,7 +157,7 @@ export async function runKilled<Sim extends { chain: MockChainPortal }>({
     point,
     options: {
       range: scenario.range,
-      url: simulator.chain.url,
+      url: onePortalOf(scenario, simulator),
       bus: { endpoint: pubsub.bus.endpoint, projectId: pubsub.bus.projectId },
       statePath: pubsub.statePath,
       coldStart: coldStart(pubsub),
