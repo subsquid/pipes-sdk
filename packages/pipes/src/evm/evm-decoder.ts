@@ -374,7 +374,7 @@ export function evmEventDecoder<T extends Events, C extends Contracts>({
   const normalizedContracts =
     contracts && !Factory.isFactory(contracts) ? contracts.map((contract) => contract.toLowerCase()) : undefined
 
-  const childRequests = (address?: string[]): LogRequest[] => {
+  const childRequests = (address?: LogRequest['address']): LogRequest[] => {
     const requests: LogRequest[] = []
 
     if (eventsWithoutParams.length > 0) {

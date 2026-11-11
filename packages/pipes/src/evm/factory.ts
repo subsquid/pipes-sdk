@@ -43,27 +43,64 @@ export interface FactoryPersistentAdapter<T extends InternalFactoryEvent<any>> {
 
 export type DecodedAbiEvent<T extends EventArgs> = ReturnType<AbiEvent<T>['decode']>
 
+export type FactoryLookaheadFilter = 'list' | 'set'
+
 export type FactoryLookaheadOptions = {
   /**
-   * The most child addresses one portal query may carry. Every child-event request repeats the
-   * address list, so the limit counts the addresses of all of them together. When the children
-   * up to a block no longer fit, child events from that block on are fetched by topic alone.
+   * How a query names the children:
    *
-   * @default 5_000
+   * - `'list'`: an address list in every child-event request.
+   * - `'set'`: one fuse8 set per query, that every child-event request refers to. A set costs
+   *   about 1.6 bytes per child, so far more children fit. It also passes about one other address
+   *   in 256, and the decoder drops those logs as it drops the logs of a topic-only query. Only
+   *   workers on the dynamic query engine (2.17.0 and later), behind a portal that forwards
+   *   `sets`, serve such a query. Anywhere else the query fails.
+   *
+   * @default 'list'
    */
-  maxAddresses?: number
+  filter?: FactoryLookaheadFilter
+  /** Read with `filter: 'list'` only */
+  list?: {
+    /**
+     * The most addresses the lists of one query may carry. Every child-event request repeats the
+     * list, so the limit counts the addresses of all of them together: with two child events,
+     * 5,000 holds 2,500 children. When the children up to a block no longer fit, child events from
+     * that block on are fetched by topic alone.
+     *
+     * @default 5_000: about 225 KB, inside the portal's default 256 KiB
+     */
+    maxAddresses?: number
+  }
+  /** Read with `filter: 'set'` only */
+  set?: {
+    /**
+     * The most children the set of one query may hold. When the children up to a block no longer
+     * fit, child events from that block on are fetched by topic alone.
+     *
+     * @default 150_000: about 230 KB, inside the portal's default 256 KiB
+     */
+    maxAddresses?: number
+  }
   /**
-   * The fewest blocks an address-filtered query must cover. A new filter starts a new portal
-   * stream, which is not worth it for a short stretch. Closer than this to the finalized head,
-   * child events are fetched by topic alone for the rest of the run.
+   * The fewest blocks one address filter must cover, in either mode. A new filter starts a new
+   * portal stream, which is not worth it for a short stretch. Closer than this to the finalized
+   * head, child events are fetched by topic alone for the rest of the run.
    *
    * @default 10_000
    */
-  minSegmentBlocks?: number
+  minBlocksPerFilter?: number
 }
 
-const DEFAULT_LOOKAHEAD_MAX_ADDRESSES = 5_000
-const DEFAULT_LOOKAHEAD_MIN_SEGMENT_BLOCKS = 10_000
+/** The lookahead options with the defaults applied and only the limit of the chosen filter */
+export type ResolvedFactoryLookaheadOptions = {
+  filter: FactoryLookaheadFilter
+  maxAddresses: number
+  minBlocksPerFilter: number
+}
+
+const DEFAULT_LOOKAHEAD_MAX_LIST_ADDRESSES = 5_000
+const DEFAULT_LOOKAHEAD_MAX_SET_ADDRESSES = 150_000
+const DEFAULT_LOOKAHEAD_MIN_BLOCKS_PER_FILTER = 10_000
 
 export type ContractFactoryOptions<T extends EventArgs> = {
   address: string | string[]
@@ -159,21 +196,31 @@ export class Factory<T extends EventArgs> {
   }
 
   /** @internal */
-  lookaheadOptions(): Required<FactoryLookaheadOptions> | null {
+  lookaheadOptions(): ResolvedFactoryLookaheadOptions | null {
     const lookahead = this.options.lookahead ?? false
     if (lookahead === false) return null
 
     const options = lookahead === true ? {} : lookahead
-    const maxAddresses = options.maxAddresses ?? DEFAULT_LOOKAHEAD_MAX_ADDRESSES
-    const minSegmentBlocks = options.minSegmentBlocks ?? DEFAULT_LOOKAHEAD_MIN_SEGMENT_BLOCKS
+    const filter = options.filter ?? 'list'
+    if (filter !== 'list' && filter !== 'set') {
+      throw new Error(`lookahead.filter must be 'list' or 'set', got ${String(filter)}`)
+    }
 
-    for (const [name, value] of Object.entries({ maxAddresses, minSegmentBlocks })) {
+    const limits = {
+      'list.maxAddresses': options.list?.maxAddresses ?? DEFAULT_LOOKAHEAD_MAX_LIST_ADDRESSES,
+      'set.maxAddresses': options.set?.maxAddresses ?? DEFAULT_LOOKAHEAD_MAX_SET_ADDRESSES,
+      minBlocksPerFilter: options.minBlocksPerFilter ?? DEFAULT_LOOKAHEAD_MIN_BLOCKS_PER_FILTER,
+    }
+    // The unused limit too: a bad value should fail now, not when someone later changes `filter`
+    for (const [name, value] of Object.entries(limits)) {
       if (!Number.isInteger(value) || value < 1) {
         throw new Error(`lookahead.${name} must be a positive integer, got ${value}`)
       }
     }
 
-    return { maxAddresses, minSegmentBlocks }
+    const maxAddresses = filter === 'set' ? limits['set.maxAddresses'] : limits['list.maxAddresses']
+
+    return { filter, maxAddresses, minBlocksPerFilter: limits.minBlocksPerFilter }
   }
 
   /**

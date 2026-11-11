@@ -59,6 +59,9 @@ export class EvmQueryBuilder<F extends evm.FieldSelection = {}> extends QueryBui
       res.logs = concatQueryLists(res.logs, req.logs)
       res.traces = concatQueryLists(res.traces, req.traces)
       res.stateDiffs = concatQueryLists(res.stateDiffs, req.stateDiffs)
+      if (req.sets) {
+        res.sets = mergeSets(res.sets, req.sets)
+      }
       if (res.includeAllBlocks || req.includeAllBlocks) {
         res.includeAllBlocks = true
       }
@@ -77,6 +80,21 @@ export class EvmQueryBuilder<F extends evm.FieldSelection = {}> extends QueryBui
       transform: (data) => data,
     })
   }
+}
+
+function mergeSets(a: evm.DataRequest['sets'], b: NonNullable<evm.DataRequest['sets']>) {
+  const merged = { ...a }
+
+  for (const [name, set] of Object.entries(b)) {
+    const existing = merged[name]
+    if (existing && existing !== set) {
+      throw new Error(`two requests declare different sets under the name "${name}"`)
+    }
+
+    merged[name] = set
+  }
+
+  return merged
 }
 
 export function evmQuery() {

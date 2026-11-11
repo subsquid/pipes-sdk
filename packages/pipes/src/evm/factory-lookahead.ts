@@ -1,10 +1,11 @@
 import { Logger } from '~/core/logger.js'
 import { PlanRequestArgs, PlannedRequest } from '~/core/query-builder.js'
 import { HttpError } from '~/http-client/index.js'
+import { buildFuse8Set } from '~/internal/fuse8/index.js'
 import { PortalClient } from '~/portal-client/client.js'
-import { DataRequest, Log, LogRequest } from '~/portal-client/query/evm.js'
+import { DataRequest, Log, LogRequest, SetReference } from '~/portal-client/query/evm.js'
 
-import { Factory } from './factory.js'
+import { Factory, FactoryLookaheadFilter } from './factory.js'
 
 /** How often the scan reads the finalized head once it has caught up with it. */
 const FINALIZED_HEAD_POLL_MS = 5_000
@@ -16,6 +17,9 @@ const DISCOVERY_FIELDS = {
   block: { number: true, hash: true },
   log: { address: true, topics: true, data: true, transactionIndex: true, logIndex: true },
 } as const
+
+/** Gives every lookahead in a process its own set name, so two factories never collide in one query. */
+let nextSetId = 0
 
 /**
  * A child value the portal accepts in an address filter. Any other value matches no log address,
@@ -56,7 +60,7 @@ export function decideSegment({
   discovered,
   requestsPerQuery,
   maxAddresses,
-  minSegmentBlocks,
+  minBlocksPerFilter,
   previousSegment,
 }: {
   from: number
@@ -72,14 +76,14 @@ export function decideSegment({
   /** How many child-event requests repeat the address list */
   requestsPerQuery: number
   maxAddresses: number
-  minSegmentBlocks: number
+  minBlocksPerFilter: number
   /** Length of the last filtered segment, 0 before the first */
   previousSegment: number
 }): SegmentDecision {
   const rangeEnd = to ?? Number.POSITIVE_INFINITY
   const ceiling = Math.min(rangeEnd, finalizedHead)
 
-  const nearHead = ceiling < rangeEnd && ceiling - from + 1 < minSegmentBlocks
+  const nearHead = ceiling < rangeEnd && ceiling - from + 1 < minBlocksPerFilter
   if (nearHead) {
     return { kind: 'full-scan', reason: 'it is close to the finalized head' }
   }
@@ -119,14 +123,14 @@ export function decideSegment({
   const budgetBound = budgetEnd <= reachable
   const caughtUp = frontier >= ceiling
   if (budgetBound || caughtUp) {
-    if (lead >= minSegmentBlocks) return filter()
+    if (lead >= minBlocksPerFilter) return filter()
 
     return budgetBound ? tooMany : { kind: 'full-scan', reason: 'it is close to the finalized head' }
   }
 
   // Each filter covers at least twice the blocks of the previous one, so a run changes it only a
   // logarithmic number of times even when the scan is barely faster than the main stream
-  const required = Math.max(minSegmentBlocks, 2 * previousSegment)
+  const required = Math.max(minBlocksPerFilter, 2 * previousSegment)
   if (lead >= required) return filter()
 
   return { kind: 'wait' }
@@ -380,9 +384,11 @@ export class FactoryDiscovery {
  */
 export class FactoryLookahead {
   readonly #factory: Factory<any>
-  readonly #childRequests: (address?: string[]) => LogRequest[]
+  readonly #childRequests: (address?: LogRequest['address']) => LogRequest[]
+  readonly #sets: boolean
+  readonly #setName = `factory-children-${nextSetId++}`
   readonly #maxAddresses: number
-  readonly #minSegmentBlocks: number
+  readonly #minBlocksPerFilter: number
 
   #discovery?: FactoryDiscovery
   #previousSegment = 0
@@ -391,19 +397,23 @@ export class FactoryLookahead {
   constructor({
     factory,
     childRequests,
+    filter = 'list',
     maxAddresses,
-    minSegmentBlocks,
+    minBlocksPerFilter,
   }: {
     factory: Factory<any>
     /** The child-event requests, filtered by `address` when it is given */
-    childRequests: (address?: string[]) => LogRequest[]
+    childRequests: (address?: LogRequest['address']) => LogRequest[]
+    /** `'set'` sends the children as one fuse8 set instead of a list in every request */
+    filter?: FactoryLookaheadFilter
     maxAddresses: number
-    minSegmentBlocks: number
+    minBlocksPerFilter: number
   }) {
     this.#factory = factory
     this.#childRequests = childRequests
+    this.#sets = filter === 'set'
     this.#maxAddresses = maxAddresses
-    this.#minSegmentBlocks = minSegmentBlocks
+    this.#minBlocksPerFilter = minBlocksPerFilter
   }
 
   plan = async ({ from, to, portal, logger }: PlanRequestArgs): Promise<PlannedRequest<DataRequest>> => {
@@ -429,9 +439,10 @@ export class FactoryLookahead {
         finalizedHead: discovery.finalizedHead,
         stored,
         discovered: discovery.children,
-        requestsPerQuery: this.#childRequests().length,
+        // A set travels once per query, however many requests refer to it
+        requestsPerQuery: this.#sets ? 1 : this.#childRequests().length,
         maxAddresses: this.#maxAddresses,
-        minSegmentBlocks: this.#minSegmentBlocks,
+        minBlocksPerFilter: this.#minBlocksPerFilter,
         previousSegment: this.#previousSegment,
       })
 
@@ -441,15 +452,34 @@ export class FactoryLookahead {
 
       if (decision.kind === 'filter') {
         this.#previousSegment = decision.to - from + 1
-        logger.info(
-          `factory lookahead: fetching blocks ${from}…${decision.to} filtered by ${decision.addresses.length} child addresses`,
-        )
 
-        return { request: { logs: this.#childRequests(decision.addresses) }, to: decision.to }
+        return { request: this.#filteredRequest(logger, from, decision.to, decision.addresses), to: decision.to }
       }
 
       await discovery.changed()
     }
+  }
+
+  #filteredRequest(logger: Logger, from: number, to: number, addresses: string[]): DataRequest {
+    // No child yet: an empty list matches nothing, and a set needs at least one value
+    if (!this.#sets || addresses.length === 0) {
+      logger.info(`factory lookahead: fetching blocks ${from}…${to} filtered by ${addresses.length} child addresses`)
+
+      return { logs: this.#childRequests(addresses) }
+    }
+
+    const started = performance.now()
+    const set = buildFuse8Set(addresses)
+    const buildMs = Math.round(performance.now() - started)
+
+    const kib = (set.fuse8.length / 1024).toFixed(1)
+    logger.info(
+      `factory lookahead: fetching blocks ${from}…${to} filtered by a set of ${addresses.length} child addresses (${kib} KiB, built in ${buildMs} ms)`,
+    )
+
+    const reference: SetReference = { set: this.#setName }
+
+    return { sets: { [this.#setName]: set }, logs: this.#childRequests([reference]) }
   }
 
   /** The scan only ever saw finalized blocks, but a fork below them must not leave it stale. */
@@ -484,7 +514,7 @@ export class FactoryLookahead {
       discovered: [],
       requestsPerQuery: 1,
       maxAddresses: this.#maxAddresses,
-      minSegmentBlocks: this.#minSegmentBlocks,
+      minBlocksPerFilter: this.#minBlocksPerFilter,
       previousSegment: 0,
     })
     if (nearHead.kind === 'full-scan') {

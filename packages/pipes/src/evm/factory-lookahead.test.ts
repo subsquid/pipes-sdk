@@ -5,6 +5,7 @@ import { toEventSelector } from 'viem'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createTarget } from '~/core/target.js'
+import { buildFuse8Set, fuse8Contains } from '~/internal/fuse8/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 import { type PortalBlock, encodeEvent, mockBlock } from '~/testing/evm/index.js'
 import {
@@ -304,10 +305,14 @@ async function runPipe(portal: MockChainPortal, options: RunOptions) {
 const SWAP_TOPIC = poolAbi.Swap.topic
 const FLASH_TOPIC = poolAbi.Flash.topic
 
-type LogFilter = { address?: string[]; topic0?: string[] }
+type LogFilter = { address?: (string | { set: string })[]; topic0?: string[] }
 
 function logRequestsOf(request: MockPortalRequest) {
   return (request.query['logs'] ?? []) as LogFilter[]
+}
+
+function setsOf(request: MockPortalRequest) {
+  return (request.query['sets'] ?? {}) as Record<string, { fuse8: string; canaries: string[] }>
 }
 
 function childRequestsOf(request: MockPortalRequest) {
@@ -357,9 +362,24 @@ function assertQueriesCover({
       expect(child.address).toEqual(addresses)
     }
 
+    const required = pools.filter((p) => p.block >= range.from && p.block <= toBlock!).map((p) => p.address)
+
+    const [first] = addresses
+    if (typeof first === 'object') {
+      // One set, declared once, that every child-event request refers to
+      expect(addresses).toHaveLength(1)
+      const set = setsOf(request)[first.set]
+      expect(set).toBeDefined()
+
+      for (const address of required) {
+        expect(fuse8Contains(set!, address), address).toBe(true)
+      }
+
+      continue
+    }
+
     expect(addresses.length * children.length).toBeLessThanOrEqual(maxAddresses)
 
-    const required = pools.filter((p) => p.block >= range.from && p.block <= toBlock!).map((p) => p.address)
     for (const address of required) {
       expect(addresses).toContain(address)
     }
@@ -378,7 +398,7 @@ describe('decideSegment', () => {
     discovered: [] as { address: string; block: number }[],
     requestsPerQuery: 1,
     maxAddresses: 10,
-    minSegmentBlocks: 100,
+    minBlocksPerFilter: 100,
     previousSegment: 0,
   }
 
@@ -525,7 +545,7 @@ describe('Factory lookahead', () => {
     const options = { blocks, finalized: 80, latest: 100 }
 
     const portal = await chainPortal(options)
-    const lookahead = await runPipe(portal, { range: { from: 0, to: 100 }, lookahead: { minSegmentBlocks: 10 } })
+    const lookahead = await runPipe(portal, { range: { from: 0, to: 100 }, lookahead: { minBlocksPerFilter: 10 } })
 
     const fullScan = await runPipe(await chainPortal(options), { range: { from: 0, to: 100 }, lookahead: false })
 
@@ -557,6 +577,48 @@ describe('Factory lookahead', () => {
     expect(lookahead.messages).toContain(
       'factory lookahead: fetching child events by topic from block 81 on, as it is close to the finalized head',
     )
+  })
+
+  it('sends the children as one set and drops the logs of contracts it passes by mistake', async () => {
+    const children = [pool(1), pool(2), pool(3)]
+    const built = buildFuse8Set([...children].sort())
+
+    // The builder is deterministic, so this contract also passes the set the lookahead builds
+    let n = 1_000
+    while (!fuse8Contains(built, pool(n))) n++
+    const impostor = pool(n)
+
+    const blocks = [
+      mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1))] }, { logs: [swap(pool(1))] }] }),
+      mockBlock({ number: 30, transactions: [{ logs: [poolCreated(pool(2)), poolCreated(pool(3))] }] }),
+      mockBlock({ number: 40, transactions: [{ logs: [swap(pool(2)), swap(impostor), swap(pool(99))] }] }),
+    ]
+    const options = { blocks, finalized: 80, latest: 100 }
+
+    const portal = await chainPortal(options)
+    const lookahead = await runPipe(portal, {
+      range: { from: 0, to: 80 },
+      lookahead: { filter: 'set', minBlocksPerFilter: 10 },
+    })
+    const fullScan = await runPipe(await chainPortal(options), { range: { from: 0, to: 80 }, lookahead: false })
+
+    expect(lookahead.rows).toEqual(fullScan.rows)
+    expect(lookahead.rows.map((r) => [r.block, r.contract])).toEqual([
+      [5, pool(1)],
+      [40, pool(2)],
+    ])
+
+    const [request] = mainRequests(portal)
+    const references = childRequestsOf(request!).map((r) => r.address)
+    const [reference] = references[0] as { set: string }[]
+    const set = setsOf(request!)[reference!.set]
+
+    expect(references).toEqual([[reference], [reference]])
+    expect(Object.keys(setsOf(request!))).toEqual([reference!.set])
+    expect(request!.query.toBlock).toBe(80)
+    expect(children.every((child) => fuse8Contains(set!, child))).toBe(true)
+    // Without this the test would not show that a false positive is dropped
+    expect(fuse8Contains(set!, impostor)).toBe(true)
   })
 
   it('is off unless the factory asks for it', async () => {
@@ -597,28 +659,39 @@ describe('Factory lookahead', () => {
   it('takes the defaults for `lookahead: true` and refuses limits below one', async () => {
     const options = { address: FACTORY, event: factoryAbi.PoolCreated, childAddressField: 'pool' as const }
     const database = await contractFactorySqliteStore({ path: ':memory:' })
+    const resolve = (lookahead: FactoryLookaheadOptions | true) =>
+      contractFactory({ ...options, database, lookahead }).lookaheadOptions()
 
-    expect(contractFactory({ ...options, database, lookahead: true }).lookaheadOptions()).toEqual({
-      maxAddresses: 5_000,
-      minSegmentBlocks: 10_000,
-    })
+    expect(resolve(true)).toEqual({ filter: 'list', maxAddresses: 5_000, minBlocksPerFilter: 10_000 })
+    expect(resolve({ filter: 'set' })).toEqual({ filter: 'set', maxAddresses: 150_000, minBlocksPerFilter: 10_000 })
+    // Each filter reads its own limit only
+    expect(resolve({ filter: 'set', list: { maxAddresses: 7 } })).toMatchObject({ maxAddresses: 150_000 })
+    expect(resolve({ set: { maxAddresses: 7 } })).toMatchObject({ filter: 'list', maxAddresses: 5_000 })
+
     expect(() =>
       evmEventDecoder({
         range: { from: 0 },
-        contracts: contractFactory({ ...options, database, lookahead: { minSegmentBlocks: 0 } }),
+        contracts: contractFactory({ ...options, database, lookahead: { minBlocksPerFilter: 0 } }),
         events: { swaps: poolAbi.Swap },
       }),
-    ).toThrow('lookahead.minSegmentBlocks must be a positive integer, got 0')
-    expect(() =>
-      contractFactory({ ...options, database, lookahead: { maxAddresses: 1.5 } }).lookaheadOptions(),
-    ).toThrow('lookahead.maxAddresses must be a positive integer, got 1.5')
+    ).toThrow('lookahead.minBlocksPerFilter must be a positive integer, got 0')
+    expect(() => resolve({ list: { maxAddresses: 1.5 } })).toThrow(
+      'lookahead.list.maxAddresses must be a positive integer, got 1.5',
+    )
+    expect(() => resolve({ set: { maxAddresses: 0 } })).toThrow(
+      'lookahead.set.maxAddresses must be a positive integer, got 0',
+    )
+    expect(() => resolve({ filter: 'sets' as 'set' })).toThrow("lookahead.filter must be 'list' or 'set', got sets")
   })
 
   it('fetches by topic alone when the dataset reports no finalized head', async () => {
     const blocks = [mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), swap(pool(1))] }] })]
     const portal = await chainPortal({ blocks, finalized: null, latest: 50 })
 
-    const { rows, messages } = await runPipe(portal, { range: { from: 0, to: 50 }, lookahead: { minSegmentBlocks: 1 } })
+    const { rows, messages } = await runPipe(portal, {
+      range: { from: 0, to: 50 },
+      lookahead: { minBlocksPerFilter: 1 },
+    })
 
     expect(rows.map((r) => r.block)).toEqual([5])
     expect(portal.requests.filter((r) => r.endpoint === 'finalized-stream')).toEqual([])
@@ -631,7 +704,7 @@ describe('Factory lookahead', () => {
   it('does not scan when the stream starts close to the finalized head', async () => {
     const portal = await chainPortal({ blocks: [], finalized: 95, latest: 100 })
 
-    await runPipe(portal, { range: { from: 90, to: 100 }, lookahead: { minSegmentBlocks: 10 } })
+    await runPipe(portal, { range: { from: 90, to: 100 }, lookahead: { minBlocksPerFilter: 10 } })
 
     expect(portal.requests.filter((r) => r.endpoint === 'finalized-stream')).toEqual([])
     expect(mainRequests(portal).every((r) => !isFiltered(r))).toBe(true)
@@ -648,7 +721,7 @@ describe('Factory lookahead', () => {
     const { rows } = await runPipe(portal, {
       range: { from: 0, to: 100 },
       // Two child-event requests carry the list twice: two children fill four addresses
-      lookahead: { minSegmentBlocks: 10, maxAddresses: 4 },
+      lookahead: { minBlocksPerFilter: 10, list: { maxAddresses: 4 } },
     })
 
     expect(rows.map((r) => [r.block, r.contract])).toEqual([
@@ -676,7 +749,7 @@ describe('Factory lookahead', () => {
     const portal = await chainPortal(options)
     const { rows } = await runPipe(portal, {
       range: { from: 0, to: 100 },
-      lookahead: { minSegmentBlocks: 10 },
+      lookahead: { minBlocksPerFilter: 10 },
       database: first.database,
       resumeAt: 50,
     })
@@ -703,7 +776,7 @@ describe('Factory lookahead', () => {
 
     const { rows, messages } = await runPipe(portal, {
       range: { from: 0, to: 100 },
-      lookahead: { minSegmentBlocks: 1 },
+      lookahead: { minBlocksPerFilter: 1 },
     })
 
     expect(rows.map((r) => r.block)).toEqual([5])
@@ -748,7 +821,7 @@ describe('Factory lookahead', () => {
       event: factoryAbi.PoolCreated,
       childAddressField: (event) => (event.token0 === WETH ? event.pool.toUpperCase().replace('0X', '0x') : 'unknown'),
       database,
-      lookahead: { minSegmentBlocks: 10 },
+      lookahead: { minBlocksPerFilter: 10 },
     })
 
     const rows: unknown[] = []
@@ -776,7 +849,7 @@ describe('Factory lookahead', () => {
     const stop = vi.spyOn(FactoryDiscovery.prototype, 'stop')
     const portal = await chainPortal({ blocks: [], finalized: 1_000, latest: 1_000 })
 
-    await runPipe(portal, { range: { from: 0, to: 500 }, lookahead: { minSegmentBlocks: 10 } })
+    await runPipe(portal, { range: { from: 0, to: 500 }, lookahead: { minBlocksPerFilter: 10 } })
 
     expect(stop).toHaveBeenCalled()
   })
@@ -795,7 +868,7 @@ describe('Factory lookahead', () => {
       factory,
       childRequests: (address) => [{ address, topic0: [SWAP_TOPIC] }],
       maxAddresses: 100,
-      minSegmentBlocks: 10,
+      minBlocksPerFilter: 10,
     })
     const args = { from: 0, to: 500, portal: new PortalClient({ url: portal.url }), logger: captureLogger().logger }
 
@@ -811,13 +884,13 @@ describe('Factory lookahead', () => {
 
   describe('gives the same events as topic-only queries on random chains', () => {
     const scenarios = [
-      { minSegmentBlocks: 1, maxAddresses: 10_000, blocksPerResponse: 13, finalized: 300, withParams: false },
-      { minSegmentBlocks: 25, maxAddresses: 10_000, blocksPerResponse: Infinity, finalized: 300, withParams: true },
-      { minSegmentBlocks: 5, maxAddresses: 12, blocksPerResponse: 7, finalized: 300, withParams: false },
-      { minSegmentBlocks: 5, maxAddresses: 12, blocksPerResponse: 7, finalized: 300, withParams: true },
-      { minSegmentBlocks: 20, maxAddresses: 10_000, blocksPerResponse: 50, finalized: 180, withParams: false },
+      { minBlocksPerFilter: 1, maxAddresses: 10_000, blocksPerResponse: 13, finalized: 300, withParams: false },
+      { minBlocksPerFilter: 25, maxAddresses: 10_000, blocksPerResponse: Infinity, finalized: 300, withParams: true },
+      { minBlocksPerFilter: 5, maxAddresses: 12, blocksPerResponse: 7, finalized: 300, withParams: false },
+      { minBlocksPerFilter: 5, maxAddresses: 12, blocksPerResponse: 7, finalized: 300, withParams: true },
+      { minBlocksPerFilter: 20, maxAddresses: 10_000, blocksPerResponse: 50, finalized: 180, withParams: false },
       {
-        minSegmentBlocks: 3,
+        minBlocksPerFilter: 3,
         maxAddresses: 40,
         blocksPerResponse: 11,
         finalized: 260,
@@ -825,7 +898,7 @@ describe('Factory lookahead', () => {
         slowScan: true,
       },
       {
-        minSegmentBlocks: 2,
+        minBlocksPerFilter: 2,
         maxAddresses: 10_000,
         blocksPerResponse: 5,
         finalized: 299,
@@ -837,8 +910,8 @@ describe('Factory lookahead', () => {
     let filteredQueries = 0
 
     for (const [index, scenario] of scenarios.entries()) {
-      for (const seed of [1, 2, 3]) {
-        it(`scenario ${index}, seed ${seed}`, async () => {
+      for (const [seed, sets] of [1, 2, 3].flatMap((seed) => [false, true].map((sets) => [seed, sets] as const))) {
+        it(`scenario ${index}, seed ${seed}${sets ? ', sets' : ''}`, async () => {
           const { blocks, pools } = randomChain(seed * 100 + index, 300)
           const from = seed * 10
           const range = { from, to: 300 }
@@ -863,7 +936,11 @@ describe('Factory lookahead', () => {
           const lookahead = await runPipe(portal, {
             range,
             withParams: scenario.withParams,
-            lookahead: { minSegmentBlocks: scenario.minSegmentBlocks, maxAddresses: scenario.maxAddresses },
+            lookahead: {
+              filter: sets ? 'set' : 'list',
+              minBlocksPerFilter: scenario.minBlocksPerFilter,
+              [sets ? 'set' : 'list']: { maxAddresses: scenario.maxAddresses },
+            },
             unbuffered: scenario.slowScan,
           })
           const fullScan = await runPipe(await chainPortal(chain), {

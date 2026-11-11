@@ -1,5 +1,5 @@
 import { MOCK_GENESIS_TIMESTAMP } from './evm/mock-block.js'
-import { selectEvm } from './portal-evm.js'
+import { checkEvmSets, selectEvm } from './portal-evm.js'
 import type { WireHead } from './portal-wire.js'
 
 /** A block the chain holds: a header plus the item lists of its network (`logs`, `instructions`, …). */
@@ -306,6 +306,11 @@ export class PortalChain {
 
   /** The answer of a healthy portal. */
   #serve(endpoint: StreamEndpoint, query: StreamQuery): ChainAnswer {
+    const setError = checkEvmSets(query)
+    if (setError) {
+      return { kind: 'refused', message: setError }
+    }
+
     const addresses = countLogAddresses(query)
     if (this.#maxAddresses !== undefined && addresses > this.#maxAddresses) {
       return { kind: 'refused', message: `the query carries ${addresses} addresses, more than ${this.#maxAddresses}` }
@@ -360,10 +365,14 @@ export class PortalChain {
   }
 }
 
+/** Set references cost the query their set, not an address each, so only listed addresses count. */
 function countLogAddresses(query: StreamQuery): number {
-  const requests = (query['logs'] ?? []) as { address?: string[] }[]
+  const requests = (query['logs'] ?? []) as { address?: unknown[] }[]
 
-  return requests.reduce((sum, request) => sum + (request.address?.length ?? 0), 0)
+  return requests.reduce(
+    (sum, request) => sum + (request.address?.filter((value) => typeof value === 'string').length ?? 0),
+    0,
+  )
 }
 
 /** The items of a block the query selects, or `undefined` when it selects none. */
