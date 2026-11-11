@@ -2,7 +2,7 @@ import { BlockStreamClient, PortalBlockStreamOptions, PortalQuery, isForkExcepti
 
 import { BlockCursor } from '../types.js'
 import { safeReturn, withTimeout } from './async.js'
-import { SourceErrorInfo, capabilityFailure, classifyError } from './diagnostics.js'
+import { SourceErrorInfo, classifyError } from './diagnostics.js'
 
 export interface CapabilityProbeOptions {
   /** Report not-capable if the probe slice stays outstanding longer than this. Default 30s. */
@@ -61,24 +61,16 @@ export function makeCapabilityProbe(
 
     const iterator = client.getStream(probeQuery as never, streamOptions)[Symbol.asyncIterator]()
     try {
-      // One batch (or a clean stream end) is enough: it proves the source served the slice. The
-      // timeout rejects with a ready-made cause (a `SourceErrorInfo`, not a bare Error).
-      await withTimeout(iterator.next(), timeoutMs, () =>
-        capabilityFailure(`probe timed out after ${timeoutMs}ms`, 'timeout'),
-      )
+      // One batch (or a clean stream end) is enough: it proves the source served the slice.
+      await withTimeout(iterator.next(), timeoutMs, () => new Error(`probe timed out after ${timeoutMs}ms`))
 
       return { ok: true }
     } catch (e) {
       if (isForkException(e)) return { ok: true }
-      // The timeout rejects with a ready-made cause; a thrown error gets classified.
-      const cause = isErrorInfo(e) ? e : classifyError('capability', e)
-      return { ok: false, cause }
+
+      return { ok: false, cause: classifyError('capability', e) }
     } finally {
       safeReturn(iterator)
     }
   }
-}
-
-function isErrorInfo(e: unknown): e is SourceErrorInfo {
-  return typeof e === 'object' && e != null && 'reason' in e && 'check' in e
 }

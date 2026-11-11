@@ -16,16 +16,10 @@ export function withTimeout<T>(
   if (ms == null) return promise
 
   promise.catch(() => {}) // an abandoned (timed-out) promise must not surface as unhandled
-  // The timer handle stays inside the executor and is reached only through `cancelTimer`, which
-  // starts as a no-op — so the cleanup can never run against an unassigned handle, whatever this
-  // grows into later.
-  let cancelTimer = () => {}
-  const timeout = new Promise<never>((_resolve, reject) => {
-    const timer = setTimeout(() => reject(makeError()), ms)
-    cancelTimer = () => clearTimeout(timer)
-  })
+  const timer = delay(ms)
+  const timeout = timer.promise.then(() => Promise.reject(makeError()))
 
-  return Promise.race([promise, timeout]).finally(() => cancelTimer())
+  return Promise.race([promise, timeout]).finally(() => timer.cancel())
 }
 
 /**

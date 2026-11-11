@@ -71,20 +71,7 @@ export interface FallbackDetectionOptions {
   clock?: () => number
 }
 
-export interface ResolvedFallbackDetection {
-  capabilityProbe: boolean | CapabilityProbeOptions
-  allDownPollMs: number
-  cooldownMs: number
-  livenessFailThreshold: number
-  livenessRecoverThreshold: number
-  capabilityProbeIntervalMs: number
-  maxStalenessMs: number | null
-  maxLagBlocks: number | null
-  freshnessTickMs: number
-  headTtlMs: number
-  headPollTimeoutMs: number | null
-  clock: () => number
-}
+export type ResolvedFallbackDetection = Required<FallbackDetectionOptions>
 
 const DEFAULTS: ResolvedFallbackDetection = {
   capabilityProbe: true,

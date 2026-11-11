@@ -114,19 +114,12 @@ export class EvmRpcBlockClient {
     const { type: _type, fields = {}, fromBlock = 0, toBlock, parentBlockHash, ...request } = query
     const mapper = createWireBlockMapper(fields, request)
 
-    const coarse = mapper.requiredData
     const req: RpcDataRequest = {
       // mapRpcBlock always maps the block's transactions, so full tx objects must be fetched. This
       // is why `RequiredData` carries no `transactions` toggle — it could never be false.
       transactions: true,
-      logs: coarse.logs,
-      receipts: coarse.receipts,
-      traces: coarse.traces,
-      stateDiffs: coarse.stateDiffs,
-      useTraceApi: this.#method.useTraceApi,
-      useDebugTraceBlockByNumber: this.#method.useDebugTraceBlockByNumber,
-      useDebugApiForStateDiffs: this.#method.useDebugApiForStateDiffs,
-      debugTraceTimeout: this.#method.debugTraceTimeout,
+      ...mapper.requiredData,
+      ...this.#method,
     }
 
     const inner = new EvmRpcDataSource({

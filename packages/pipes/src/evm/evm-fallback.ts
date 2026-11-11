@@ -120,10 +120,7 @@ function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http
 export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {
   const sources: FallbackClientSource[] = specs.map((spec, i) => {
     if (typeof spec === 'string') {
-      return {
-        name: `portal-${i}`,
-        client: new PortalClient({ url: spec, finalized: options.finalized, http: portalHttp(options, undefined) }),
-      }
+      spec = { url: spec }
     }
     if (spec.type === 'custom') {
       if (!isBlockStreamClient(spec.client)) {
@@ -132,12 +129,12 @@ export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFall
       return { name: spec.name ?? `custom-${i}`, client: spec.client }
     }
     if (spec.type === 'rpc') {
-      const { type: _type, name, method, strideSize, strideConcurrency, finalized, ...connection } = spec
+      const { type: _type, name = `rpc-${i}`, method, strideSize, strideConcurrency, finalized, ...rpc } = spec
       return {
-        name: name ?? `rpc-${i}`,
+        name,
         client: lazyEvmRpcBlockClient({
-          connection,
-          name: name ?? `rpc-${i}`,
+          rpc,
+          name,
           finalized: finalized ?? options.finalized ?? false,
           method,
           strideSize,
@@ -197,9 +194,12 @@ export function translateMissingRpcPeer(e: unknown, sourceName = 'rpc'): unknown
  * the RPC stack, and a misconfigured RPC source fails with a clear, actionable error instead of an
  * opaque module-not-found at startup. (The RPC stack is declared as optional peer dependencies — a
  * Portal-only consumer never installs it.)
+ *
+ * `config` restates the `EvmRpcBlockClient` options: importing their type would pull the RPC peer
+ * into the type graph.
  */
 function lazyEvmRpcBlockClient(config: {
-  connection: EvmRpcConnectionOptions
+  rpc: EvmRpcConnectionOptions
   name: string
   finalized: boolean
   method?: RpcMethodOptions
@@ -217,19 +217,12 @@ function lazyEvmRpcBlockClient(config: {
       throw translateMissingRpcPeer(e, config.name)
     }
 
-    return new mod.EvmRpcBlockClient({
-      rpc: config.connection,
-      name: config.name,
-      finalized: config.finalized,
-      method: config.method,
-      strideSize: config.strideSize,
-      strideConcurrency: config.strideConcurrency,
-    })
+    return new mod.EvmRpcBlockClient(config)
   })
 
   return {
     finalized: config.finalized,
-    getUrl: () => redactUrl(config.connection.url) ?? config.name,
+    getUrl: () => redactUrl(config.rpc.url) ?? config.name,
     getMetadata: async (): Promise<ApiDataset> => (await load()).getMetadata(),
     // Head-polling a standby RPC source loads the RPC stack — that is fine/desirable: it is exactly
     // when we want to confirm the source is loadable and viable before switching up to it.
