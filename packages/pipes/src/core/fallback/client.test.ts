@@ -1061,6 +1061,40 @@ describe('FallbackClient — standby traffic', () => {
     expect(polls).toBeGreaterThan(0)
   })
 
+  it('skips boundary head polls on a standby when the strategy never reclaims (onFailureOnly)', async () => {
+    const pollsIn = async (preferPrimary: 'eager' | 'onFailureOnly') => {
+      let polls = 0
+      const head = async () => {
+        polls++
+        return cursor(1000)
+      }
+      const s0 = source(
+        's0',
+        async function* () {
+          throw new Error('s0 down')
+        },
+        head,
+      )
+      const s1 = source('s1', async function* () {
+        for (let n = 1; n <= 5; n++) yield batch(n)
+      })
+      const s2 = source('s2', async function* () {}, head)
+
+      const fb = fallback(
+        [s0, s1, s2],
+        { headTtlMs: 0, maxLagBlocks: null, maxStalenessMs: null },
+        { strategy: { preferPrimary } },
+      )
+      expect(await collect(fb)).toEqual([1, 2, 3, 4, 5])
+
+      return polls
+    }
+
+    // WP-63: with no reclaim possible, a non-primary active source is no reason to poll.
+    expect(await pollsIn('onFailureOnly')).toBe(0)
+    expect(await pollsIn('eager')).toBeGreaterThan(0)
+  })
+
   it("prefers a source's cheap `getHeight` over `getHead` for the poll", async () => {
     // On an RPC source `getHeight` is `eth_blockNumber` while `getHead` is a block lookup; only
     // the number is consumed, so the cheap call must win whenever the client offers it.

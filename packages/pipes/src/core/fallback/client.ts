@@ -115,6 +115,8 @@ export class FallbackClient implements BlockStreamClient {
   readonly #detection: ResolvedFallbackDetection
   readonly #strategy: FallbackStrategy | undefined
   readonly #defaultStrategy: FallbackStrategy
+  /** Whether the stock strategy takes a more-preferred source back at a boundary (`eager`). */
+  readonly #reclaims: boolean
   readonly #health: SourceHealth[]
   readonly #logger: Logger
   readonly finalized: boolean
@@ -170,10 +172,10 @@ export class FallbackClient implements BlockStreamClient {
 
     this.#sources = options.sources
     this.#detection = resolveFallbackDetection(options.detection)
+    const stockOptions = typeof options.strategy === 'function' ? undefined : options.strategy
     this.#strategy = typeof options.strategy === 'function' ? options.strategy : undefined
-    this.#defaultStrategy = defaultFallbackStrategy(
-      typeof options.strategy === 'function' ? undefined : options.strategy,
-    )
+    this.#defaultStrategy = defaultFallbackStrategy(stockOptions)
+    this.#reclaims = (stockOptions?.preferPrimary ?? 'eager') === 'eager'
     this.#health = options.sources.map(
       (s) => new SourceHealth(this.#detection, s.probeCapability != null || this.#detection.capabilityProbe !== false),
     )
@@ -498,13 +500,10 @@ export class FallbackClient implements BlockStreamClient {
     cursor: BlockCursor | undefined,
   ): Promise<Extract<FallbackEvent, { type: 'batch' }>> {
     const staleAtBoundary = this.#isStale()
-    // Boundary head polls feed the lag verdict, a custom strategy's snapshot, the
-    // stale-vs-chain-stall distinction, and the reclaim of a recovered more-preferred source.
-    // When none of those can consume them — lag detection off, not stale, stock strategy already
-    // driving the most-preferred source — the poll is pure standby traffic, and at tip pace the
-    // batch cadence outruns `headTtlMs`, so this gate (not the cache) is what bounds it: one
-    // `eth_getBlockByNumber`-class call per block per standby otherwise.
-    const wantHeads = this.#strategy != null || this.#detection.maxLagBlocks != null || staleAtBoundary || active > 0
+    // Poll standbys only when something reads the heads (WP-63): at tip pace the batch cadence
+    // outruns `headTtlMs`, so this gate, not the cache, bounds the standby traffic.
+    const canReclaim = this.#reclaims && active > 0
+    const wantHeads = this.#strategy != null || this.#detection.maxLagBlocks != null || staleAtBoundary || canReclaim
     const others = wantHeads ? await this.#chainHeadOthers(active, cursor) : undefined
     // A boundary can be reached before any block has been delivered — a source may yield an empty
     // batch (the portal answers 204 that way) — so there is not always a position to measure from.
