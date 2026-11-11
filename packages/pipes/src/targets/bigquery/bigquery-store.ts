@@ -160,10 +160,21 @@ type StreamState = StreamTarget & {
 }
 
 /**
- * Closes a proto Writer and its connection. Each close is best-effort: callers run on teardown
- * and error paths, where one failed close must not mask the control flow it is part of.
+ * Fails every write still queued on a connection, then closes it and its proto Writer.
+ *
+ * Closing alone settles nothing: a write in flight on the closed connection keeps its attempt,
+ * and that attempt's deadline timer, alive until the deadline fires. Aborting rejects it at once
+ * with an error that is not retried. Each step is best-effort: callers run on teardown and error
+ * paths, where one failed close must not mask the control flow it is part of.
  */
 function closeConnection({ writer, connection }: { writer: ProtoWriterLike; connection: StreamConnection }): void {
+  try {
+    for (const pending of connection.getPendingWrites()) {
+      pending.abort()
+    }
+  } catch {
+    // best-effort: the connection is dropped either way
+  }
   try {
     writer.close()
   } catch {
@@ -559,18 +570,8 @@ export class BigQueryWriter {
     }
   }
 
-  /**
-   * Fails every write still queued on the stream's connection and closes it, best-effort, then
-   * marks the stream stale so the next attempt reconnects before sending.
-   */
+  /** Drops the stream's connection and marks the stream stale, so the next attempt reconnects. */
   #abandonConnection(stream: StreamState): void {
-    try {
-      for (const pending of stream.connection.getPendingWrites()) {
-        pending.abort()
-      }
-    } catch {
-      // best-effort: the connection is dropped either way
-    }
     closeConnection(stream)
 
     stream.stale = true
@@ -729,9 +730,9 @@ export class BigQueryWriter {
    * the WriterClient open: a caller may own it. The next write opens new streams.
    */
   closeStreams(): void {
-    // Each close is best-effort — a Writer.close() / connection.close() throw must NOT propagate
-    // because we're often called from a finally block during normal shutdown and a single
-    // failed close shouldn't mask the original control flow.
+    // `closeConnection` is best-effort, because we're often called from a finally block during
+    // normal shutdown. It also fails the appends still in flight, so a hung one stops here and
+    // leaves no deadline timer holding the process open after the write has ended.
     for (const state of this.#streams.values()) {
       state.closed = true
       closeConnection(state)

@@ -2033,6 +2033,45 @@ describe('BigQueryWriter — append reporting', () => {
       expect(connectionsOf(store).streamIds()).toHaveLength(2)
     })
 
+    withFakeClock('settles a hung append when its streams are closed, leaving no timer behind', async ({ clock }) => {
+      // A pending deadline is a live timer: left running after the write has failed and torn its
+      // streams down, it would hold the process open for up to the full deadline.
+      let attempts = 0
+      const store = makeStore(({ connection }) => {
+        const stub = connection as unknown as StreamConnectionStub
+
+        return {
+          appendRows: () => {
+            if (stub.getStreamId().includes('/tables/events/')) {
+              return {
+                getResult: async () => Promise.reject(Object.assign(new Error('INVALID_ARGUMENT'), { code: 3 })),
+              }
+            }
+
+            attempts++
+            const hung = new Promise((_, reject) => {
+              stub.getPendingWrites.mockReturnValue([{ abort: () => reject(new Error('aborted')) }])
+            })
+
+            return { getResult: () => hung }
+          },
+          close: () => {},
+        }
+      })
+      store.bindLogger(captureLogger())
+
+      store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+      store.insert('transfers', [{ block_number: 1, value: '1' }])
+      expect(await store.commitBatch().catch((error) => error)).toMatchObject({ code: 3 })
+      expect(clock.getTimerCount()).toBeGreaterThan(0)
+
+      store.closeStreams()
+      await clock.advanceTimersByTimeAsync(0)
+
+      expect(clock.getTimerCount()).toBe(0)
+      expect(attempts).toBe(1)
+    })
+
     withFakeClock('never sends on a stream closed at any point while it reconnects', async ({ clock }) => {
       // The teardown may land anywhere among the awaits of a reconnect, so it is placed after
       // every number of microtasks the reconnect spans in turn. Either the send went out
