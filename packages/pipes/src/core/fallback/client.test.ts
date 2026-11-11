@@ -1527,10 +1527,13 @@ describe('FallbackClient — abort', () => {
     })
 
     const out: number[] = []
-    const stream = fallback([s0, s1]).getStream(QUERY, { request: { abort: controller.signal } })
+    const fb = fallback([s0, s1])
+    const stream = fb.getStream(QUERY, { request: { abort: controller.signal } })
     for await (const b of stream) out.push(...b.blocks.map((x: any) => x.header.number))
 
     expect(out).toEqual([1])
     expect(s1.reads).toHaveLength(0)
+    // The error that the abort caused is not the source's fault.
+    expect(fb.metrics().sources[0].health).not.toBe('unhealthy')
   })
 })

@@ -122,12 +122,18 @@ export type FallbackCommand =
  */
 export type FallbackStrategy = (ctx: FallbackStrategyContext) => FallbackCommand | undefined | void
 
-/** Is a source other than the active one known to be ahead of the pipe's cursor? */
-function fresherSourceAhead(ctx: FallbackStrategyContext): boolean {
-  const cursorNumber = ctx.cursor?.number ?? -1
+/**
+ * Is a source other than the active one known to be ahead of `cursor`? Also useful to a custom
+ * strategy, with `ctx.sources` and `ctx.cursor`.
+ */
+export function fresherSourceAhead(
+  sources: readonly FallbackSourceSnapshot[],
+  cursor: { number: number } | undefined,
+): boolean {
+  const cursorNumber = cursor?.number ?? -1
   // An unhealthy source cannot be switched to, so its (frozen) head is no reason to abandon the
   // active one — that only walks the pipe into an all-down gap.
-  return ctx.sources.some((s) => !s.active && s.health !== 'unhealthy' && s.head != null && s.head > cursorNumber)
+  return sources.some((s) => !s.active && s.health !== 'unhealthy' && s.head != null && s.head > cursorNumber)
 }
 
 /** Tuning for the stock strategy — the plain-data alternative to a custom function. */
@@ -179,7 +185,7 @@ export function defaultFallbackStrategy(options?: DefaultFallbackStrategyOptions
         }
         // Answering without progressing is a stall too — hand off, but only to somewhere better.
         // If nothing is ahead of us, everyone is equally stuck and churning would not help.
-        if (ctx.event.stale && fresherSourceAhead(ctx)) {
+        if (ctx.event.stale && fresherSourceAhead(ctx.sources, ctx.cursor)) {
           return { action: 'failover' }
         }
         if (preferPrimary === 'eager' && ctx.activeIndex !== undefined) {
@@ -199,7 +205,7 @@ export function defaultFallbackStrategy(options?: DefaultFallbackStrategyOptions
       }
 
       case 'stall': {
-        if (ctx.event.stale && fresherSourceAhead(ctx)) {
+        if (ctx.event.stale && fresherSourceAhead(ctx.sources, ctx.cursor)) {
           return { action: 'failover' }
         }
 
