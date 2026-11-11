@@ -1,22 +1,10 @@
-import {
-  LogLevel,
-  Logger,
-  PortalCache,
-  PortalStream,
-  SpanHooks,
-  createTransformer,
-  mergeOutputs,
-  pipeLogger,
-  registerFallbackMetrics,
-} from '~/core/index.js'
+import { LogLevel, Logger, PortalCache, SpanHooks, pipeLogger, registerFallbackMetrics } from '~/core/index.js'
 import { MetricsServer } from '~/core/metrics-server.js'
-import { ProgressTrackerOptions, progressTracker } from '~/core/progress-tracker.js'
+import { ProgressTrackerOptions } from '~/core/progress-tracker.js'
 
-import { BlockStreamClient, PortalClientOptions, castBlocks, getBlockSchema } from '../portal-client/index.js'
-import * as evm from '../portal-client/query/evm.js'
+import { BlockStreamClient, PortalClientOptions } from '../portal-client/index.js'
 import { EvmFallbackOptions, EvmSourceSpec, createEvmFallbackClient } from './evm-fallback.js'
-import { EvmOutputs, EvmStreamData } from './evm-portal-source.js'
-import { EvmPortalData, EvmQueryBuilder } from './evm-query-builder.js'
+import { EvmOutputs, evmPortalStream } from './evm-portal-source.js'
 
 /**
  * Where an EVM stream reads its blocks from:
@@ -96,34 +84,5 @@ export function evmStream<Out extends EvmOutputs>({
     blockSource = source
   }
 
-  type F = { block: { hash: true; number: true } }
-  const query = new EvmQueryBuilder<F>().addFields({
-    block: { hash: true, number: true },
-  })
-
-  return new PortalStream<EvmQueryBuilder<F>, EvmStreamData<Out>>({
-    id,
-    portal: blockSource,
-    query,
-    cache,
-    logger: log,
-    metrics,
-    profiler,
-    transformers: [
-      progressTracker({
-        interval: progress?.interval,
-        onStart: progress?.onStart,
-        onProgress: progress?.onProgress,
-      }),
-      createTransformer<EvmPortalData<F>, EvmPortalData<F>>({
-        profiler: { name: 'normalize data' },
-        transform: (data, ctx) => {
-          const schema = getBlockSchema<evm.Block<F>>(ctx.stream.query.raw)
-
-          return castBlocks(schema, data)
-        },
-      }),
-      mergeOutputs(outputs),
-    ],
-  })
+  return evmPortalStream({ id, portal: blockSource, outputs, cache, logger: log, metrics, profiler, progress })
 }
