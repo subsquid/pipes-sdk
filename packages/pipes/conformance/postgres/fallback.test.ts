@@ -9,15 +9,30 @@ import { it, runToEnd } from './harness.js'
 
 /** The highest block a portal sent in a data answer. */
 function lastServed(requests: readonly MockPortalRequest[]): number {
-  const numbers = requests.flatMap(({ answer }) =>
-    answer?.kind === 'blocks' ? answer.blocks.map(({ header }) => header.number) : [],
-  )
+  return Math.max(-1, ...answerEnds(requests))
+}
 
-  return Math.max(-1, ...numbers)
+/** The last block of each data answer: the cursor the pipe holds once it delivers that batch. */
+function answerEnds(requests: readonly MockPortalRequest[]): number[] {
+  return requests.flatMap(({ answer }) => (answer?.kind === 'blocks' ? [answer.blocks.at(-1)!.header.number] : []))
 }
 
 function dataRequests(requests: readonly MockPortalRequest[]) {
   return requests.filter(({ answer }) => answer?.kind === 'blocks')
+}
+
+/**
+ * The client fetches the next batch ahead, so the last block a source sent need not be the last
+ * one the pipe delivered from it. A resume is right when it starts after the end of a batch the
+ * previous source served, anchored on that block.
+ */
+function expectResumeAfter(query: MockPortalRequest['query'] | undefined, previous: readonly MockPortalRequest[]) {
+  expect(query, 'the resumed read').toBeDefined()
+
+  const resumedAfter = query!.fromBlock - 1
+
+  expect(answerEnds(previous)).toContain(resumedAfter)
+  expect(query!.parentBlockHash).toBe(cursorAt(resumedAfter).hash)
 }
 
 /**
@@ -36,12 +51,10 @@ describe('Postgres (class T) · source list · switch to the standby (CT-1)', ()
 
     await runToEnd({ scenario: s1Fallback('T'), simulator, database })
 
-    const fromPrimary = lastServed(simulator.chain.requests)
     const first = dataRequests(simulator.standby.chain.requests)[0]?.query
 
-    expect(fromPrimary).toBeLessThan(failAt)
-    expect(first?.fromBlock).toBe(fromPrimary + 1)
-    expect(first?.parentBlockHash).toBe(cursorAt(fromPrimary).hash)
+    expect(lastServed(simulator.chain.requests)).toBeLessThan(failAt)
+    expectResumeAfter(first, simulator.chain.requests)
     expect(lastServed(simulator.standby.chain.requests)).toBe(S1.to)
   })
 
@@ -54,13 +67,10 @@ describe('Postgres (class T) · source list · switch to the standby (CT-1)', ()
 
     await runToEnd({ scenario: s1Fallback('T', RECLAIM_OPTIONS), simulator, database })
 
-    const primary = dataRequests(simulator.chain.requests)
-    const reclaimed = primary.find(({ query }) => query.fromBlock > failAt)?.query
-    const fromStandby = lastServed(simulator.standby.chain.requests)
+    const reclaimed = dataRequests(simulator.chain.requests).find(({ query }) => query.fromBlock > failAt)?.query
 
-    expect(fromStandby).toBeGreaterThanOrEqual(failAt)
-    expect(reclaimed?.fromBlock).toBe(fromStandby + 1)
-    expect(reclaimed?.parentBlockHash).toBe(cursorAt(fromStandby).hash)
+    expect(lastServed(simulator.standby.chain.requests)).toBeGreaterThanOrEqual(failAt)
+    expectResumeAfter(reclaimed, simulator.standby.chain.requests)
     expect(lastServed(simulator.chain.requests)).toBe(S1.to)
   })
 

@@ -1,5 +1,3 @@
-import { setTimeout as sleep } from 'node:timers/promises'
-
 import type { EvmFallbackOptions } from '~/evm/evm-fallback.js'
 import { type MockChainPortal, type MockPortalRequest, mockPortal } from '~/testing/index.js'
 
@@ -37,13 +35,16 @@ function failFrom(portal: () => MockChainPortal, from: number | undefined, times
   }
 }
 
-/** S1 over a primary that fails at `failAt` and a healthy standby. Both report the same floor. */
-export type FallbackS1Simulator = S1Simulator & { standby: S1Simulator }
-
 /**
- * `recover` makes the primary fail one request only, and slows the standby a little, so the primary
- * is back before the standby reaches the range end.
+ * S1 over a primary that fails at `failAt` and a healthy standby. Both report the same floor.
+ * `clock` is the fallback's clock: the standby moves it by `STANDBY_ANSWER_MS` on every request,
+ * so a cooldown ends after a fixed number of standby answers, however fast the machine is.
  */
+export type FallbackS1Simulator = S1Simulator & { standby: S1Simulator; clock: () => number }
+
+const STANDBY_ANSWER_MS = 1000
+
+/** `recover` makes the primary fail one request only, so it can come back. */
 export async function fallbackS1Portals({
   failAt,
   recover = false,
@@ -51,33 +52,46 @@ export async function fallbackS1Portals({
   failAt: number
   recover?: boolean
 }): Promise<FallbackS1Simulator> {
+  let now = 0
   let primary: S1Simulator | undefined
   const fail = failFrom(() => primary!.chain, failAt, recover ? 1 : undefined)
   primary = await s1Portal({ delay: ({ query }) => fail(query) })
-  const standby = await s1Portal(recover ? { delay: () => sleep(RECLAIM_DELAY_MS) } : {})
+  const standby = await s1Portal({
+    delay: () => {
+      now += STANDBY_ANSWER_MS
+    },
+  })
 
-  return { ...primary, standby }
+  return { ...primary, standby, clock: () => now }
 }
 
-const RECLAIM_DELAY_MS = 30
-
 /**
- * Lets a recovered primary back soon: a cooldown of a few standby answers, one liveness pass and no
- * head cache. With no capability probe the stock strategy reclaims it at a batch boundary.
+ * Lets a recovered primary back after two standby answers: one liveness pass, no head cache and no
+ * stall clock, which the virtual clock would distort. With no capability probe the stock strategy
+ * reclaims it at a batch boundary.
  */
 export const RECLAIM_OPTIONS: EvmFallbackOptions = {
   sourceRetries: 0,
-  detection: { capabilityProbe: false, cooldownMs: 50, livenessRecoverThreshold: 1, headTtlMs: 0 },
+  detection: {
+    capabilityProbe: false,
+    cooldownMs: 1.5 * STANDBY_ANSWER_MS,
+    livenessRecoverThreshold: 1,
+    headTtlMs: 0,
+    maxStalenessMs: null,
+  },
 }
 
-/** S1 as class T over the source list. */
+/** S1 as class T over the source list, on the simulator's clock. */
 export function s1Fallback(
   durability: FullStreamClass,
   fallback: EvmFallbackOptions = FALLBACK_OPTIONS,
 ): FullStreamScenario<FallbackS1Simulator> {
   return {
     ...s1FullStream(durability),
-    source: (simulator) => ({ url: [simulator.chain.url, simulator.standby.chain.url], fallback }),
+    source: (simulator) => ({
+      url: [simulator.chain.url, simulator.standby.chain.url],
+      fallback: { ...fallback, detection: { ...fallback.detection, clock: simulator.clock } },
+    }),
   }
 }
 
