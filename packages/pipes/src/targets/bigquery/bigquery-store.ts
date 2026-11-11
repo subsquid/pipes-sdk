@@ -528,6 +528,12 @@ export class BigQueryWriter {
     }
     if (stream.stale) {
       await this.#reopenConnection(stream)
+
+      // The teardown can also land after the reopen returned and before this resumed. Checked
+      // here, with no await left before the send, so that no window remains.
+      if (stream.closed) {
+        throw new StreamClosedError(stream.table)
+      }
     }
 
     const result = stream.writer.appendRows({ serializedRows: chunk }, offset).getResult()

@@ -2032,5 +2032,61 @@ describe('BigQueryWriter — append reporting', () => {
       expect(transferAppends).toEqual([0])
       expect(connectionsOf(store).streamIds()).toHaveLength(2)
     })
+
+    withFakeClock('never sends on a stream closed at any point while it reconnects', async ({ clock }) => {
+      // The teardown may land anywhere among the awaits of a reconnect, so it is placed after
+      // every number of microtasks the reconnect spans in turn. Either the send went out
+      // before the streams were closed, or it never does.
+      function afterMicrotasks(depth: number, run: () => void) {
+        if (depth === 0) {
+          run()
+
+          return
+        }
+
+        queueMicrotask(() => afterMicrotasks(depth - 1, run))
+      }
+
+      for (let depth = 0; depth <= 12; depth++) {
+        let closed = false
+        const sendsAfterClose: number[] = []
+        let writers = 0
+
+        const store = makeStore(() => {
+          writers++
+
+          if (writers === 1) {
+            return { appendRows: () => ({ getResult: () => new Promise(() => {}) }), close: () => {} }
+          }
+
+          // The reconnect: tear the streams down partway through it.
+          afterMicrotasks(depth, () => {
+            closed = true
+            store.closeStreams()
+          })
+
+          return {
+            appendRows: () => {
+              if (closed) {
+                sendsAfterClose.push(depth)
+              }
+
+              return { getResult: async () => ({}) }
+            },
+            close: () => {},
+          }
+        })
+        store.bindLogger(captureLogger())
+
+        store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+        const commit = store.commitBatch().catch((error) => error)
+
+        await clock.advanceTimersByTimeAsync(DEADLINE_MS + 1_000)
+        await commit
+
+        expect(closed).toBe(true)
+        expect(sendsAfterClose).toEqual([])
+      }
+    })
   })
 })
