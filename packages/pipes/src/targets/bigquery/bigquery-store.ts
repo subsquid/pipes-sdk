@@ -51,6 +51,32 @@ const RETRY_OPTIONS = {
  */
 const APPEND_STALL_WARNING_MS = 15_000
 
+/**
+ * How long a single AppendRows attempt may stay in flight before it is abandoned and retried.
+ *
+ * A healthy append of a full chunk returns in seconds, and even a slow one in well under a
+ * minute. This is generous on purpose, so that a slow but live stream is never torn down
+ * mid-flight, yet short enough that one dropped stream heals, retry included, inside a
+ * five-minute freshness target with time to spare.
+ */
+const APPEND_DEADLINE_MS = 3 * 60_000
+
+/** gRPC DEADLINE_EXCEEDED: retried by `isTransientError`, counted as transient in metrics. */
+const GRPC_DEADLINE_EXCEEDED = 4
+
+/** An AppendRows attempt outlived `APPEND_DEADLINE_MS` and was abandoned. */
+class AppendDeadlineExceededError extends Error {
+  readonly code = GRPC_DEADLINE_EXCEEDED
+
+  constructor(table: string, offset: number, deadlineMs: number) {
+    super(
+      `appendRows(${table}, offset=${offset}) did not return within ${formatDuration(deadlineMs)}; ` +
+        'reopening the stream connection',
+    )
+    this.name = 'AppendDeadlineExceededError'
+  }
+}
+
 export type BigQueryStoreOptions = {
   projectId: string
   /** Tracked tables registered up-front; defines the allowlist (B4 fix). */
@@ -105,16 +131,32 @@ export type CommitTableStats = {
 }
 
 /** Per-table long-lived Committed stream state, cached across batches. */
-type StreamState = {
-  streamId: string
-  connection: Awaited<ReturnType<managedwriter.WriterClient['createStreamConnection']>>
+type StreamState = StreamTarget & {
+  connection: StreamConnection
   writer: ProtoWriterLike
   /**
    * Cumulative offset across the lifetime of this stream — Committed streams use the
    * offset for exactly-once semantics: a retry of the same offset is server-deduped.
    */
   nextOffset: number
+  /**
+   * Set once an append outlived its deadline and `connection` and `writer` were closed: the
+   * next attempt opens a fresh connection to the same stream before it sends anything.
+   */
+  stale: boolean
 }
+
+/** A Committed stream and everything a connection to it is opened with. */
+type StreamTarget = {
+  /** Path-style table FQN the stream writes to. */
+  table: string
+  streamId: string
+  protoDescriptor: ProtoDescriptor
+  writerOptions: { missingValueInterpretations?: MissingValueInterpretations }
+}
+
+type StreamConnection = Awaited<ReturnType<managedwriter.WriterClient['createStreamConnection']>>
+type ProtoDescriptor = Parameters<ProtoWriterFactory>[0]['protoDescriptor']
 
 /** The DML job itself finished with an error; `errors` carries its `errorResult` for `isTransientError`. */
 class DmlJobFailedError extends Error {
@@ -384,10 +426,7 @@ export class BigQueryWriter {
     for (const chunk of chunkBuffersByByteSize(encodedRows)) {
       const chunkOffset = stream.nextOffset // capture for the retry closure
       const response = await doWithRetry(
-        () =>
-          this.#whileAppending(tableFqnPath, chunkOffset, () =>
-            stream.writer.appendRows({ serializedRows: chunk }, chunkOffset).getResult(),
-          ),
+        () => this.#whileAppending(tableFqnPath, chunkOffset, () => this.#appendOnce(stream, chunk, chunkOffset)),
         {
           ...RETRY_OPTIONS,
           title: `appendRows(${tableFqnPath}, offset=${chunkOffset})`,
@@ -441,6 +480,79 @@ export class BigQueryWriter {
   }
 
   /**
+   * One AppendRows attempt, bounded by `APPEND_DEADLINE_MS`.
+   *
+   * `getResult()` has no deadline of its own, so a bidi stream that is dropped rather than
+   * failed would hold the pipeline forever. Retrying on the same connection would not help:
+   * the client matches each response to the oldest write still queued on the connection, so
+   * the abandoned write would swallow the retry's response and the retry would hang in turn.
+   * An expired attempt therefore takes its connection down with it, and the retry opens a fresh
+   * one to the same stream and resends the same offset. An offset that did land before the
+   * stream dropped comes back ALREADY_EXISTS on the response, which counts as written.
+   */
+  async #appendOnce(stream: StreamState, chunk: Uint8Array[], offset: number) {
+    if (stream.stale) {
+      await this.#reopenConnection(stream)
+    }
+
+    const result = stream.writer.appendRows({ serializedRows: chunk }, offset).getResult()
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new AppendDeadlineExceededError(stream.table, offset, APPEND_DEADLINE_MS)),
+        APPEND_DEADLINE_MS,
+      )
+    })
+
+    try {
+      return await Promise.race([result, deadline])
+    } catch (error) {
+      if (error instanceof AppendDeadlineExceededError) {
+        this.#abandonConnection(stream)
+      }
+
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Fails every write still queued on the stream's connection and closes it, best-effort, then
+   * marks the stream stale so the next attempt reconnects before sending.
+   */
+  #abandonConnection(stream: StreamState): void {
+    try {
+      for (const pending of stream.connection.getPendingWrites()) {
+        pending.abort()
+      }
+    } catch {
+      // best-effort: the connection is dropped either way
+    }
+    try {
+      stream.writer.close()
+    } catch {
+      // best-effort
+    }
+    try {
+      stream.connection.close()
+    } catch {
+      // best-effort
+    }
+
+    stream.stale = true
+  }
+
+  async #reopenConnection(stream: StreamState): Promise<void> {
+    const { connection, writer } = await this.#openConnection(stream)
+
+    stream.connection = connection
+    stream.writer = writer
+    stream.stale = false
+  }
+
+  /**
    * Returns the cached Committed-stream state for `tableFqnPath`, opening one on first
    * call. The writer + underlying gRPC connection are kept alive for the rest of the
    * process lifetime and torn down by `close()`.
@@ -466,6 +578,22 @@ export class BigQueryWriter {
         }),
       { ...RETRY_OPTIONS, title: `createWriteStream(${tableFqnPath})`, logger: this.#logger },
     )
+    const target: StreamTarget = { table: tableFqnPath, streamId, protoDescriptor, writerOptions }
+    const { connection, writer } = await this.#openConnection(target)
+
+    const state: StreamState = { ...target, connection, writer, nextOffset: 0, stale: false }
+    this.#streams.set(tableFqnPath, state)
+
+    return state
+  }
+
+  /** Opens a connection and its proto Writer to an existing Committed stream. */
+  async #openConnection({
+    table: tableFqnPath,
+    streamId,
+    protoDescriptor,
+    writerOptions,
+  }: StreamTarget): Promise<{ connection: StreamConnection; writer: ProtoWriterLike }> {
     const connection = await this.#writer.createStreamConnection({ streamId })
     // The `@google-cloud/bigquery-storage` client delivers a transport error twice: once as a
     // rejected `getResult()` promise (which `doWithRetry` handles), and once as an 'error'
@@ -494,10 +622,7 @@ export class BigQueryWriter {
       missingValueInterpretations: writerOptions.missingValueInterpretations,
     })
 
-    const state: StreamState = { streamId, connection, writer, nextOffset: 0 }
-    this.#streams.set(tableFqnPath, state)
-
-    return state
+    return { connection, writer }
   }
 
   /**

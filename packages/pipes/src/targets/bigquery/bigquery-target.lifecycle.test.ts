@@ -50,6 +50,7 @@ type StreamConnectionStub = {
   finalize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   on: ReturnType<typeof vi.fn>
+  getPendingWrites: ReturnType<typeof vi.fn>
 }
 
 function makeWriter() {
@@ -76,6 +77,7 @@ function makeWriter() {
         }),
         close: vi.fn(),
         on: vi.fn(),
+        getPendingWrites: vi.fn(() => []),
       }
       return conn
     }),
@@ -1854,5 +1856,140 @@ describe('BigQueryWriter — append reporting', () => {
         attempts: 3,
       }),
     )
+  })
+
+  describe('append deadline', () => {
+    const DEADLINE_MS = 3 * 60_000
+
+    const withFakeClock = it.extend<{ clock: typeof vi }>({
+      clock: async ({}, use) => {
+        vi.useFakeTimers()
+
+        await use(vi)
+
+        vi.useRealTimers()
+      },
+    })
+
+    function connectionsOf(store: ReturnType<typeof makeStore>) {
+      const createStreamConnection = store.writerClient.createStreamConnection as unknown as Mock
+
+      return {
+        streamIds: (): string[] => createStreamConnection.mock.calls.map(([request]) => request.streamId),
+        opened: (): Promise<StreamConnectionStub[]> =>
+          Promise.all(createStreamConnection.mock.results.map((result) => result.value)),
+      }
+    }
+
+    withFakeClock(
+      'abandons an append that outlives its deadline and resends it on a fresh connection to the same stream',
+      async ({ clock }) => {
+        // An append on a dropped bidi stream gets no answer until some later transport error
+        // happens to deliver one, and the table stands still for as long as that takes.
+        const appends: { connection: unknown; offset: unknown }[] = []
+        const abortHung = vi.fn()
+        const store = makeStore(({ connection }) => ({
+          appendRows: (_rows, offset) => {
+            appends.push({ connection, offset })
+
+            if (appends.length === 1) {
+              const hung = new Promise((_, reject) => {
+                abortHung.mockImplementation(() => reject(new Error('aborted')))
+              })
+              ;(connection as unknown as StreamConnectionStub).getPendingWrites.mockReturnValue([{ abort: abortHung }])
+
+              return { getResult: () => hung }
+            }
+
+            return { getResult: async () => ({}) }
+          },
+          close: () => {},
+        }))
+        const logger = captureLogger()
+        store.bindLogger(logger)
+
+        store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+        const commit = store.commitBatch()
+
+        await clock.advanceTimersByTimeAsync(DEADLINE_MS - 1)
+        expect(appends).toHaveLength(1)
+
+        // Past the deadline, plus the first retry's backoff.
+        await clock.advanceTimersByTimeAsync(1_000)
+        await commit
+
+        const connections = connectionsOf(store)
+        const [abandoned, fresh] = await connections.opened()
+        const [streamId] = connections.streamIds()
+
+        expect(connections.streamIds()).toEqual([streamId, streamId])
+        expect(abortHung).toHaveBeenCalledOnce()
+        expect(abandoned.close).toHaveBeenCalled()
+        expect(fresh.close).not.toHaveBeenCalled()
+        expect(appends).toEqual([
+          { connection: abandoned, offset: 0 },
+          { connection: fresh, offset: 0 },
+        ])
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: `appendRows(${EVENTS_TABLE}, offset=0) succeeded after 1 retry`,
+            error: expect.objectContaining({
+              code: 4,
+              message: `appendRows(${EVENTS_TABLE}, offset=0) did not return within 3m 0s; reopening the stream connection`,
+            }),
+          }),
+        )
+
+        // The stream carries on over the new connection, from the next offset.
+        store.insert('events', [{ block_number: 2, tx_hash: '0xb' }])
+        await store.commitBatch()
+
+        expect(appends[2]).toEqual({ connection: fresh, offset: 1 })
+        expect(connections.streamIds()).toHaveLength(2)
+      },
+    )
+
+    withFakeClock('leaves a slow append alone while it is still inside its deadline', async ({ clock }) => {
+      const store = makeStore(() => ({
+        appendRows: () => ({
+          getResult: () => new Promise((resolve) => setTimeout(() => resolve({}), DEADLINE_MS - 1_000)),
+        }),
+        close: () => {},
+      }))
+      const logger = captureLogger()
+      store.bindLogger(logger)
+
+      store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+      const commit = store.commitBatch()
+
+      await clock.advanceTimersByTimeAsync(DEADLINE_MS)
+      await commit
+
+      const [connection] = await connectionsOf(store).opened()
+
+      expect(connectionsOf(store).streamIds()).toHaveLength(1)
+      expect(connection.close).not.toHaveBeenCalled()
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining('succeeded after') }),
+      )
+    })
+
+    withFakeClock('gives up on a stream whose every attempt outlives the deadline', async ({ clock }) => {
+      // The deadline turns a silent hang into an ordinary transient failure: it spends the same
+      // retry budget, and when that runs out the commit fails instead of waiting forever.
+      const store = makeStore(() => ({
+        appendRows: () => ({ getResult: () => new Promise(() => {}) }),
+        close: () => {},
+      }))
+      store.bindLogger(captureLogger())
+
+      store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+      const commit = store.commitBatch().catch((error) => error)
+
+      await clock.advanceTimersByTimeAsync(9 * DEADLINE_MS + 5 * 60_000)
+
+      expect(await commit).toMatchObject({ code: 4 })
+      expect(connectionsOf(store).streamIds()).toHaveLength(9)
+    })
   })
 })
