@@ -51,6 +51,7 @@ type StreamConnectionStub = {
   close: ReturnType<typeof vi.fn>
   on: ReturnType<typeof vi.fn>
   getPendingWrites: ReturnType<typeof vi.fn>
+  getStreamId: () => string
 }
 
 function makeWriter() {
@@ -78,6 +79,7 @@ function makeWriter() {
         close: vi.fn(),
         on: vi.fn(),
         getPendingWrites: vi.fn(() => []),
+        getStreamId: () => streamId,
       }
       return conn
     }),
@@ -1990,6 +1992,45 @@ describe('BigQueryWriter — append reporting', () => {
 
       expect(await commit).toMatchObject({ code: 4 })
       expect(connectionsOf(store).streamIds()).toHaveLength(9)
+    })
+
+    withFakeClock('stops a hung append from writing again once its streams are closed', async ({ clock }) => {
+      // Tables commit in parallel. When one fails outright, the batch rejects and the target
+      // tears the streams down while another table's append is still hung; that append must
+      // not come back after its deadline and write through a connection nothing tracks.
+      const transferAppends: unknown[] = []
+      const store = makeStore(({ connection }) => {
+        const table = (connection as unknown as StreamConnectionStub).getStreamId()
+
+        return {
+          appendRows: (_rows, offset) => {
+            if (table.includes('/tables/events/')) {
+              return {
+                getResult: async () => Promise.reject(Object.assign(new Error('INVALID_ARGUMENT'), { code: 3 })),
+              }
+            }
+
+            transferAppends.push(offset)
+
+            return { getResult: () => new Promise(() => {}) }
+          },
+          close: () => {},
+        }
+      })
+      store.bindLogger(captureLogger())
+
+      store.insert('events', [{ block_number: 1, tx_hash: '0xa' }])
+      store.insert('transfers', [{ block_number: 1, value: '1' }])
+      const commit = store.commitBatch().catch((error) => error)
+
+      await clock.advanceTimersByTimeAsync(0)
+      expect(await commit).toMatchObject({ code: 3 })
+
+      store.closeStreams()
+      await clock.advanceTimersByTimeAsync(DEADLINE_MS + 60_000)
+
+      expect(transferAppends).toEqual([0])
+      expect(connectionsOf(store).streamIds()).toHaveLength(2)
     })
   })
 })

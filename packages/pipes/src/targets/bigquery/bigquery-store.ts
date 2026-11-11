@@ -77,6 +77,17 @@ class AppendDeadlineExceededError extends Error {
   }
 }
 
+/**
+ * An append still in flight when `closeStreams()` tore its stream down. Not transient on
+ * purpose: the retry loop must stop rather than write through a connection nothing tracks.
+ */
+class StreamClosedError extends Error {
+  constructor(table: string) {
+    super(`write stream for ${table} was closed while an append to it was still running`)
+    this.name = 'StreamClosedError'
+  }
+}
+
 export type BigQueryStoreOptions = {
   projectId: string
   /** Tracked tables registered up-front; defines the allowlist (B4 fix). */
@@ -144,6 +155,25 @@ type StreamState = StreamTarget & {
    * next attempt opens a fresh connection to the same stream before it sends anything.
    */
   stale: boolean
+  /** Set by `closeStreams()`: no attempt may send through, or reopen, this stream again. */
+  closed: boolean
+}
+
+/**
+ * Closes a proto Writer and its connection. Each close is best-effort: callers run on teardown
+ * and error paths, where one failed close must not mask the control flow it is part of.
+ */
+function closeConnection({ writer, connection }: { writer: ProtoWriterLike; connection: StreamConnection }): void {
+  try {
+    writer.close()
+  } catch {
+    // best-effort
+  }
+  try {
+    connection.close()
+  } catch {
+    // best-effort
+  }
 }
 
 /** A Committed stream and everything a connection to it is opened with. */
@@ -491,6 +521,11 @@ export class BigQueryWriter {
    * stream dropped comes back ALREADY_EXISTS on the response, which counts as written.
    */
   async #appendOnce(stream: StreamState, chunk: Uint8Array[], offset: number) {
+    // A batch whose sibling table failed is torn down while this table's append may still be
+    // retrying in the background; nothing it sends after that is tracked or wanted.
+    if (stream.closed) {
+      throw new StreamClosedError(stream.table)
+    }
     if (stream.stale) {
       await this.#reopenConnection(stream)
     }
@@ -530,22 +565,19 @@ export class BigQueryWriter {
     } catch {
       // best-effort: the connection is dropped either way
     }
-    try {
-      stream.writer.close()
-    } catch {
-      // best-effort
-    }
-    try {
-      stream.connection.close()
-    } catch {
-      // best-effort
-    }
+    closeConnection(stream)
 
     stream.stale = true
   }
 
   async #reopenConnection(stream: StreamState): Promise<void> {
     const { connection, writer } = await this.#openConnection(stream)
+
+    // `closeStreams()` may have run while the connection was opening.
+    if (stream.closed) {
+      closeConnection({ connection, writer })
+      throw new StreamClosedError(stream.table)
+    }
 
     stream.connection = connection
     stream.writer = writer
@@ -581,7 +613,7 @@ export class BigQueryWriter {
     const target: StreamTarget = { table: tableFqnPath, streamId, protoDescriptor, writerOptions }
     const { connection, writer } = await this.#openConnection(target)
 
-    const state: StreamState = { ...target, connection, writer, nextOffset: 0, stale: false }
+    const state: StreamState = { ...target, connection, writer, nextOffset: 0, stale: false, closed: false }
     this.#streams.set(tableFqnPath, state)
 
     return state
@@ -695,16 +727,8 @@ export class BigQueryWriter {
     // because we're often called from a finally block during normal shutdown and a single
     // failed close shouldn't mask the original control flow.
     for (const state of this.#streams.values()) {
-      try {
-        state.writer.close()
-      } catch {
-        // best-effort
-      }
-      try {
-        state.connection.close()
-      } catch {
-        // best-effort
-      }
+      state.closed = true
+      closeConnection(state)
     }
     this.#streams.clear()
   }
