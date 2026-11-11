@@ -268,7 +268,9 @@ export class FallbackClient implements BlockStreamClient {
     try {
       yield* this.#drive(query, options?.request?.abort)
     } finally {
+      // Nothing is read once the stream ends (OB-60), and a probe still out now answers for no stream.
       this.#current = undefined
+      this.#clearActive()
     }
   }
 

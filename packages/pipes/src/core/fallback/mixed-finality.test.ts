@@ -125,13 +125,15 @@ describe('mixed finality — handoff at the frontier', () => {
     })
 
     const got: number[] = []
+    let servedLast: number | undefined
     for await (const b of fb.getStream(QUERY) as AsyncIterable<StreamData<any>>) {
       got.push(...b.blocks.map((x: any) => x.header.number))
+      servedLast = fb.activeIndex
     }
 
     expect(got).toEqual([1, 2, 3, 4, 5, 6]) // no gap across the handoff
     expect(fb.switchCount).toBe(1)
-    expect(fb.activeIndex).toBe(1)
+    expect(servedLast).toBe(1)
     // The hot source was asked to continue from just past the finalized frontier.
     expect(tip.reads[0]).toMatchObject({ fromBlock: 4, parentBlockHash: '0x3' })
   }, 20_000)
@@ -211,14 +213,16 @@ describe('mixed finality — handoff at the frontier', () => {
     })
 
     const got: number[] = []
+    let servedLast: number | undefined
     for await (const b of fb.getStream(QUERY) as AsyncIterable<StreamData<any>>) {
       got.push(...b.blocks.map((x: any) => x.header.number))
+      servedLast = fb.activeIndex
     }
 
     expect(got).toEqual(Array.from({ length: 40 }, (_, i) => i + 1))
     expect(served).toBe(37) // the hot source served 4..40 uninterrupted
     expect(fb.switchCount).toBe(1) // handed off exactly once — no thrash back into the frontier
-    expect(fb.activeIndex).toBe(1)
+    expect(servedLast).toBe(1)
   }, 20_000)
 })
 

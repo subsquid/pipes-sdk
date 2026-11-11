@@ -5,7 +5,7 @@ import { mockBlockStreamClient } from '~/testing/index.js'
 
 import { defaultLogger } from '../logger.js'
 import { BlockCursor } from '../types.js'
-import { FallbackClient, FallbackClientOptions, FallbackClientSource } from './client.js'
+import { FallbackClient, FallbackClientOptions, FallbackClientSource, FallbackMetrics } from './client.js'
 import { FallbackStrategy } from './strategy.js'
 
 /**
@@ -64,10 +64,21 @@ function fallback(
   return new FallbackClient({ sources, detection: { capabilityProbe: false, ...detection }, logger: silent, ...extra })
 }
 
+/** The active source when each batch arrived, by client: the client reports none once the stream ends. */
+const activeAtBatch = new WeakMap<FallbackClient, number | undefined>()
+
 async function collect(fb: FallbackClient, query: any = QUERY): Promise<number[]> {
   const out: number[] = []
-  for await (const b of fb.getStream(query)) out.push(...b.blocks.map((x: any) => x.header.number))
+  for await (const b of fb.getStream(query)) {
+    out.push(...b.blocks.map((x: any) => x.header.number))
+    activeAtBatch.set(fb, fb.activeIndex)
+  }
   return out
+}
+
+/** The source that served the last batch. */
+function servedLast(fb: FallbackClient): number | undefined {
+  return activeAtBatch.get(fb)
 }
 
 /** Never resolves — models a source whose request hangs forever. */
@@ -420,6 +431,28 @@ describe('FallbackClient — supervisor', () => {
 })
 
 describe('FallbackClient — metrics', () => {
+  it('reports no active source and no freshness gauges once the stream ends (OB-60, OB-63)', async () => {
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+    })
+    const s1 = source(
+      's1',
+      async function* () {},
+      async () => cursor(5),
+    )
+    const fb = fallback([s0, s1], { headTtlMs: 0 })
+
+    expect(await collect(fb)).toEqual([1])
+    expect(servedLast(fb)).toBe(0)
+
+    const m = fb.metrics()
+    expect(m.activeIndex).toBeUndefined()
+    expect(m.sources.map((s) => s.active)).toEqual([false, false])
+    expect(m.lag).toBeUndefined()
+    expect(m.chainHead).toBeUndefined()
+    expect(fb.getUrl()).toBe('mock://s0') // the last source driven
+  })
+
   it('reports the active source, switch count, and per-source health', async () => {
     const s0 = source('s0', async function* () {
       yield batch(1)
@@ -430,8 +463,12 @@ describe('FallbackClient — metrics', () => {
     })
     const fb = fallback([s0, s1])
 
-    await collect(fb)
-    const m = fb.metrics()
+    let m: FallbackMetrics | undefined
+    for await (const b of fb.getStream(QUERY)) {
+      if (b.blocks[0]?.header.number === 2) m = fb.metrics()
+    }
+
+    if (!m) throw new Error('block 2 never arrived')
 
     expect(m.activeIndex).toBe(1)
     expect(m.switchCount).toBe(1)
@@ -465,7 +502,7 @@ describe('FallbackClient — freshness', () => {
     const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
 
     expect(await collect(fb)).toEqual([90, 91, 92, 93])
-    expect(fb.activeIndex).toBe(1)
+    expect(servedLast(fb)).toBe(1)
     expect(s1.reads[0]).toMatchObject({ fromBlock: 92, parentBlockHash: '0x91' }) // resumed after last delivered
   })
 
@@ -483,7 +520,7 @@ describe('FallbackClient — freshness', () => {
     const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
 
     expect(await collect(fb)).toEqual([1, 2, 3])
-    expect(fb.activeIndex).toBe(0)
+    expect(servedLast(fb)).toBe(0)
   })
 
   it('(c) staleness: fails over a stalled source when a fresher source is ahead', async () => {
@@ -501,7 +538,7 @@ describe('FallbackClient — freshness', () => {
     const fb = fallback([s0, s1], { maxStalenessMs: 30, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null })
 
     expect(await collect(fb)).toEqual([1, 2])
-    expect(fb.activeIndex).toBe(1)
+    expect(servedLast(fb)).toBe(1)
   }, 5000)
 
   it('(e) slow-handler immunity: a slow downstream consumer between yields does not mark the source stale', async () => {
@@ -522,10 +559,11 @@ describe('FallbackClient — freshness', () => {
     const got: number[] = []
     for await (const b of fb.getStream(QUERY)) {
       got.push(...b.blocks.map((x: any) => x.header.number))
+      activeAtBatch.set(fb, fb.activeIndex)
       await wait(50) // slow handler (> maxStalenessMs), but parked at yield — clock not running on s0
     }
     expect(got).toEqual([1, 2, 3]) // all served by s0
-    expect(fb.activeIndex).toBe(0) // never failed over
+    expect(servedLast(fb)).toBe(0) // never failed over
   }, 5000)
 
   it('(d) global stall: no fresher source → holds + flags chainStalled, no churn', async () => {
@@ -611,7 +649,7 @@ describe('FallbackClient — freshness', () => {
     const fb = fallback([s0, s1], { maxLagBlocks: null, maxStalenessMs: null, headTtlMs: 0 })
 
     expect(await collect(fb)).toEqual([1, 2])
-    expect(fb.activeIndex).toBe(0)
+    expect(servedLast(fb)).toBe(0)
   })
 
   it('(g) resets freshness gauges on a switch (no stale lag from the old source)', async () => {
@@ -620,18 +658,23 @@ describe('FallbackClient — freshness', () => {
       yield batch(90)
       yield batch(91)
     })
-    // Empty standby: after failover the stream ends immediately, so no boundary recomputes
-    // freshness — exposing whether the switch itself cleared the old source's lag.
+    // A batch arrives before its boundary is observed, so the lag seen with s1's first batch is
+    // whatever the switch itself left.
     const s1 = source(
       's1',
-      async function* () {},
+      async function* () {
+        yield batch(92)
+      },
       async () => cursor(s1heads.shift() ?? 110),
     )
     const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
 
-    expect(await collect(fb)).toEqual([90, 91])
-    expect(fb.activeIndex).toBe(1)
-    expect(fb.lag).toBeUndefined() // not the stale 19 the lag trigger recorded against s0
+    let lagOnSwitch: number | undefined = -1
+    for await (const b of fb.getStream(QUERY)) {
+      if (b.blocks[0]?.header.number === 92) lagOnSwitch = fb.lag
+    }
+
+    expect(lagOnSwitch).toBeUndefined() // not the stale 19 the lag trigger recorded against s0
   })
 
   it('(h) re-arms lag per stream: a reused instance does not inherit "at tip" for a backfill', async () => {
@@ -659,7 +702,7 @@ describe('FallbackClient — freshness', () => {
     // boundary would trip (lag ~1e6 > 10) and fail over; a per-stream reset prevents that.
     phase = 2
     expect(await collect(fb)).toEqual([1, 2])
-    expect(fb.activeIndex).toBe(0) // stayed on s0 — no spurious failover
+    expect(servedLast(fb)).toBe(0) // stayed on s0 — no spurious failover
   })
 
   it('(j) reports no lag/head before the first block, even at a boundary after an empty batch', async () => {
@@ -674,6 +717,7 @@ describe('FallbackClient — freshness', () => {
         meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
       }
       yield batch(1_000)
+      yield batch(1_001)
     })
     const s1 = source(
       's1',
@@ -682,9 +726,11 @@ describe('FallbackClient — freshness', () => {
     )
     const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
 
+    const active: (number | undefined)[] = []
     for await (const b of fb.getStream(QUERY)) {
       void b
       seen.push({ lag: fb.lag, chainHead: fb.chainHead })
+      active.push(fb.activeIndex)
     }
 
     // A batch is yielded *before* its boundary is observed, so each entry shows the state left by
@@ -694,10 +740,9 @@ describe('FallbackClient — freshness', () => {
     // level with the chain, which is equally untrue. Not computable ⇒ absent.
     expect(seen[0]).toEqual({ lag: undefined, chainHead: undefined })
     expect(seen[1]).toEqual({ lag: undefined, chainHead: 1_000 })
-    // The final boundary, with a real cursor at s1's head: caught up, and now measurable.
-    expect(fb.lag).toBe(0)
-    expect(fb.chainHead).toBe(1_000)
-    expect(fb.activeIndex).toBe(0) // never failed over
+    // The boundary with a real cursor at s1's head: caught up, and now measurable.
+    expect(seen[2]).toEqual({ lag: 0, chainHead: 1_000 })
+    expect(active).toEqual([0, 0, 0]) // never failed over
   })
 
   it('(i) does not arm lag while the reference is behind us (stale standby) — no spurious failover', async () => {
@@ -718,7 +763,7 @@ describe('FallbackClient — freshness', () => {
     const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 })
 
     expect(await collect(fb, { ...QUERY, fromBlock: 50 })).toEqual([50, 51, 52])
-    expect(fb.activeIndex).toBe(0) // never armed (was ahead of the reference) ⇒ no lag failover
+    expect(servedLast(fb)).toBe(0) // never armed (was ahead of the reference) ⇒ no lag failover
   })
 })
 
@@ -869,7 +914,7 @@ describe('FallbackClient — reclaim and abort correctness', () => {
     })
 
     expect(await collect(fb)).toEqual([10, 11])
-    expect(fb.activeIndex).toBe(0) // never chased a source that could not be selected
+    expect(servedLast(fb)).toBe(0) // never chased a source that could not be selected
     expect(fb.switchCount).toBe(0)
   })
 
@@ -930,7 +975,7 @@ describe('FallbackClient — head-poll timeout (robustness)', () => {
     })
 
     expect(await collect(fb)).toEqual([1, 2, 3]) // the healthy primary streamed to completion
-    expect(fb.activeIndex).toBe(0)
+    expect(servedLast(fb)).toBe(0)
     const s1health = fb.metrics().sources[1]
     expect(s1health.health).toBe('unhealthy')
     expect(s1health.cause).toMatchObject({ check: 'liveness', reason: 'timeout' })
@@ -1157,7 +1202,7 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     const fb = fallback([s0, s1], undefined, { strategy: noop })
 
     expect(await collect(fb)).toEqual([1, 2])
-    expect(fb.activeIndex).toBe(1)
+    expect(servedLast(fb)).toBe(1)
   })
 
   it('a `batch` handler can jump sources voluntarily — the abandoned source stays healthy', async () => {
@@ -1273,6 +1318,34 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     expect(fb.metrics().sources[1].cause).toBeUndefined()
   }, 10_000)
 
+  it('ignores a capability probe that answers after its stream ended, before any other read', async () => {
+    const resolvers: ((r: { ok: boolean; cause?: any }) => void)[] = []
+    const s0 = source('s0', async function* () {
+      yield batch(1)
+    })
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => cursor(50),
+      (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
+    )
+    const fb = fallback(
+      [s0, standby],
+      { headTtlMs: 0, capabilityProbeIntervalMs: 0, maxLagBlocks: null },
+      { strategy: () => undefined },
+    )
+
+    await collect(fb)
+    expect(resolvers).toHaveLength(1)
+
+    const before = fb.metrics().sources[1].health
+    resolvers[0]({ ok: false, cause: { check: 'capability', reason: 'http', code: 400, detail: 'stale verdict' } })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(fb.metrics().sources[1].health).toBe(before)
+    expect(fb.metrics().sources[1].cause).toBeUndefined()
+  }, 10_000)
+
   it('reclaims a source dropped for stalling once it is level with the pipe again', async () => {
     // Demanding it be *ahead* of the cursor is a bar nothing can clear: the cursor is set by the
     // source currently driving at the tip, so a recovered primary that has caught up sits exactly
@@ -1319,13 +1392,16 @@ describe('FallbackClient — custom strategy (code as config)', () => {
 
     const got: number[] = []
     const drain = (async () => {
-      for await (const b of fb.getStream(QUERY)) got.push(...b.blocks.map((x: any) => x.header.number))
+      for await (const b of fb.getStream(QUERY)) {
+        got.push(...b.blocks.map((x: any) => x.header.number))
+        activeAtBatch.set(fb, fb.activeIndex)
+      }
     })()
     drain.catch(() => {})
     await wait(600)
 
     expect(got).toContain(500) // the recovered primary was taken back
-    expect(fb.activeIndex).toBe(0)
+    expect(servedLast(fb)).toBe(0)
   }, 10_000)
 
   it('surfaces a throw from a custom strategy instead of blaming the source', async () => {
@@ -1509,7 +1585,7 @@ describe('FallbackClient — custom strategy (code as config)', () => {
 
     expect(await collect(fb)).toEqual([90, 91, 92]) // s0 served the whole range
     expect(vetoed).toBeGreaterThan(0) // the stock failover was actually proposed — and overridden
-    expect(fb.activeIndex).toBe(0)
+    expect(servedLast(fb)).toBe(0)
     expect(s1.reads).toHaveLength(0)
   })
 })
