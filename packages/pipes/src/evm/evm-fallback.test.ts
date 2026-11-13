@@ -155,7 +155,7 @@ describe('createEvmFallbackClient — source specs', () => {
       }
 
       expect(seen).toEqual(['0x1']) // served by the flaky primary, after its retries
-      expect(fb.switchCount).toBe(0)
+      expect(fb.metrics().switchCount).toBe(0)
     },
     20_000,
   )
@@ -186,7 +186,7 @@ describe('createEvmFallbackClient — source specs', () => {
       }
 
       expect(seen).toEqual(['0xstandby'])
-      expect(fb.switchCount).toBe(1)
+      expect(fb.metrics().switchCount).toBe(1)
     },
     20_000,
   )
@@ -210,7 +210,7 @@ describe('createEvmFallbackClient — source specs', () => {
       }
 
       expect(seen).toEqual(['0xstandby'])
-      expect(fb.switchCount).toBe(1)
+      expect(fb.metrics().switchCount).toBe(1)
     },
     20_000,
   )

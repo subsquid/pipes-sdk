@@ -62,18 +62,18 @@ describe.skipIf(!ENABLED)('EVM fallback — live', () => {
       { finalized: true },
     )
 
-    expect(fb.activeIndex).toBeUndefined()
+    expect(fb.metrics().activeIndex).toBeUndefined()
 
     let servedLast: number | undefined
     const out: number[] = []
     for await (const batch of fb.getStream(QUERY, { finalized: true }) as AsyncIterable<StreamData<any>>) {
       out.push(...batch.blocks.map((b: any) => b.header.number))
-      servedLast = fb.activeIndex
+      servedLast = fb.metrics().activeIndex
     }
 
     expect(out).toEqual([FROM, FROM + 1, TO])
     expect(servedLast).toBe(1) // the good Portal took over
-    expect(fb.switchCount).toBeGreaterThanOrEqual(1)
+    expect(fb.metrics().switchCount).toBeGreaterThanOrEqual(1)
   }, 120_000)
 
   it('the full facade streams decoded blocks from an RPC-only source list', async () => {

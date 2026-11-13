@@ -76,21 +76,6 @@ export interface FallbackMetrics {
 /** Blocks of ordinary ingestion jitter tolerated when `maxLagBlocks` is disabled (see `#isBehind`). */
 const DEFAULT_BEHIND_ALLOWANCE = 10
 
-/** How a read of one source ended while the stream goes on. */
-type Handoff =
-  /** The source failed: select again. */
-  | { type: 'fault'; cause: SourceErrorInfo }
-  /** The strategy dropped the source. */
-  | { type: 'failover'; cause: SourceErrorInfo }
-  /** The strategy moved the read to another source. */
-  | { type: 'use'; index: number }
-
-/** The position a read of one source reached, and how it ended; no handoff ends the stream. */
-type ReadEnd = { cursor: BlockCursor | undefined; handoff?: Handoff }
-
-/** The stall-aware fetch: a batch, a source error, or a failover decided mid-request. */
-type Fetched = IteratorResult<StreamData<any>> | { error: unknown } | { failover: SourceErrorInfo }
-
 type Probe = (atCursor?: BlockCursor) => Promise<ProbeResult>
 
 /** One source's state for the stream in flight. */
@@ -106,6 +91,16 @@ type SourceRun = {
   leftUnproductive: boolean
 }
 
+/** One configured source: its spec and health outlive a stream, `run` does not. */
+type Source = {
+  readonly index: number
+  readonly name: string
+  readonly client: BlockStreamClient
+  readonly probeCapability?: Probe
+  readonly health: SourceHealth
+  run: SourceRun
+}
+
 /**
  * The state of the stream in flight. Each stream starts from a fresh one: heads depend on the
  * forced commitment, the tip latch must arm again, and a probe that outlives its stream must not
@@ -115,11 +110,32 @@ type StreamRun = {
   /** `true` when the consumer forces finalized blocks; a consumer only raises a commitment (INV-63). */
   finalized: true | undefined
   sourceOptions: PortalBlockStreamOptions | undefined
+  /** The last block delivered to the pipe: the resume point of any switch. */
+  cursor: BlockCursor | undefined
   /** Lag failover arms once the tip is first reached, so a deep backfill never trips it. */
   lagArmed: boolean
-  /** The active source's unproductive wait (DEF-69; ADR-25 §3 says why no simpler clock works). */
+  /** The active source's unproductive wait before the request in flight (DEF-69, ADR-25 §3). */
   unproductiveMs: number
-  sources: SourceRun[]
+  /** When the request in flight went out; unset while none is on the stall clock. */
+  requestSince: number | undefined
+  /** The independent head at the last boundary, and the cursor it was measured against. */
+  reference: { head: number | undefined; cursor: number | undefined } | undefined
+}
+
+/** How a read of one source ended while the stream goes on. */
+type Handoff =
+  /** The source failed: select again. */
+  | { type: 'fault'; cause: SourceErrorInfo }
+  /** The strategy dropped the source. */
+  | { type: 'failover'; cause: SourceErrorInfo }
+  /** The strategy moved the read to another source. */
+  | { type: 'use'; source: Source }
+
+/** The stall-aware fetch: a batch, a source error, or a failover decided mid-request. */
+type Fetched = IteratorResult<StreamData<any>> | { error: unknown } | { failover: SourceErrorInfo }
+
+function idleRun(probe?: Probe): SourceRun {
+  return { probe, probing: false, lastProbeAt: 0, head: undefined, leftUnproductive: false }
 }
 
 /**
@@ -133,27 +149,18 @@ type StreamRun = {
  * so a second concurrent `getStream` is refused.
  */
 export class FallbackClient implements BlockStreamClient {
-  readonly #sources: FallbackClientSource[]
+  readonly #sources: Source[]
   readonly #detection: ResolvedFallbackDetection
   readonly #strategy: FallbackStrategy
   /** Whether a more-preferred source is taken back at a boundary (`eager`). */
   readonly #reclaims: boolean
-  readonly #health: SourceHealth[]
   readonly #logger: Logger
   readonly finalized: boolean
 
-  /** Observable state (for metrics). */
-  activeIndex: number | undefined
-  switchCount = 0
-  /** Freshness gauges. `lag` is absent while it cannot be computed (see {@link FallbackMetrics}). */
-  lag: number | undefined
-  staleness = 0
-  chainHead: number | undefined
-  /** Set when every source is stuck at the same head (no fresher alternative to switch to). */
-  chainStalled = false
-
-  /** The last source actually driven — survives the all-down gap so switch counting stays correct. */
-  #lastActive: number | undefined
+  #active: Source | undefined
+  /** The last source driven: survives the all-down gap, so a resume on the same source is no switch. */
+  #lastActive: Source | undefined
+  #switchCount = 0
   /** The stream in flight. Every method below `getStream` runs inside one. */
   #current: StreamRun | undefined
 
@@ -161,24 +168,28 @@ export class FallbackClient implements BlockStreamClient {
     if (options.sources.length === 0) {
       throw new Error('FallbackClient requires at least one source')
     }
-    // "No fork can arrive" only holds if EVERY source is finalized-only: one hot source is enough
-    // to make a fork reachable, and the flag gates whether a target keeps its rollback machinery
-    // (and whether a finalized-requiring target forces the finalized stream). Conservative by
-    // construction — mixing is allowed, claiming finality for a mixed set is not.
+    // One hot source is enough to make a fork reachable, so the list is finalized only if every
+    // source is (ADR-25 §2).
     this.finalized = options.sources.every((s) => s.client.finalized)
 
-    this.#sources = options.sources
     this.#detection = resolveFallbackDetection(options.detection)
     this.#strategy = fallbackStrategy(options.strategy)
     this.#reclaims = (options.strategy?.preferPrimary ?? 'eager') === 'eager'
-    this.#health = options.sources.map(
-      (s) => new SourceHealth(this.#detection, s.probeCapability != null || this.#detection.capabilityProbe !== false),
-    )
     this.#logger = options.logger ?? defaultLogger({ id: 'fallback' })
+
+    const probed = (s: FallbackClientSource) => s.probeCapability != null || this.#detection.capabilityProbe !== false
+    this.#sources = options.sources.map((s, index) => ({
+      index,
+      name: s.name,
+      client: s.client,
+      probeCapability: s.probeCapability,
+      health: new SourceHealth(this.#detection, probed(s)),
+      run: idleRun(),
+    }))
   }
 
   getUrl(): string {
-    return this.#sources[this.activeIndex ?? this.#lastActive ?? 0].client.getUrl()
+    return (this.#active ?? this.#lastActive ?? this.#sources[0]).client.getUrl()
   }
 
   /** First source that can answer — so a portal's metadata wins over an RPC client's synthetic one. */
@@ -272,9 +283,9 @@ export class FallbackClient implements BlockStreamClient {
     try {
       yield* this.#drive(query, options?.request?.abort)
     } finally {
-      // Nothing is read once the stream ends (OB-60), and a probe still out now answers for no stream.
+      // A probe still out now answers for no stream (OB-60).
       this.#current = undefined
-      this.#clearActive()
+      this.#active = undefined
     }
   }
 
@@ -285,39 +296,38 @@ export class FallbackClient implements BlockStreamClient {
     const sourceOptions = options == null ? undefined : { ...options, finalized }
 
     const probeOptions = this.#detection.capabilityProbe
-    const probeOf = (source: FallbackClientSource): Probe | undefined => {
-      if (source.probeCapability) return source.probeCapability
-      if (probeOptions === false) return undefined
+    for (const source of this.#sources) {
+      let probe = source.probeCapability
+      if (!probe && probeOptions !== false) {
+        const tuning = probeOptions === true ? undefined : probeOptions
+        probe = makeCapabilityProbe(source.client, query, tuning, sourceOptions)
+      }
 
-      return makeCapabilityProbe(source.client, query, probeOptions === true ? undefined : probeOptions, sourceOptions)
+      source.run = idleRun(probe)
     }
 
     return {
       finalized,
       sourceOptions,
+      cursor: undefined,
       lagArmed: false,
       unproductiveMs: 0,
-      sources: this.#sources.map((source) => ({
-        probe: probeOf(source),
-        probing: false,
-        lastProbeAt: 0,
-        head: undefined,
-        leftUnproductive: false,
-      })),
+      requestSince: undefined,
+      reference: undefined,
     }
   }
 
   async *#drive<Q extends Query>(query: Q, abort: AbortSignal | undefined): AsyncGenerator<StreamData<GetBlock<Q>>> {
-    const run = this.#current!
-    let cursor: BlockCursor | undefined
-    let forced: number | undefined
+    let forced: Source | undefined
 
     while (true) {
       // Sources end their streams quietly on abort; without this check that end would look like a
       // fault and the supervisor would re-drive another source.
-      if (abort?.aborted) return
+      if (abort?.aborted) {
+        return
+      }
 
-      const active = forced ?? (await this.#selectSource(cursor, abort))
+      const active = forced ?? (await this.#selectSource(abort))
       if (active === undefined) {
         return
       }
@@ -325,19 +335,13 @@ export class FallbackClient implements BlockStreamClient {
       forced = undefined
       this.#setActive(active)
 
-      // A freshly driven source starts with a clean stall clock: it must not inherit the wait of
-      // whatever ran before it, including an earlier run of itself after an all-down gap.
-      run.unproductiveMs = 0
-      run.sources[active].leftUnproductive = false
-
-      const read = yield* this.#readSource(active, query, cursor, abort)
-      cursor = read.cursor
-
-      const handoff = read.handoff
-      if (handoff === undefined) return
+      const handoff = yield* this.#readSource(active, query, abort)
+      if (handoff === undefined) {
+        return
+      }
 
       if (handoff.type === 'use') {
-        forced = handoff.index
+        forced = handoff.source
         continue
       }
 
@@ -346,64 +350,67 @@ export class FallbackClient implements BlockStreamClient {
   }
 
   /**
-   * Reads the active source from just after `from`, and yields its batches. A source fault comes
-   * back as a handoff; a fork throws and ends the stream.
+   * Reads the active source from just after the cursor, and yields its batches. A source fault
+   * comes back as a handoff; a fork throws and ends the stream. No handoff ends the stream.
    */
   async *#readSource<Q extends Query>(
-    active: number,
+    active: Source,
     query: Q,
-    from: BlockCursor | undefined,
     abort: AbortSignal | undefined,
-  ): AsyncGenerator<StreamData<GetBlock<Q>>, ReadEnd> {
-    let cursor = from
+  ): AsyncGenerator<StreamData<GetBlock<Q>>, Handoff | undefined> {
+    const run = this.#current!
 
     const q: Query = { ...query }
-    if (cursor) {
-      q.fromBlock = cursor.number + 1
-      q.parentBlockHash = cursor.hash
+    if (run.cursor) {
+      q.fromBlock = run.cursor.number + 1
+      q.parentBlockHash = run.cursor.hash
     }
 
     let iterator: AsyncIterator<StreamData<any>>
     try {
-      iterator = this.#sources[active].client.getStream(q, this.#current!.sourceOptions)[Symbol.asyncIterator]()
+      iterator = active.client.getStream(q, run.sourceOptions)[Symbol.asyncIterator]()
     } catch (e) {
-      return { cursor, handoff: this.#asFault(e, abort) }
+      return this.#asFault(e, abort)
     }
 
     try {
       while (true) {
-        const next = await this.#nextWithStallTicks(iterator, active, cursor)
-        if ('error' in next) return { cursor, handoff: this.#asFault(next.error, abort) }
-        if ('failover' in next) return { cursor, handoff: { type: 'failover', cause: next.failover } }
-        if (next.done) return { cursor } // source completed (bounded stream)
+        const next = await this.#nextWithStallTicks(iterator, active)
+        if ('error' in next) {
+          return this.#asFault(next.error, abort)
+        }
+        if ('failover' in next) {
+          return { type: 'failover', cause: next.failover }
+        }
+        if (next.done) {
+          return undefined
+        }
 
         const batch = next.value
 
-        // A delivered batch proves both liveness *and* capability: the active source just served
-        // exactly the configured query (an incapable source throws rather than yields). The
-        // standby capability probe never runs for the active source, so without this a cold-start
-        // primary would serve forever yet never leave `unknown` for `healthy`.
-        this.#health[active].onBatch()
-        this.#health[active].onCapability(true)
+        // A delivered batch proves liveness and capability. The standby probe never runs for the
+        // active source, so without this a cold-start primary would never leave `unknown`.
+        active.health.onBatch()
+        active.health.onCapability(true)
 
         if (batch.blocks.length > 0) {
           try {
-            cursor = cursorFromHeader(batch.blocks[batch.blocks.length - 1])
+            run.cursor = cursorFromHeader(batch.blocks[batch.blocks.length - 1])
           } catch (e) {
             // A malformed batch is the source's fault: resume before it on another source.
-            return { cursor, handoff: this.#asFault(e, abort) }
+            return this.#asFault(e, abort)
           }
         }
 
         yield batch as StreamData<GetBlock<Q>>
 
-        const event = await this.#observeBoundary(active, cursor)
-        const command = this.#decide(event, cursor)
-        if (command.action === 'use' && command.index !== active) {
-          return { cursor, handoff: { type: 'use', index: command.index } }
+        const event = await this.#observeBoundary(active)
+        const command = this.#decide(event)
+        if (command.action === 'use' && command.index !== active.index) {
+          return { type: 'use', source: this.#sources[command.index] }
         }
         if (command.action === 'failover') {
-          return { cursor, handoff: { type: 'failover', cause: this.#boundaryFailoverCause(event) } }
+          return { type: 'failover', cause: this.#boundaryFailoverCause(event) }
         }
       }
     } finally {
@@ -413,8 +420,12 @@ export class FallbackClient implements BlockStreamClient {
 
   /** A source error as a handoff. A fork is not a source fault (INV-62), and after an abort nothing is. */
   #asFault(error: unknown, abort: AbortSignal | undefined): Handoff | undefined {
-    if (isForkException(error)) throw error
-    if (abort?.aborted) return undefined
+    if (isForkException(error)) {
+      throw error
+    }
+    if (abort?.aborted) {
+      return undefined
+    }
 
     return { type: 'fault', cause: classifyError('stream', error) }
   }
@@ -424,63 +435,83 @@ export class FallbackClient implements BlockStreamClient {
    * was left selects the check (ADR-25 §4). The jitter allowance is `maxLagBlocks`, and its default
    * still applies when lag failover is off.
    */
-  #isBehind(i: number): boolean {
-    const source = this.#current!.sources[i]
-    const sample = source.head
-    // Head and cursor are compared as sampled at the same instant. Reading the live cursor against
-    // a head cached up to `headTtlMs` ago would count everything the chain produced in between as
-    // "behind" — on a sub-second chain that skew alone exceeds the whole allowance.
-    if (sample?.cursorAt == null) return false
-    const head = sample.value
+  #isBehind(source: Source): boolean {
+    const sample = source.run.head
+    // Head and cursor are compared as sampled at the same instant: against the live cursor, a head
+    // cached for `headTtlMs` reads as behind by everything the chain produced since.
+    if (sample?.cursorAt == null) {
+      return false
+    }
 
-    // Dropped for not making progress: it has to be level with the pipe again before we go back,
-    // or we would stall, fail over and crawl back in a loop. Being *level* is enough — demanding
-    // it be ahead of a tip-following source is a bar nothing can clear.
-    if (source.leftUnproductive) return head == null || head < sample.cursorAt
+    const head = sample.value
+    // Dropped for not making progress: it must be level with the pipe again, or the pipe would
+    // stall, fail over and crawl back in a loop. Ahead of a tip-following source is a bar nothing clears.
+    if (source.run.leftUnproductive) {
+      return head == null || head < sample.cursorAt
+    }
 
     // Dropped for a fault: only a structural gap disqualifies it, never ordinary ingestion jitter.
     const allowance = this.#detection.maxLagBlocks ?? DEFAULT_BEHIND_ALLOWANCE
+
     return head != null && head + allowance < sample.cursorAt
   }
 
-  /** The *stalled* verdict: unproductive wait past the window, optionally plus an open request. */
-  #isStale(outstandingMs = 0): boolean {
-    return (
-      this.#detection.maxStalenessMs != null &&
-      this.#current!.unproductiveMs + outstandingMs > this.#detection.maxStalenessMs
-    )
+  /** The active source's unproductive wait, the request in flight included. */
+  #staleness(): number {
+    const run = this.#current
+    if (!run || !this.#active) {
+      return 0
+    }
+
+    const outstandingMs = run.requestSince === undefined ? 0 : this.#detection.clock() - run.requestSince
+
+    return run.unproductiveMs + outstandingMs
   }
 
-  #decide(event: FallbackEvent, cursor: BlockCursor | undefined, allDownMs?: number): FallbackCommand {
-    return this.#strategy({ event, activeIndex: this.activeIndex, sources: this.#snapshot(), cursor, allDownMs })
+  /** The *stalled* verdict: the unproductive wait is past `maxStalenessMs`. */
+  #isStale(): boolean {
+    const max = this.#detection.maxStalenessMs
+
+    return max != null && this.#staleness() > max
+  }
+
+  #decide(event: FallbackEvent, allDownMs?: number): FallbackCommand {
+    return this.#strategy({
+      event,
+      activeIndex: this.#active?.index,
+      sources: this.#snapshot(),
+      cursor: this.#current!.cursor,
+      allDownMs,
+    })
   }
 
   /** What the strategy sees of each source. */
   #snapshot(): SourceSnapshot[] {
-    return this.#sources.map((_, i) => ({
-      index: i,
-      health: this.#health[i].state,
-      active: this.activeIndex === i,
-      head: this.#current!.sources[i].head?.value,
-      behind: this.#isBehind(i),
+    return this.#sources.map((s) => ({
+      index: s.index,
+      health: s.health.state,
+      active: s === this.#active,
+      head: s.run.head?.value,
+      behind: this.#isBehind(s),
     }))
   }
 
   /**
-   * Pick the source to drive: consult the strategy, waiting out an all-down gap (`hold`) with
-   * `allDownPollMs` naps — cooldown expiry and head polls make recovery visible between naps.
-   * Resolves `undefined` when `abort` fires during the wait.
+   * Pick the source to drive, waiting out an all-down gap (`hold`) with `allDownPollMs` naps —
+   * cooldown expiry and head polls make recovery visible between naps. Resolves `undefined` when
+   * `abort` fires during the wait.
    */
-  async #selectSource(cursor: BlockCursor | undefined, abort: AbortSignal | undefined): Promise<number | undefined> {
+  async #selectSource(abort: AbortSignal | undefined): Promise<Source | undefined> {
     let allDownSince: number | undefined
 
     while (true) {
       if (abort?.aborted) {
-        this.#clearActive()
+        this.#active = undefined
+
         return undefined
       }
 
-      const eligible = this.#health.some((h) => h.state !== 'unhealthy')
+      const eligible = this.#sources.some((s) => s.health.state !== 'unhealthy')
       if (eligible) {
         allDownSince = undefined
       } else {
@@ -488,65 +519,51 @@ export class FallbackClient implements BlockStreamClient {
       }
 
       const allDownMs = allDownSince !== undefined ? this.#detection.clock() - allDownSince : undefined
-      const command = this.#decide({ type: 'select' }, cursor, allDownMs)
+      const command = this.#decide({ type: 'select' }, allDownMs)
 
       if (command.action === 'use') {
-        return command.index
+        return this.#sources[command.index]
       }
+
+      this.#active = undefined
       if (command.action === 'abort') {
-        this.#clearActive()
         throw new AllSourcesDownError()
       }
 
-      this.#clearActive()
       await abortableSleep(this.#detection.allDownPollMs, abort)
     }
   }
 
-  /** Refresh other-source heads and the lag gauges, and produce the boundary event's verdict. */
-  async #observeBoundary(
-    active: number,
-    cursor: BlockCursor | undefined,
-  ): Promise<Extract<FallbackEvent, { type: 'batch' }>> {
-    const staleAtBoundary = this.#isStale()
+  /** Refresh the other sources' heads and the lag reference, and produce the boundary verdicts. */
+  async #observeBoundary(active: Source): Promise<Extract<FallbackEvent, { type: 'batch' }>> {
+    const run = this.#current!
+    const maxLag = this.#detection.maxLagBlocks
+    const stale = this.#isStale()
+
     // Poll standbys only when something reads the heads (WP-63): at tip pace the batch cadence
     // outruns `headTtlMs`, so this gate, not the cache, bounds the standby traffic.
-    const canReclaim = this.#reclaims && active > 0
-    const wantHeads = this.#detection.maxLagBlocks != null || staleAtBoundary || canReclaim
-    const others = wantHeads ? await this.#chainHeadOthers(active, cursor) : undefined
-    // A boundary can be reached before any block has been delivered — a source may yield an empty
-    // batch (the portal answers 204 that way) — so there is not always a position to measure from.
-    // Both gauges stay unset rather than falling back to a `-1` sentinel, which would surface as a
-    // chain-height-sized lag on the metrics.
-    const lastNumber = cursor?.number
-    const known = [others, lastNumber].filter((n): n is number => n != null)
-    this.chainHead = known.length ? Math.max(...known) : undefined
-    if (others == null || lastNumber == null) {
-      this.lag = undefined // no independent reference, or no position yet ⇒ not computable
-    } else {
-      const lag = others - lastNumber
-      this.lag = Math.max(0, lag)
-      // Arm only once we are genuinely at/near the tip: within the threshold *and* not ahead of the
-      // reference (`lag >= 0`). A negative lag means the independent reference is itself behind us
-      // (stale/lagging) — arming on that would let a later-recovering source's head trip a spurious
-      // failover while we are still backfilling.
-      if (this.#detection.maxLagBlocks != null && lag >= 0 && lag <= this.#detection.maxLagBlocks) {
-        this.#current!.lagArmed = true // arm at tip (latched)
+    const canReclaim = this.#reclaims && active.index > 0
+    const wantHeads = maxLag != null || stale || canReclaim
+    const head = wantHeads ? await this.#chainHeadOthers(active) : undefined
+
+    // A boundary can come before any block was delivered (a portal answers 204 with an empty
+    // batch), so the cursor may be unset: the lag is then not computable rather than measured from -1.
+    const cursor = run.cursor?.number
+    run.reference = { head, cursor }
+
+    // Arm at the tip only: within the threshold and not ahead of the reference. A reference behind
+    // the pipe is itself stale, and arming on it would let a later jump trip a spurious failover.
+    if (maxLag != null && head != null && cursor != null) {
+      const gap = head - cursor
+      if (gap >= 0 && gap <= maxLag) {
+        run.lagArmed = true
       }
     }
 
-    // The detection verdicts ride on the event: the strategy decides what to do about them. A
-    // boundary carries `stale` as well as `lagging`, because a source can keep answering without
-    // making progress (empty batches at a finality frontier) — that never reaches the stall ticker.
-    const lagging =
-      this.#detection.maxLagBlocks != null &&
-      this.#current!.lagArmed &&
-      this.lag != null &&
-      this.lag > this.#detection.maxLagBlocks
-    this.staleness = this.#current!.unproductiveMs
-    this.chainStalled = staleAtBoundary && !fresherSourceAhead(this.#snapshot(), cursor)
+    const lag = this.#lag()
+    const lagging = maxLag != null && run.lagArmed && lag != null && lag > maxLag
 
-    return { type: 'batch', lagging, stale: staleAtBoundary }
+    return { type: 'batch', lagging, stale }
   }
 
   /** Why the active source was failed over at a boundary — the detection verdict that tripped. */
@@ -563,246 +580,249 @@ export class FallbackClient implements BlockStreamClient {
   }
 
   /**
-   * The highest head reported by the *other* eligible sources — an independent reference that avoids
-   * the circular-lag trap (a source that stalls head and data together reads lag ≈ 0 against its own
-   * head). Excludes `unhealthy` sources so a flagged-bad one can't define the tip. Heads are cached
-   * for `headTtlMs`; polling a standby's head doubles as its liveness/capability driver.
+   * The highest head reported by the *other* eligible sources — an independent reference: a source
+   * that stalls head and data together reads lag ≈ 0 against its own head. An `unhealthy` source
+   * cannot define the tip.
    */
-  async #chainHeadOthers(active: number, last?: BlockCursor): Promise<number | undefined> {
-    const results = await Promise.all(
-      this.#sources.map((_, i) =>
-        i === active || this.#health[i].state === 'unhealthy'
-          ? Promise.resolve(undefined)
-          : this.#getCachedHead(i, last),
-      ),
-    )
-    const vals = results.filter((h): h is number => h != null)
+  async #chainHeadOthers(active: Source): Promise<number | undefined> {
+    const polled = this.#sources.filter((s) => s !== active && s.health.state !== 'unhealthy')
+    const heads = await Promise.all(polled.map((s) => this.#getCachedHead(s)))
+    const known = heads.filter((h): h is number => h != null)
 
-    return vals.length ? Math.max(...vals) : undefined
+    return known.length ? Math.max(...known) : undefined
   }
 
   /** A head poll, time-boxed by `headPollTimeoutMs` so a hung standby cannot stall the active source (FM-64). */
   #headWithTimeout<T>(p: Promise<T>): Promise<T> {
     const timeoutMs = this.#detection.headPollTimeoutMs
+
     return withTimeout(p, timeoutMs, () => new Error(`head poll timed out after ${timeoutMs}ms`))
   }
 
   /**
-   * Poll a source's independent head (cached for `headTtlMs`). The poll doubles as a liveness probe
-   * — a fresh head promotes a standby toward `healthy` — and is when we (re)fire its capability
-   * probe.
+   * Poll a source's head, cached for `headTtlMs`. The poll doubles as a liveness probe — a fresh
+   * head promotes a standby toward `healthy` — and fires its capability probe.
    */
-  async #getCachedHead(i: number, last?: BlockCursor): Promise<number | undefined> {
+  async #getCachedHead(source: Source): Promise<number | undefined> {
     const run = this.#current!
-    const source = run.sources[i]
     const now = this.#detection.clock()
-    const cached = source.head
-    if (cached && now - cached.at < this.#detection.headTtlMs) return cached.value
+    const cursorAt = run.cursor?.number
+
+    const cached = source.run.head
+    if (cached && now - cached.at < this.#detection.headTtlMs) {
+      return cached.value
+    }
 
     try {
       // Each source at its own commitment unless the stream forces one; the cheaper number-only
       // poll when the client has it (WP-66).
-      const client = this.#sources[i].client
+      const client = source.client
       const headOptions = run.finalized != null ? { finalized: run.finalized } : undefined
       const value = client.getHeight
         ? await this.#headWithTimeout(client.getHeight(headOptions))
         : (await this.#headWithTimeout(client.getHead(headOptions)))?.number
-      source.head = { value, at: now, cursorAt: last?.number }
-      if (value != null) this.#health[i].onLivenessPass()
-      this.#maybeProbeCapability(i, last)
+
+      source.run.head = { value, at: now, cursorAt }
+      if (value != null) {
+        source.health.onLivenessPass()
+      }
+      this.#maybeProbeCapability(source)
+
       return value
     } catch (e) {
-      source.head = { value: undefined, at: now, cursorAt: last?.number }
-      this.#failSource(i, classifyError('liveness', e))
+      source.run.head = { value: undefined, at: now, cursorAt }
+      this.#failSource(source, classifyError('liveness', e))
+
       return undefined
     }
   }
 
   /**
-   * Fire a source's capability probe once it is reachable, feeding the result into health. A probed
-   * source cannot become `healthy` on liveness alone — capability must be confirmed — so without
-   * this it could never be switched up to. Fire-and-forget (a full query slice must not block the
-   * boundary), throttled by `capabilityProbeIntervalMs`, and never concurrent for the same source.
-   * The gating in {@link SourceHealth} drops the confirmation when a source goes unhealthy, so it
-   * must re-prove before recovering.
+   * Fire a source's capability probe, so a probed standby can become `healthy` at all. It runs in
+   * the background (a full query slice must not block the boundary), at most once per
+   * `capabilityProbeIntervalMs`, and never twice at once for one source.
    */
-  #maybeProbeCapability(i: number, last?: BlockCursor): void {
+  #maybeProbeCapability(source: Source): void {
     const run = this.#current!
-    const source = run.sources[i]
-    const probe = source.probe
-    if (!probe || this.#health[i].capabilityConfirmed || source.probing) return
+    const sourceRun = source.run
+    const probe = sourceRun.probe
+    if (!probe || source.health.capabilityConfirmed || sourceRun.probing) {
+      return
+    }
 
     const now = this.#detection.clock()
-    if (now - source.lastProbeAt < this.#detection.capabilityProbeIntervalMs) return
+    if (now - sourceRun.lastProbeAt < this.#detection.capabilityProbeIntervalMs) {
+      return
+    }
 
-    source.lastProbeAt = now
-    source.probing = true
-    // A probe can outlive its stream (its own timeout is 30s by default): its verdict then describes
-    // a query, and possibly a commitment, that nothing serves any more (INV-66).
+    sourceRun.lastProbeAt = now
+    sourceRun.probing = true
+    // A probe can outlive its stream; its verdict then describes a query nothing serves (INV-66).
     const ended = () => this.#current !== run
-    // `Promise.resolve().then(...)` normalizes a *synchronously*-throwing probe into a rejection,
-    // so the throw can't escape this method and strand `probing` at `true`.
+    const cursor = run.cursor
+    // `Promise.resolve().then` turns a synchronous throw into a rejection, so `probing` is always reset.
     Promise.resolve()
-      .then(() => probe(last))
+      .then(() => probe(cursor))
       .then(
         (r) => {
-          if (ended()) return
+          if (ended()) {
+            return
+          }
           if (r.ok) {
-            this.#health[i].onLivenessPass()
-            this.#health[i].onCapability(true)
+            source.health.onLivenessPass()
+            source.health.onCapability(true)
           } else {
-            this.#failSource(i, r.cause ?? capabilityFailure('probe reported not-capable'))
+            this.#failSource(source, r.cause ?? capabilityFailure('probe reported not-capable'))
           }
         },
         (e) => {
-          if (ended()) return
-          this.#failSource(i, classifyError('capability', e))
+          if (!ended()) {
+            this.#failSource(source, classifyError('capability', e))
+          }
         },
       )
       .finally(() => {
-        source.probing = false
+        sourceRun.probing = false
       })
   }
 
   /**
    * `iterator.next()` under the stall clock. While the request is outstanding, a ticker fires every
-   * `freshnessTickMs`; each tick refreshes the other sources' heads (TTL-bounded), updates the
-   * staleness gauges, and consults the strategy with a `stall` event — `failover` ends the wait,
-   * anything else keeps waiting. Disabled (plain `next()`) when `maxStalenessMs` is null. A source
-   * error comes back as a value, never a throw.
+   * `freshnessTickMs`; each stale tick refreshes the other sources' heads and asks the strategy for
+   * a `stall` decision — `failover` ends the wait. Disabled (plain `next()`) when `maxStalenessMs`
+   * is null. A source error comes back as a value, never a throw.
    */
-  async #nextWithStallTicks(
-    iterator: AsyncIterator<StreamData<any>>,
-    active: number,
-    cursor?: BlockCursor,
-  ): Promise<Fetched> {
+  async #nextWithStallTicks(iterator: AsyncIterator<StreamData<any>>, active: Source): Promise<Fetched> {
     if (this.#detection.maxStalenessMs == null) {
-      this.staleness = 0
       return iterator.next().catch((error: unknown) => ({ error }))
     }
 
     const run = this.#current!
 
-    // The clock starts when the request goes out and stops when it settles, so time the *consumer*
-    // spends between yields is never counted against the source.
-    const start = this.#detection.clock()
-    // The rejection handler here also keeps a later abandon from surfacing as unhandled.
+    // The clock runs only while the request is out, so the consumer's time between yields is
+    // never counted against the source.
+    run.requestSince = this.#detection.clock()
+    // The rejection handler also keeps a later abandon from surfacing as unhandled.
     const settled = iterator.next().then(
       (v) => ({ type: 'next' as const, v }),
       (e) => ({ type: 'error' as const, e }),
     )
 
-    while (true) {
-      const tick = delay(this.#detection.freshnessTickMs)
-      const r = await Promise.race([settled, tick.promise.then(() => ({ type: 'tick' as const }))])
-      tick.cancel()
+    try {
+      while (true) {
+        const tick = delay(this.#detection.freshnessTickMs)
+        const r = await Promise.race([settled, tick.promise.then(() => ({ type: 'tick' as const }))])
+        tick.cancel()
 
-      if (r.type === 'next') {
-        const delivered = !r.v.done && (r.v.value as StreamData<any>).blocks.length > 0
-        // An empty batch is an answer, not progress: keep the wait on the clock instead of
-        // restarting it, so a source that only ever answers empty is still seen as stalled.
-        run.unproductiveMs = delivered ? 0 : run.unproductiveMs + (this.#detection.clock() - start)
-        this.staleness = run.unproductiveMs
-        this.chainStalled = false
-        return r.v
+        if (r.type === 'next') {
+          // An empty batch is an answer, not progress: the wait stays on the clock, so a source
+          // that only ever answers empty is still seen as stalled.
+          const delivered = !r.v.done && (r.v.value as StreamData<any>).blocks.length > 0
+          run.unproductiveMs = delivered ? 0 : this.#staleness()
+
+          return r.v
+        }
+        if (r.type === 'error') {
+          return { error: r.e }
+        }
+
+        // Re-polling the other sources feeds the decision and keeps probing their liveness, so a
+        // held source notices when the chain comes back.
+        const stale = this.#isStale()
+        if (stale) {
+          await this.#chainHeadOthers(active)
+        }
+
+        const command = this.#decide({ type: 'stall', stale })
+        if (command.action === 'failover') {
+          return { failover: freshnessFailure('stream', 'stale', 'no batch progress while a fresher source was ahead') }
+        }
       }
-      if (r.type === 'error') {
-        this.staleness = 0
-        this.chainStalled = false
-        return { error: r.e }
-      }
-
-      const outstandingMs = this.#detection.clock() - start
-      this.staleness = run.unproductiveMs + outstandingMs
-      const stale = this.#isStale(outstandingMs)
-
-      // Re-polling the other sources feeds the stall decision and (re)probes their liveness and
-      // capability. A slow but not stale request does not fan out head queries.
-      if (stale) {
-        await this.#chainHeadOthers(active, cursor)
-      }
-      // Observability: every source is stuck at the same head — switching would not help.
-      this.chainStalled = stale && !fresherSourceAhead(this.#snapshot(), cursor)
-
-      const command = this.#decide({ type: 'stall', stale }, cursor)
-      if (command.action === 'failover') {
-        this.staleness = 0
-
-        return { failover: freshnessFailure('stream', 'stale', 'no batch progress while a fresher source was ahead') }
-      }
+    } finally {
+      run.requestSince = undefined
     }
   }
 
   /**
-   * Feed a failure to a source's health (the `check` selects the signal), then log *why* — but only
-   * when it actually flips the source unhealthy, so a log line always marks a real transition
-   * (liveness fails are noisy until they trip the threshold). The bounded `reason`/`code`/`check`
-   * also reach {@link metrics}; the full `detail` (incl. the request) is logged, never a label.
+   * Feed a failure to a source's health, and log it only when it flips the source unhealthy, so a
+   * log line always marks a real transition. The full `detail` is logged, never a metric label.
    */
-  #failSource(i: number, cause: SourceErrorInfo): void {
+  #failSource(source: Source, cause: SourceErrorInfo): void {
     // Only the supervisor's own stall verdict demotes a source; a custom probe is free to report
     // `stale` about something else entirely.
-    if (cause.check === 'stream' && cause.reason === 'stale') this.#current!.sources[i].leftUnproductive = true
-    const before = this.#health[i].state
+    if (cause.check === 'stream' && cause.reason === 'stale') {
+      source.run.leftUnproductive = true
+    }
+
+    const before = source.health.state
     switch (cause.check) {
       case 'stream':
-        this.#health[i].onStreamError(cause)
+        source.health.onStreamError(cause)
         break
       case 'liveness':
-        this.#health[i].onLivenessFail(cause)
+        source.health.onLivenessFail(cause)
         break
       case 'capability':
-        this.#health[i].onCapability(false, cause)
+        source.health.onCapability(false, cause)
         break
     }
-    if (before !== 'unhealthy' && this.#health[i].state === 'unhealthy') {
+
+    if (before !== 'unhealthy' && source.health.state === 'unhealthy') {
       this.#logger.warn(
-        { source: this.#sources[i].name, check: cause.check, reason: cause.reason, code: cause.code },
-        `fallback source "${this.#sources[i].name}" marked unhealthy: ${cause.detail}`,
+        { source: source.name, check: cause.check, reason: cause.reason, code: cause.code },
+        `fallback source "${source.name}" marked unhealthy: ${cause.detail}`,
       )
     }
   }
 
-  #setActive(i: number): void {
-    // Count a switch against the last source we drove (not `activeIndex`, which is cleared to
-    // `undefined` during an all-down gap) so resuming on a *different* source after the gap still
-    // registers, and resuming on the *same* one does not.
-    if (this.#lastActive !== undefined && this.#lastActive !== i) {
-      this.switchCount++
-      // The freshness gauges describe the previous source until the new one repopulates them.
-      this.#resetGauges()
+  #setActive(source: Source): void {
+    // Compare with the last source driven, not the active one, which an all-down gap clears: a
+    // resume on another source after the gap is a switch, a resume on the same one is not.
+    if (this.#lastActive !== undefined && this.#lastActive !== source) {
+      this.#switchCount++
     }
-    this.#lastActive = i
-    this.activeIndex = i
+
+    this.#lastActive = source
+    this.#active = source
+
+    // A new read starts with a clean stall clock and no lag reference: it must not inherit the
+    // measurements of whatever ran before it, an earlier read of itself included.
+    const run = this.#current!
+    run.unproductiveMs = 0
+    run.reference = undefined
+    source.run.leftUnproductive = false
   }
 
-  /** No source is being driven: report no active source and clear the per-source gauges. */
-  #clearActive(): void {
-    this.activeIndex = undefined
-    this.#resetGauges()
-  }
+  #lag(): number | undefined {
+    const reference = this.#current?.reference
+    if (reference?.head == null || reference.cursor == null) {
+      return undefined
+    }
 
-  #resetGauges(): void {
-    this.lag = undefined
-    this.staleness = 0
-    this.chainStalled = false
-    this.chainHead = undefined
+    return Math.max(0, reference.head - reference.cursor)
   }
 
   /** Snapshot of the observable state for export to a metrics surface. */
   metrics(): FallbackMetrics {
+    const active = this.#active
+    // The gauges describe the source being driven; with none, there is nothing to measure.
+    const reference = active ? this.#current?.reference : undefined
+    const known = [reference?.head, reference?.cursor].filter((n): n is number => n != null)
+    const chainStalled =
+      active !== undefined && this.#isStale() && !fresherSourceAhead(this.#snapshot(), this.#current!.cursor)
+
     return {
-      activeIndex: this.activeIndex,
-      switchCount: this.switchCount,
-      lag: this.lag,
-      staleness: this.staleness,
-      chainHead: this.chainHead,
-      chainStalled: this.chainStalled,
-      sources: this.#sources.map((s, i) => ({
+      activeIndex: active?.index,
+      switchCount: this.#switchCount,
+      lag: active ? this.#lag() : undefined,
+      staleness: this.#staleness(),
+      chainHead: known.length ? Math.max(...known) : undefined,
+      chainStalled,
+      sources: this.#sources.map((s) => ({
         name: s.name,
-        health: this.#health[i].state,
-        active: this.activeIndex === i,
-        cause: this.#health[i].cause,
+        health: s.health.state,
+        active: s === active,
+        cause: s.health.cause,
       })),
     }
   }
