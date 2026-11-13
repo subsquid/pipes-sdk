@@ -1,6 +1,5 @@
 export * from './mock-websocket.js'
 export * from './test-block-stream.js'
-export * from './test-block-stream-client.js'
 export * from './test-logger.js'
 export * from './test-metrics-server.js'
 export * from './test-portal.js'
