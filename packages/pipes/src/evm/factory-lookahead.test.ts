@@ -8,12 +8,8 @@ import { createTarget } from '~/core/target.js'
 import { buildFuse8Set, fuse8Contains } from '~/internal/fuse8/index.js'
 import { PortalClient } from '~/portal-client/client.js'
 import { type PortalBlock, encodeEvent, mockBlock } from '~/testing/evm/index.js'
-import {
-  type MockChainPortal,
-  type MockPortalOptions,
-  type MockPortalRequest,
-  mockPortal,
-} from '~/testing/test-portal.js'
+import { withPortal } from '~/testing/portal-fixture.js'
+import { type MockChainPortal, type MockPortalRequest } from '~/testing/test-portal.js'
 
 import { evmEventDecoder } from './evm-decoder.js'
 import { evmPortalStream } from './evm-portal-source.js'
@@ -520,110 +516,106 @@ describe('decideSegment', () => {
 })
 
 describe('Factory lookahead', () => {
-  const portals: MockChainPortal[] = []
-
-  async function chainPortal(options: MockPortalOptions) {
-    const portal = await mockPortal(options)
-    portals.push(portal)
-
-    return portal
-  }
-
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks()
-    await Promise.all(portals.splice(0).map((p) => p.close()))
   })
 
-  it('filters the finalized blocks by the children created up to them, then falls back near the head', async () => {
-    const blocks = [
-      mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1))] }, { logs: [swap(pool(1))] }] }),
-      mockBlock({ number: 30, transactions: [{ logs: [poolCreated(pool(2)), poolCreated(pool(3))] }] }),
-      mockBlock({ number: 40, transactions: [{ logs: [swap(pool(2)), swap(pool(99))] }] }),
-      mockBlock({ number: 85, transactions: [{ logs: [poolCreated(pool(4))] }, { logs: [swap(pool(4))] }] }),
-      mockBlock({ number: 95, transactions: [{ logs: [swap(pool(1)), swap(pool(4))] }] }),
-    ]
-    const options = { blocks, finalized: 80, latest: 100 }
+  withPortal(
+    'filters the finalized blocks by the children created up to them, then falls back near the head',
+    async ({ portal: openPortal }) => {
+      const blocks = [
+        mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1))] }, { logs: [swap(pool(1))] }] }),
+        mockBlock({ number: 30, transactions: [{ logs: [poolCreated(pool(2)), poolCreated(pool(3))] }] }),
+        mockBlock({ number: 40, transactions: [{ logs: [swap(pool(2)), swap(pool(99))] }] }),
+        mockBlock({ number: 85, transactions: [{ logs: [poolCreated(pool(4))] }, { logs: [swap(pool(4))] }] }),
+        mockBlock({ number: 95, transactions: [{ logs: [swap(pool(1)), swap(pool(4))] }] }),
+      ]
+      const options = { blocks, finalized: 80, latest: 100 }
 
-    const portal = await chainPortal(options)
-    const lookahead = await runPipe(portal, { range: { from: 0, to: 100 }, lookahead: { minBlocksPerFilter: 10 } })
+      const portal = await openPortal(options)
+      const lookahead = await runPipe(portal, { range: { from: 0, to: 100 }, lookahead: { minBlocksPerFilter: 10 } })
 
-    const fullScan = await runPipe(await chainPortal(options), { range: { from: 0, to: 100 }, lookahead: false })
+      const fullScan = await runPipe(await openPortal(options), { range: { from: 0, to: 100 }, lookahead: false })
 
-    expect(lookahead.rows).toEqual(fullScan.rows)
-    expect(lookahead.rows.map((r) => [r.block, r.contract])).toEqual([
-      [5, pool(1)],
-      [40, pool(2)],
-      [85, pool(4)],
-      [95, pool(1)],
-      [95, pool(4)],
-    ])
+      expect(lookahead.rows).toEqual(fullScan.rows)
+      expect(lookahead.rows.map((r) => [r.block, r.contract])).toEqual([
+        [5, pool(1)],
+        [40, pool(2)],
+        [85, pool(4)],
+        [95, pool(1)],
+        [95, pool(4)],
+      ])
 
-    expect(
-      mainRequests(portal).map((r) => ({
-        fromBlock: r.query.fromBlock,
-        toBlock: r.query.toBlock,
-        parentBlockHash: r.query.parentBlockHash,
-        address: childRequestsOf(r)[0].address,
-      })),
-    ).toEqual([
-      { fromBlock: 0, toBlock: 80, parentBlockHash: undefined, address: [pool(1), pool(2), pool(3)] },
-      {
-        fromBlock: 81,
-        toBlock: 100,
-        parentBlockHash: `0x${(80).toString(16).padStart(64, '0')}`,
-        address: undefined,
-      },
-    ])
-    expect(lookahead.messages).toContain(
-      'factory lookahead: fetching child events by topic from block 81 on, as it is close to the finalized head',
-    )
-  })
+      expect(
+        mainRequests(portal).map((r) => ({
+          fromBlock: r.query.fromBlock,
+          toBlock: r.query.toBlock,
+          parentBlockHash: r.query.parentBlockHash,
+          address: childRequestsOf(r)[0].address,
+        })),
+      ).toEqual([
+        { fromBlock: 0, toBlock: 80, parentBlockHash: undefined, address: [pool(1), pool(2), pool(3)] },
+        {
+          fromBlock: 81,
+          toBlock: 100,
+          parentBlockHash: `0x${(80).toString(16).padStart(64, '0')}`,
+          address: undefined,
+        },
+      ])
+      expect(lookahead.messages).toContain(
+        'factory lookahead: fetching child events by topic from block 81 on, as it is close to the finalized head',
+      )
+    },
+  )
 
-  it('sends the children as one set and drops the logs of contracts it passes by mistake', async () => {
-    const children = [pool(1), pool(2), pool(3)]
-    const built = buildFuse8Set([...children].sort())
+  withPortal(
+    'sends the children as one set and drops the logs of contracts it passes by mistake',
+    async ({ portal: openPortal }) => {
+      const children = [pool(1), pool(2), pool(3)]
+      const built = buildFuse8Set([...children].sort())
 
-    // The builder is deterministic, so this contract also passes the set the lookahead builds
-    let n = 1_000
-    while (!fuse8Contains(built, pool(n))) n++
-    const impostor = pool(n)
+      // The builder is deterministic, so this contract also passes the set the lookahead builds
+      let n = 1_000
+      while (!fuse8Contains(built, pool(n))) n++
+      const impostor = pool(n)
 
-    const blocks = [
-      mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1))] }, { logs: [swap(pool(1))] }] }),
-      mockBlock({ number: 30, transactions: [{ logs: [poolCreated(pool(2)), poolCreated(pool(3))] }] }),
-      mockBlock({ number: 40, transactions: [{ logs: [swap(pool(2)), swap(impostor), swap(pool(99))] }] }),
-    ]
-    const options = { blocks, finalized: 80, latest: 100 }
+      const blocks = [
+        mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1))] }, { logs: [swap(pool(1))] }] }),
+        mockBlock({ number: 30, transactions: [{ logs: [poolCreated(pool(2)), poolCreated(pool(3))] }] }),
+        mockBlock({ number: 40, transactions: [{ logs: [swap(pool(2)), swap(impostor), swap(pool(99))] }] }),
+      ]
+      const options = { blocks, finalized: 80, latest: 100 }
 
-    const portal = await chainPortal(options)
-    const lookahead = await runPipe(portal, {
-      range: { from: 0, to: 80 },
-      lookahead: { filter: 'set', minBlocksPerFilter: 10 },
-    })
-    const fullScan = await runPipe(await chainPortal(options), { range: { from: 0, to: 80 }, lookahead: false })
+      const portal = await openPortal(options)
+      const lookahead = await runPipe(portal, {
+        range: { from: 0, to: 80 },
+        lookahead: { filter: 'set', minBlocksPerFilter: 10 },
+      })
+      const fullScan = await runPipe(await openPortal(options), { range: { from: 0, to: 80 }, lookahead: false })
 
-    expect(lookahead.rows).toEqual(fullScan.rows)
-    expect(lookahead.rows.map((r) => [r.block, r.contract])).toEqual([
-      [5, pool(1)],
-      [40, pool(2)],
-    ])
+      expect(lookahead.rows).toEqual(fullScan.rows)
+      expect(lookahead.rows.map((r) => [r.block, r.contract])).toEqual([
+        [5, pool(1)],
+        [40, pool(2)],
+      ])
 
-    const [request] = mainRequests(portal)
-    const references = childRequestsOf(request!).map((r) => r.address)
-    const [reference] = references[0] as { set: string }[]
-    const set = setsOf(request!)[reference!.set]
+      const [request] = mainRequests(portal)
+      const references = childRequestsOf(request!).map((r) => r.address)
+      const [reference] = references[0] as { set: string }[]
+      const set = setsOf(request!)[reference!.set]
 
-    expect(references).toEqual([[reference], [reference]])
-    expect(Object.keys(setsOf(request!))).toEqual([reference!.set])
-    expect(request!.query.toBlock).toBe(80)
-    expect(children.every((child) => fuse8Contains(set!, child))).toBe(true)
-    // Without this the test would not show that a false positive is dropped
-    expect(fuse8Contains(set!, impostor)).toBe(true)
-  })
+      expect(references).toEqual([[reference], [reference]])
+      expect(Object.keys(setsOf(request!))).toEqual([reference!.set])
+      expect(request!.query.toBlock).toBe(80)
+      expect(children.every((child) => fuse8Contains(set!, child))).toBe(true)
+      // Without this the test would not show that a false positive is dropped
+      expect(fuse8Contains(set!, impostor)).toBe(true)
+    },
+  )
 
-  it('is off unless the factory asks for it', async () => {
+  withPortal('is off unless the factory asks for it', async ({ portal: openPortal }) => {
     const blocks = [mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), swap(pool(1))] }] })]
-    const portal = await chainPortal({ blocks, finalized: 100, latest: 100 })
+    const portal = await openPortal({ blocks, finalized: 100, latest: 100 })
 
     const factory = contractFactory({
       address: FACTORY,
@@ -684,9 +676,9 @@ describe('Factory lookahead', () => {
     expect(() => resolve({ filter: 'sets' as 'set' })).toThrow("lookahead.filter must be 'list' or 'set', got sets")
   })
 
-  it('fetches by topic alone when the dataset reports no finalized head', async () => {
+  withPortal('fetches by topic alone when the dataset reports no finalized head', async ({ portal: openPortal }) => {
     const blocks = [mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), swap(pool(1))] }] })]
-    const portal = await chainPortal({ blocks, finalized: null, latest: 50 })
+    const portal = await openPortal({ blocks, finalized: null, latest: 50 })
 
     const { rows, messages } = await runPipe(portal, {
       range: { from: 0, to: 50 },
@@ -701,8 +693,8 @@ describe('Factory lookahead', () => {
     )
   })
 
-  it('does not scan when the stream starts close to the finalized head', async () => {
-    const portal = await chainPortal({ blocks: [], finalized: 95, latest: 100 })
+  withPortal('does not scan when the stream starts close to the finalized head', async ({ portal: openPortal }) => {
+    const portal = await openPortal({ blocks: [], finalized: 95, latest: 100 })
 
     await runPipe(portal, { range: { from: 90, to: 100 }, lookahead: { minBlocksPerFilter: 10 } })
 
@@ -710,33 +702,36 @@ describe('Factory lookahead', () => {
     expect(mainRequests(portal).every((r) => !isFiltered(r))).toBe(true)
   })
 
-  it('falls back to topic-only queries from the block where the children stop fitting', async () => {
-    const blocks = [
-      mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), poolCreated(pool(2))] }] }),
-      mockBlock({ number: 40, transactions: [{ logs: [poolCreated(pool(3))] }] }),
-      mockBlock({ number: 60, transactions: [{ logs: [swap(pool(1)), swap(pool(3))] }] }),
-    ]
-    const portal = await chainPortal({ blocks, finalized: 100, latest: 100 })
+  withPortal(
+    'falls back to topic-only queries from the block where the children stop fitting',
+    async ({ portal: openPortal }) => {
+      const blocks = [
+        mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), poolCreated(pool(2))] }] }),
+        mockBlock({ number: 40, transactions: [{ logs: [poolCreated(pool(3))] }] }),
+        mockBlock({ number: 60, transactions: [{ logs: [swap(pool(1)), swap(pool(3))] }] }),
+      ]
+      const portal = await openPortal({ blocks, finalized: 100, latest: 100 })
 
-    const { rows } = await runPipe(portal, {
-      range: { from: 0, to: 100 },
-      // Two child-event requests carry the list twice: two children fill four addresses
-      lookahead: { minBlocksPerFilter: 10, list: { maxAddresses: 4 } },
-    })
+      const { rows } = await runPipe(portal, {
+        range: { from: 0, to: 100 },
+        // Two child-event requests carry the list twice: two children fill four addresses
+        lookahead: { minBlocksPerFilter: 10, list: { maxAddresses: 4 } },
+      })
 
-    expect(rows.map((r) => [r.block, r.contract])).toEqual([
-      [60, pool(1)],
-      [60, pool(3)],
-    ])
-    expect(
-      mainRequests(portal).map((r) => [r.query.fromBlock, r.query.toBlock, childRequestsOf(r)[0].address]),
-    ).toEqual([
-      [0, 39, [pool(1), pool(2)]],
-      [40, 100, undefined],
-    ])
-  })
+      expect(rows.map((r) => [r.block, r.contract])).toEqual([
+        [60, pool(1)],
+        [60, pool(3)],
+      ])
+      expect(
+        mainRequests(portal).map((r) => [r.query.fromBlock, r.query.toBlock, childRequestsOf(r)[0].address]),
+      ).toEqual([
+        [0, 39, [pool(1), pool(2)]],
+        [40, 100, undefined],
+      ])
+    },
+  )
 
-  it('filters a resumed run by the children an earlier run stored', async () => {
+  withPortal('filters a resumed run by the children an earlier run stored', async ({ portal: openPortal }) => {
     const blocks = [
       mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1))] }] }),
       mockBlock({ number: 60, transactions: [{ logs: [poolCreated(pool(2))] }] }),
@@ -744,9 +739,9 @@ describe('Factory lookahead', () => {
     ]
     const options = { blocks, finalized: 100, latest: 100 }
 
-    const first = await runPipe(await chainPortal(options), { range: { from: 0, to: 50 }, lookahead: false })
+    const first = await runPipe(await openPortal(options), { range: { from: 0, to: 50 }, lookahead: false })
 
-    const portal = await chainPortal(options)
+    const portal = await openPortal(options)
     const { rows } = await runPipe(portal, {
       range: { from: 0, to: 100 },
       lookahead: { minBlocksPerFilter: 10 },
@@ -763,9 +758,9 @@ describe('Factory lookahead', () => {
     ).toEqual([[51, 100, [pool(1), pool(2)]]])
   })
 
-  it('fetches by topic alone when the scan fails', async () => {
+  withPortal('fetches by topic alone when the scan fails', async ({ portal: openPortal }) => {
     const blocks = [mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), swap(pool(1))] }] })]
-    const portal = await chainPortal({
+    const portal = await openPortal({
       blocks,
       finalized: 100,
       latest: 100,
@@ -808,12 +803,12 @@ describe('Factory lookahead', () => {
     expect(await factory.storedChildAddresses()).toEqual([pool(1)])
   })
 
-  it('leaves values that are not addresses out of the filter', async () => {
+  withPortal('leaves values that are not addresses out of the filter', async ({ portal: openPortal }) => {
     const blocks = [
       mockBlock({ number: 5, transactions: [{ logs: [poolCreated(pool(1)), poolCreated(pool(2), USDT)] }] }),
       mockBlock({ number: 20, transactions: [{ logs: [swap(pool(1))] }] }),
     ]
-    const portal = await chainPortal({ blocks, finalized: 100, latest: 100 })
+    const portal = await openPortal({ blocks, finalized: 100, latest: 100 })
     const database = await contractFactorySqliteStore({ path: ':memory:' })
 
     const factory = contractFactory({
@@ -845,17 +840,17 @@ describe('Factory lookahead', () => {
     expect(mainRequests(portal).map((r) => childRequestsOf(r)[0].address)).toEqual([[pool(1)]])
   })
 
-  it('stops the scan when the pipe ends', async () => {
+  withPortal('stops the scan when the pipe ends', async ({ portal: openPortal }) => {
     const stop = vi.spyOn(FactoryDiscovery.prototype, 'stop')
-    const portal = await chainPortal({ blocks: [], finalized: 1_000, latest: 1_000 })
+    const portal = await openPortal({ blocks: [], finalized: 1_000, latest: 1_000 })
 
     await runPipe(portal, { range: { from: 0, to: 500 }, lookahead: { minBlocksPerFilter: 10 } })
 
     expect(stop).toHaveBeenCalled()
   })
 
-  it('restarts the scan after a rollback', async () => {
-    const portal = await chainPortal({ blocks: [], finalized: 1_000, latest: 1_000 })
+  withPortal('restarts the scan after a rollback', async ({ portal: openPortal }) => {
+    const portal = await openPortal({ blocks: [], finalized: 1_000, latest: 1_000 })
     const factory = contractFactory({
       address: FACTORY,
       event: factoryAbi.PoolCreated,
@@ -911,7 +906,7 @@ describe('Factory lookahead', () => {
 
     for (const [index, scenario] of scenarios.entries()) {
       for (const [seed, sets] of [1, 2, 3].flatMap((seed) => [false, true].map((sets) => [seed, sets] as const))) {
-        it(`scenario ${index}, seed ${seed}${sets ? ', sets' : ''}`, async () => {
+        withPortal(`scenario ${index}, seed ${seed}${sets ? ', sets' : ''}`, async ({ portal: openPortal }) => {
           const { blocks, pools } = randomChain(seed * 100 + index, 300)
           const from = seed * 10
           const range = { from, to: 300 }
@@ -924,7 +919,7 @@ describe('Factory lookahead', () => {
             blocksPerResponse: scenario.blocksPerResponse,
           }
 
-          const portal = await chainPortal({
+          const portal = await openPortal({
             ...chain,
             delay: scenario.slowScan
               ? async ({ endpoint }) => {
@@ -943,7 +938,7 @@ describe('Factory lookahead', () => {
             },
             unbuffered: scenario.slowScan,
           })
-          const fullScan = await runPipe(await chainPortal(chain), {
+          const fullScan = await runPipe(await openPortal(chain), {
             range,
             withParams: scenario.withParams,
             lookahead: false,
