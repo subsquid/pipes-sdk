@@ -138,7 +138,11 @@ export class EvmRpcBlockClient {
         const wire = blocks.map((raw) => mapper.map(raw))
         // Match the Portal: a block left empty by filtering is dropped (boundary blocks kept).
         const data = dropEmptyBlocks(wire, request.includeAllBlocks)
-        if (data.length === 0) continue
+
+        // evm-rpc reports finality progress only in batches without blocks, so those must pass.
+        if (data.length === 0 && !finalizedHead) {
+          continue
+        }
 
         const head = finalizedHead ? { number: finalizedHead.number, hash: finalizedHead.hash } : undefined
 
@@ -164,9 +168,12 @@ export class EvmRpcBlockClient {
       }
     } catch (e) {
       if (isSqdForkException(e)) {
+        // evm-rpc does not keep the fork block number; it is the child of the last previous block.
+        const forkBlock = e.previousBlocks[e.previousBlocks.length - 1].number + 1
+
         throw new ForkException(
           e.previousBlocks.map((b) => ({ number: b.number, hash: b.hash })),
-          { fromBlock: e.blockNumber, parentBlockHash: e.expectedParentHash },
+          { fromBlock: forkBlock, parentBlockHash: e.expectedParentHash },
         )
       }
 
@@ -177,7 +184,6 @@ export class EvmRpcBlockClient {
 
 interface SqdForkException {
   isSqdForkException: true
-  blockNumber: number
   expectedParentHash: string
   previousBlocks: { number: number; hash: string }[]
 }

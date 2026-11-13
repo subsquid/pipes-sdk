@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { EvmRpcDataSource } from '@subsquid/evm-rpc'
+import { test as base, describe, expect, it, vi } from 'vitest'
+
+import { ForkException } from '~/portal-client/index.js'
 
 import { EvmRpcBlockClient } from './block-client.js'
 
@@ -74,5 +77,65 @@ describe('EvmRpcBlockClient', () => {
         for await (const b of client.getStream(solanaQuery)) void b
       })(),
     ).rejects.toThrowError(/only serve EVM queries, got type "solana"/)
+  })
+})
+
+type InnerBatch = { blocks: unknown[]; finalizedHead?: { number: number; hash: string } }
+
+/** Replaces the evm-rpc hot stream with `batches`, then throws `error` if one is given. */
+const withInnerStream = base.extend<{ innerStream: (batches: InnerBatch[], error?: Error) => void }>({
+  innerStream: async ({}, use) => {
+    const spy = vi.spyOn(EvmRpcDataSource.prototype, 'getStream')
+
+    await use((batches, error) => {
+      spy.mockImplementation(async function* () {
+        yield* batches
+        if (error) {
+          throw error
+        }
+      } as never)
+    })
+
+    spy.mockRestore()
+  },
+})
+
+const evmQuery = { type: 'evm', fields: {}, fromBlock: 100 } as never
+
+async function collect(client: EvmRpcBlockClient) {
+  const batches = []
+  for await (const batch of client.getStream(evmQuery)) {
+    batches.push(batch)
+  }
+
+  return batches
+}
+
+describe('EvmRpcBlockClient stream', () => {
+  withInnerStream('passes a finality update that carries no blocks', async ({ innerStream }) => {
+    const finalizedHead = { number: 90, hash: '0x5a' }
+    innerStream([{ blocks: [] }, { blocks: [], finalizedHead }])
+
+    const batches = await collect(new EvmRpcBlockClient({ rpc: { url: KEYED_URL } }))
+
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).toMatchObject({ blocks: [], head: { finalized: finalizedHead } })
+  })
+
+  withInnerStream('gives the translated fork error the number of the forked block', async ({ innerStream }) => {
+    const sqdFork = Object.assign(new Error('fork'), {
+      isSqdForkException: true,
+      expectedParentHash: '0xbb',
+      previousBlocks: [
+        { number: 98, hash: '0x98' },
+        { number: 99, hash: '0x99' },
+      ],
+    })
+    innerStream([], sqdFork)
+
+    const error = await collect(new EvmRpcBlockClient({ rpc: { url: KEYED_URL } })).catch((e) => e)
+
+    expect(error).toBeInstanceOf(ForkException)
+    expect(error.query).toEqual({ fromBlock: 100, parentBlockHash: '0xbb' })
   })
 })
