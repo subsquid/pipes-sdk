@@ -1,11 +1,10 @@
-import http from 'node:http'
-import { AddressInfo } from 'node:net'
-
-import { afterEach, describe, expect, it } from 'vitest'
+import { EvmRpcDataSource, Rpc } from '@subsquid/evm-rpc'
+import { MockInstance, describe, expect, it, vi } from 'vitest'
 
 import { FallbackClient } from '~/core/index.js'
 import { BlockStreamClient, PortalClient } from '~/portal-client/index.js'
-import { MockPortal, mockBlockStreamClient, mockPortal } from '~/testing/index.js'
+import { withPortal } from '~/testing/portal-fixture.js'
+import { StubPortalClient } from '~/testing/stub-portal.js'
 
 import * as evmBarrel from './browser.js'
 import { createEvmFallbackClient, resolveEvmSource, translateMissingRpcPeer } from './evm-fallback.js'
@@ -133,20 +132,21 @@ describe('createEvmFallbackClient — source specs', () => {
     )
   })
 
-  it('rides out a transient transport failure instead of burning a switch', async () => {
-    // A lone portal retries a retryable status indefinitely (there is nothing else to read); the
-    // transport default is zero retries, which would hand over on every blip. Inside a list the
-    // budget is short but non-zero.
-    const flaky = await mockPortal([
-      { statusCode: 503 },
-      { statusCode: 503 },
-      { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
-    ])
-    const standby = await mockPortal([
-      { statusCode: 200, data: [{ header: { number: 1, hash: '0xbad', timestamp: 1000 } }] },
-    ])
+  withPortal(
+    'rides out a transient transport failure instead of burning a switch',
+    async ({ portal }) => {
+      // A lone portal retries a retryable status indefinitely (there is nothing else to read); the
+      // transport default is zero retries, which would hand over on every blip. Inside a list the
+      // budget is short but non-zero.
+      const flaky = await portal([
+        { statusCode: 503 },
+        { statusCode: 503 },
+        { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
+      ])
+      const standby = await portal([
+        { statusCode: 200, data: [{ header: { number: 1, hash: '0xbad', timestamp: 1000 } }] },
+      ])
 
-    try {
       const fb = createEvmFallbackClient([flaky.url, standby.url], { detection: { capabilityProbe: false } })
       const seen: string[] = []
       for await (const batch of fb.getStream({ type: 'evm', fromBlock: 0 } as any)) {
@@ -156,26 +156,25 @@ describe('createEvmFallbackClient — source specs', () => {
 
       expect(seen).toEqual(['0x1']) // served by the flaky primary, after its retries
       expect(fb.switchCount).toBe(0)
-    } finally {
-      await flaky.close()
-      await standby.close()
-    }
-  }, 20_000)
+    },
+    20_000,
+  )
 
-  it('lets the retry budget be tuned for the whole list', async () => {
-    // The budget is a parameter of the fallback, so a caller using bare URL specs can raise or
-    // lower it without rewriting every source into an options object.
-    const flaky = await mockPortal([
-      { statusCode: 503 },
-      { statusCode: 503 },
-      { statusCode: 503 },
-      { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
-    ])
-    const standby = await mockPortal([
-      { statusCode: 200, data: [{ header: { number: 1, hash: '0xstandby', timestamp: 1000 } }] },
-    ])
+  withPortal(
+    'lets the retry budget be tuned for the whole list',
+    async ({ portal }) => {
+      // The budget is a parameter of the fallback, so a caller using bare URL specs can raise or
+      // lower it without rewriting every source into an options object.
+      const flaky = await portal([
+        { statusCode: 503 },
+        { statusCode: 503 },
+        { statusCode: 503 },
+        { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
+      ])
+      const standby = await portal([
+        { statusCode: 200, data: [{ header: { number: 1, hash: '0xstandby', timestamp: 1000 } }] },
+      ])
 
-    try {
       const fb = createEvmFallbackClient([flaky.url, standby.url], {
         sourceRetries: 0, // opt out entirely: hand over on the first failure
         detection: { capabilityProbe: false },
@@ -188,20 +187,19 @@ describe('createEvmFallbackClient — source specs', () => {
 
       expect(seen).toEqual(['0xstandby'])
       expect(fb.switchCount).toBe(1)
-    } finally {
-      await flaky.close()
-      await standby.close()
-    }
-  }, 20_000)
+    },
+    20_000,
+  )
 
-  it("lets a caller's own transport settings win", async () => {
-    // Opting out of the budget must actually opt out: the first failure hands over.
-    const flaky = await mockPortal([{ statusCode: 503 }, { statusCode: 503 }, { statusCode: 503 }])
-    const standby = await mockPortal([
-      { statusCode: 200, data: [{ header: { number: 1, hash: '0xstandby', timestamp: 1000 } }] },
-    ])
+  withPortal(
+    "lets a caller's own transport settings win",
+    async ({ portal }) => {
+      // Opting out of the budget must actually opt out: the first failure hands over.
+      const flaky = await portal([{ statusCode: 503 }, { statusCode: 503 }, { statusCode: 503 }])
+      const standby = await portal([
+        { statusCode: 200, data: [{ header: { number: 1, hash: '0xstandby', timestamp: 1000 } }] },
+      ])
 
-    try {
       const fb = createEvmFallbackClient([{ url: flaky.url, http: { retryAttempts: 0 } }, standby.url], {
         detection: { capabilityProbe: false },
       })
@@ -213,11 +211,9 @@ describe('createEvmFallbackClient — source specs', () => {
 
       expect(seen).toEqual(['0xstandby'])
       expect(fb.switchCount).toBe(1)
-    } finally {
-      await flaky.close()
-      await standby.close()
-    }
-  }, 20_000)
+    },
+    20_000,
+  )
 
   it('applies a uniform `finalized` to every source', () => {
     const fb = createEvmFallbackClient(
@@ -250,7 +246,7 @@ describe('resolveEvmSource — a lone source', () => {
   })
 
   it("returns the client of a {type: 'custom'} spec", () => {
-    const client = mockBlockStreamClient()
+    const client = new StubPortalClient(async function* () {})
 
     expect(resolveEvmSource({ type: 'custom', client })).toBe(client)
   })
@@ -263,60 +259,46 @@ describe('resolveEvmSource — a lone source', () => {
   })
 })
 
+/** Spies on the two evm-rpc head calls: `eth_blockNumber` (`getHeight`) and the block lookup (`getHead`). */
+const withRpcHeads = withPortal.extend<{ rpcHeads: { height: MockInstance; lookup: MockInstance } }>({
+  rpcHeads: async ({}, use) => {
+    const height = vi.spyOn(Rpc.prototype, 'getHeight').mockResolvedValue(100)
+    const lookup = vi.spyOn(EvmRpcDataSource.prototype, 'getHead').mockResolvedValue({ number: 100, hash: '0x64' })
+
+    await use({ height, lookup })
+
+    height.mockRestore()
+    lookup.mockRestore()
+  },
+})
+
 describe('lazy RPC source — head-poll wire cost', () => {
-  let portal: MockPortal | undefined
-  let rpcServer: http.Server | undefined
+  withRpcHeads(
+    'polls a standby RPC source with eth_blockNumber, never a block lookup',
+    async ({ portal, rpcHeads }) => {
+      // Regression: the lazy wrapper enumerates the client contract method by method, so a newly
+      // added optional method (`getHeight`) that is not forwarded is silently invisible — the
+      // fallback then quietly downgrades every poll to the full block lookup. Only an end-to-end
+      // path through `createEvmFallbackClient` catches that.
+      const primary = await portal([
+        { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
+        { statusCode: 200, data: [{ header: { number: 2, hash: '0x2', timestamp: 2000 } }] },
+      ])
 
-  afterEach(async () => {
-    await portal?.close()
-    portal = undefined
-    await new Promise<void>((resolve) => (rpcServer ? rpcServer.close(() => resolve()) : resolve()))
-    rpcServer = undefined
-  })
+      const fb = createEvmFallbackClient([primary.url, { type: 'rpc', url: 'http://rpc.invalid', name: 'standby' }], {
+        // Lag detection stays on (the default) so the boundary polls the standby; probes off so the
+        // standby is never asked to stream; headTtlMs 0 so every boundary re-polls.
+        detection: { capabilityProbe: false, headTtlMs: 0, headPollTimeoutMs: 5000 },
+      })
 
-  it('polls a standby RPC source with eth_blockNumber, never a block lookup', async () => {
-    // Regression: the lazy wrapper enumerates the client contract method by method, so a newly
-    // added optional method (`getHeight`) that is not forwarded is silently invisible — the
-    // fallback then quietly downgrades every poll to the full `eth_getBlockByNumber` lookup.
-    // Only an end-to-end path through `createEvmFallbackClient` catches that; the internal
-    // framework has no RPC mock, so a minimal method-counting JSON-RPC stub stands in (it never
-    // has to serve blocks — the standby is polled, not streamed).
-    const methods: string[] = []
-    rpcServer = http.createServer(async (req, res) => {
-      const chunks: Buffer[] = []
-      for await (const c of req) chunks.push(c as Buffer)
-      const body = JSON.parse(Buffer.concat(chunks).toString())
-      const calls = Array.isArray(body) ? body : [body]
-      for (const c of calls) methods.push(c.method)
-
-      const answer = (c: any) => {
-        if (c.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: c.id, result: '0x64' }
-        return { jsonrpc: '2.0', id: c.id, error: { code: -32601, message: `unexpected ${c.method}` } }
+      const numbers: number[] = []
+      for await (const b of fb.getStream({ type: 'evm', fromBlock: 1, toBlock: 2 } as never)) {
+        numbers.push(...(b.blocks as { header: { number: number } }[]).map((x) => x.header.number))
       }
-      res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify(Array.isArray(body) ? calls.map(answer) : answer(calls[0])))
-    })
-    await new Promise<void>((resolve) => rpcServer?.listen(0, resolve))
-    const rpcUrl = `http://127.0.0.1:${(rpcServer!.address() as AddressInfo).port}`
 
-    portal = await mockPortal([
-      { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
-      { statusCode: 200, data: [{ header: { number: 2, hash: '0x2', timestamp: 2000 } }] },
-    ])
-
-    const fb = createEvmFallbackClient([portal.url, { type: 'rpc', url: rpcUrl, name: 'standby' }], {
-      // Lag detection stays on (the default) so the boundary polls the standby; probes off so the
-      // standby is never asked to stream; headTtlMs 0 so every boundary re-polls.
-      detection: { capabilityProbe: false, headTtlMs: 0, headPollTimeoutMs: 5000 },
-    })
-
-    const numbers: number[] = []
-    for await (const b of fb.getStream({ type: 'evm', fromBlock: 1, toBlock: 2 } as never)) {
-      numbers.push(...(b.blocks as { header: { number: number } }[]).map((x) => x.header.number))
-    }
-
-    expect(numbers).toEqual([1, 2])
-    expect(methods).toContain('eth_blockNumber')
-    expect(methods).not.toContain('eth_getBlockByNumber')
-  })
+      expect(numbers).toEqual([1, 2])
+      expect(rpcHeads.height).toHaveBeenCalled()
+      expect(rpcHeads.lookup).not.toHaveBeenCalled()
+    },
+  )
 })
