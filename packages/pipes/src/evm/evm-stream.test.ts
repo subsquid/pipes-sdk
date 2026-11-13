@@ -1,25 +1,16 @@
 import { pino } from 'pino'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect } from 'vitest'
 
 import { FallbackStrategy, Logger } from '~/core/index.js'
 
-import { MockPortal, mockBlockStreamClient, mockPortal } from '../testing/index.js'
+import { withPortal as it } from '../testing/portal-fixture.js'
+import { StubPortalClient } from '../testing/stub-portal.js'
 import { evmQuery } from './evm-query-builder.js'
 import { evmStream } from './evm-stream.js'
 
 describe('evmStream', () => {
-  let portal: MockPortal | undefined
-  let portal2: MockPortal | undefined
-
-  afterEach(async () => {
-    await portal?.close()
-    await portal2?.close()
-    portal = undefined
-    portal2 = undefined
-  })
-
-  it('should add default fields', async () => {
-    portal = await mockPortal([
+  it('should add default fields', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -54,14 +45,12 @@ describe('evmStream', () => {
   })
 
   it("reads a lone {type: 'custom'} source directly, without a fallback list", async () => {
-    const client = mockBlockStreamClient({
-      stream: async function* () {
-        yield {
-          blocks: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
-          head: {},
-          meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
-        }
-      },
+    const client = new StubPortalClient(async function* () {
+      yield {
+        blocks: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
+        head: {},
+        meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
+      }
     })
 
     const stream = evmStream({
@@ -80,8 +69,8 @@ describe('evmStream', () => {
     expect(numbers).toEqual([1])
   })
 
-  it('streams through a fallback source list — same pipeline, multiplexed source', async () => {
-    portal = await mockPortal([
+  it('streams through a fallback source list — same pipeline, multiplexed source', async ({ portal: serve }) => {
+    const portal = await serve([
       {
         statusCode: 200,
         data: [
@@ -107,9 +96,9 @@ describe('evmStream', () => {
     expect(numbers).toEqual([1, 2])
   })
 
-  it('fails over mid-range to the standby portal and delivers the full range', async () => {
+  it('fails over mid-range to the standby portal and delivers the full range', async ({ portal: serve }) => {
     // The primary serves block 1 and then errors on every subsequent request.
-    portal = await mockPortal([
+    const portal = await serve([
       { statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] },
       { statusCode: 500 },
       { statusCode: 500 },
@@ -117,7 +106,7 @@ describe('evmStream', () => {
       { statusCode: 500 },
     ])
     // The standby is asked to resume just past block 1 and completes the range.
-    portal2 = await mockPortal([
+    const portal2 = await serve([
       {
         statusCode: 200,
         data: [
@@ -153,9 +142,9 @@ describe('evmStream', () => {
     expect(numbers).toEqual([1, 2, 3])
   })
 
-  it('routes selection through a custom fallback strategy (code as config)', async () => {
-    portal = await mockPortal([]) // the pinned-away primary must never be queried
-    portal2 = await mockPortal([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
+  it('routes selection through a custom fallback strategy (code as config)', async ({ portal: serve }) => {
+    const portal = await serve([]) // the pinned-away primary must never be queried
+    const portal2 = await serve([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
 
     const pinToStandby: FallbackStrategy = (ctx) => {
       if (ctx.event.type === 'select') return { action: 'use', index: 1 }
@@ -183,7 +172,9 @@ describe('evmStream', () => {
     expect(numbers).toEqual([1])
   })
 
-  it("routes the pipe's logger into the fallback so it cannot log outside the caller's control", async () => {
+  it("routes the pipe's logger into the fallback so it cannot log outside the caller's control", async ({
+    portal: serve,
+  }) => {
     // pino's default message key is `msg`; the SDK's own logger renames it to `message`, so read
     // whichever the caller's logger produced.
     const lines: { msg?: string; message?: string }[] = []
@@ -192,8 +183,8 @@ describe('evmStream', () => {
       { write: (line: string) => lines.push(JSON.parse(line)) },
     ) as unknown as Logger
 
-    portal = await mockPortal([{ statusCode: 500 }, { statusCode: 500 }, { statusCode: 500 }])
-    portal2 = await mockPortal([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
+    const portal = await serve([{ statusCode: 500 }, { statusCode: 500 }, { statusCode: 500 }])
+    const portal2 = await serve([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
 
     const stream = evmStream({
       id: 'logged-pipe',
@@ -236,8 +227,8 @@ describe('evmStream', () => {
     ).toThrow(/array of sources/)
   })
 
-  it('rejects the portal cache over a fallback source list at construction', async () => {
-    portal = await mockPortal([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
+  it('rejects the portal cache over a fallback source list at construction', async ({ portal: serve }) => {
+    const portal = await serve([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
     const url = portal.url
 
     expect(() =>
