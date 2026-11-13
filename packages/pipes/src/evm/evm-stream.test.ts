@@ -1,7 +1,7 @@
 import { pino } from 'pino'
 import { describe, expect } from 'vitest'
 
-import { FallbackStrategy, Logger } from '~/core/index.js'
+import { Logger } from '~/core/index.js'
 
 import { withPortal as it } from '../testing/portal-fixture.js'
 import { StubPortalClient } from '../testing/stub-portal.js'
@@ -140,36 +140,6 @@ describe('evmStream', () => {
     }
 
     expect(numbers).toEqual([1, 2, 3])
-  })
-
-  it('routes selection through a custom fallback strategy (code as config)', async ({ portal: serve }) => {
-    const portal = await serve([]) // the pinned-away primary must never be queried
-    const portal2 = await serve([{ statusCode: 200, data: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }] }])
-
-    const pinToStandby: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'select') return { action: 'use', index: 1 }
-
-      return undefined
-    }
-
-    const stream = evmStream({
-      id: 'test',
-      source: [portal.url, portal2.url],
-      fallback: {
-        strategy: pinToStandby,
-        detection: { capabilityProbe: false, maxLagBlocks: null, maxStalenessMs: null },
-      },
-      outputs: evmQuery()
-        .addFields({ block: { number: true, hash: true } })
-        .addRange({ from: 1, to: 1 }),
-    })
-
-    const numbers: number[] = []
-    for await (const { data } of stream) {
-      numbers.push(...data.map((b) => b.header.number))
-    }
-
-    expect(numbers).toEqual([1])
   })
 
   it("routes the pipe's logger into the fallback so it cannot log outside the caller's control", async ({

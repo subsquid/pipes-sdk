@@ -12,19 +12,18 @@ recorded. Each section below is one of them.
 ## 1. Detection senses, strategy decides
 
 A flat options object where one threshold both defines a measurement and commits to a
-reaction makes it impossible to change one without the other, and leaves no seam for a
-custom switching rule (cost-aware routing, pinning, never-switch-back).
+reaction makes it impossible to change one without the other.
 
 **Detection** owns every threshold and measurement: probes, head polls, liveness, cooldowns
 and the freshness conditions. It publishes verdicts (`lagging`, `stale`, `behind`) on the
 events it raises. **Strategy** owns decisions and holds no thresholds. It is consulted when
 nothing is being read, after a batch, and while a request is outstanding, and answers `use`,
-`failover`, `hold` or `abort`. A custom strategy receives the stock decision, so overriding
-one case does not restate the others; returning nothing keeps stock behaviour.
+`failover`, `hold` or `abort`. Its only options are `preferPrimary` and `allDownTimeoutMs`.
 
-Safety is not delegated: fork propagation, resume continuity, boundary-only switching and the
-finalized floor hold whatever the strategy returns (INV-61…INV-64). A custom strategy can
-still starve or thrash the pipe; that is the same freedom as a custom sink.
+The strategy is internal. A user-supplied strategy function had no caller, and it forced
+special cases on the engine: head polls and the stall ticker always on, a decision computed
+and then offered for veto, and index validation for a programmer error. It can return as a
+public seam when a concrete switching rule (cost-aware routing, pinning) needs it.
 
 ## 2. A mixed list reports itself hot
 
@@ -89,6 +88,4 @@ the same duty (DEF-60).
 
 ## Consequences
 
-The stock strategy is a pure function of an event and a snapshot, testable without machinery.
-A new proactive check is a new verdict and event: compatible for strategies that ignore
-unknown events, breaking for ones that switch on them exhaustively.
+The strategy is a pure function of an event and a snapshot, testable without machinery.

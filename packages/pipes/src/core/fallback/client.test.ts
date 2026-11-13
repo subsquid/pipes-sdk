@@ -6,7 +6,6 @@ import { StubPortalClient } from '~/testing/stub-portal.js'
 import { defaultLogger } from '../logger.js'
 import { BlockCursor } from '../types.js'
 import { FallbackClient, FallbackClientOptions, FallbackClientSource, FallbackMetrics } from './client.js'
-import { FallbackStrategy } from './strategy.js'
 
 /**
  * Unit tests for the fallback meta-client, using mock `BlockStreamClient`s (async generators
@@ -725,7 +724,7 @@ describe('FallbackClient — freshness', () => {
   it('(j) reports no lag/head before the first block, even at a boundary after an empty batch', async () => {
     // A source may yield an empty batch (the portal answers HTTP 204 that way), so a boundary can
     // be reached with nothing delivered yet. Measuring from a `-1` sentinel would publish a
-    // chain-height-sized lag on the gauges and in a strategy's `ctx.lagBlocks`.
+    // chain-height-sized lag on the gauges.
     const seen: { lag: number | undefined; chainHead: number | undefined }[] = []
     const s0 = source('s0', async function* () {
       yield {
@@ -934,40 +933,6 @@ describe('FallbackClient — reclaim and abort correctness', () => {
     expect(servedLast(fb)).toBe(0) // never chased a source that could not be selected
     expect(fb.switchCount).toBe(0)
   })
-
-  it('aborts the stream when the strategy says so at a batch boundary', async () => {
-    // The abort must escape, not be caught by the supervisor's own source-error handler and
-    // retried forever.
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      yield batch(2)
-    })
-    const fb = fallback(
-      [s0],
-      { maxLagBlocks: null, maxStalenessMs: null },
-      {
-        strategy: (ctx) => (ctx.event.type === 'batch' ? { action: 'abort', error: new Error('BOOM') } : undefined),
-      },
-    )
-
-    await expect(collect(fb)).rejects.toThrowError('BOOM')
-  })
-
-  it('surfaces an out-of-range index from a boundary decision as a programmer error', async () => {
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      yield batch(2)
-    })
-    const fb = fallback(
-      [s0],
-      { maxLagBlocks: null, maxStalenessMs: null },
-      {
-        strategy: (ctx) => (ctx.event.type === 'batch' ? { action: 'use', index: 7 } : undefined),
-      },
-    )
-
-    await expect(collect(fb)).rejects.toThrowError(/selected source index 7/)
-  })
 })
 
 describe('FallbackClient — head-poll timeout (robustness)', () => {
@@ -1085,8 +1050,8 @@ describe('FallbackClient — BlockStreamClient surface', () => {
 
 describe('FallbackClient — standby traffic', () => {
   it('skips boundary head polls entirely when nothing can consume them', async () => {
-    // Lag detection off, not stale, stock strategy, most-preferred source active: the polled heads
-    // would feed no verdict, no strategy snapshot, and no reclaim. Before the gate this cost one
+    // Lag detection off, not stale, most-preferred source active: the polled heads would feed no
+    // verdict and no reclaim. Before the gate this cost one
     // `eth_getBlockByNumber`-class call per block per standby at tip pace (batch cadence > headTtlMs).
     let polls = 0
     const s0 = source('s0', async function* () {
@@ -1196,117 +1161,7 @@ describe('FallbackClient — standby traffic', () => {
   })
 })
 
-describe('FallbackClient — custom strategy (code as config)', () => {
-  it('pins a source: a `select` handler routes every selection, ignoring preference order', async () => {
-    const s0 = source('s0', async function* () {
-      yield batch(1) // healthy and preferred — but the strategy pins s1
-    })
-    const s1 = source('s1', async function* () {
-      yield batch(7)
-      yield batch(8)
-    })
-    const pinToS1: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'select') return { action: 'use', index: 1 }
-
-      return undefined
-    }
-    const fb = fallback([s0, s1], { maxLagBlocks: null, maxStalenessMs: null }, { strategy: pinToS1 })
-
-    expect(await collect(fb)).toEqual([7, 8])
-    expect(s0.reads).toHaveLength(0)
-  })
-
-  it('events the strategy leaves unanswered fall back to the default (failover still works)', async () => {
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      throw new Error('boom')
-    })
-    const s1 = source('s1', async function* () {
-      yield batch(2)
-    })
-    // Handles nothing — every event returns undefined, so behavior must equal the default.
-    const noop: FallbackStrategy = () => undefined
-    const fb = fallback([s0, s1], undefined, { strategy: noop })
-
-    expect(await collect(fb)).toEqual([1, 2])
-    expect(servedLast(fb)).toBe(1)
-  })
-
-  it('a `batch` handler can jump sources voluntarily — the abandoned source stays healthy', async () => {
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      yield batch(2) // never reached: the strategy jumps after the first batch
-    })
-    const s1 = source('s1', async function* () {
-      yield batch(2)
-    })
-    const jumpOnce: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'batch' && ctx.activeIndex === 0) return { action: 'use', index: 1 }
-
-      return undefined
-    }
-    const fb = fallback([s0, s1], { maxLagBlocks: null, maxStalenessMs: null }, { strategy: jumpOnce })
-
-    expect(await collect(fb)).toEqual([1, 2])
-    expect(fb.metrics().switchCount).toBe(1)
-    expect(fb.metrics().sources[0].health).not.toBe('unhealthy') // a voluntary jump is not a failure
-    expect(s1.reads[0]).toMatchObject({ fromBlock: 2, parentBlockHash: '0x1' }) // still cursor-continuous
-  })
-
-  it('a `stall` handler can hold a source the default would have abandoned', async () => {
-    let s0resume: (() => void) | undefined
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      await new Promise<void>((r) => {
-        s0resume = r
-      })
-      yield batch(2)
-    })
-    // A fresher standby exists, so the DEFAULT stall policy would fail s0 over; this strategy holds.
-    const s1 = source(
-      's1',
-      async function* () {
-        yield batch(99)
-      },
-      async () => cursor(100),
-    )
-    const holdAlways: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'stall') return { action: 'hold' }
-
-      return undefined
-    }
-    const fb = fallback(
-      [s0, s1],
-      { maxStalenessMs: 10, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null },
-      { strategy: holdAlways },
-    )
-
-    const it = fb.getStream(QUERY)[Symbol.asyncIterator]()
-    expect((await it.next()).value.blocks[0].header.number).toBe(1)
-
-    const pending = it.next()
-    await wait(50) // well past maxStalenessMs, with a fresher standby — default would have switched
-    expect(fb.activeIndex).toBe(0)
-    expect(s1.reads).toHaveLength(0)
-
-    s0resume?.()
-    expect((await pending).value.blocks[0].header.number).toBe(2) // held source resumed
-  }, 5000)
-
-  it('a `select` handler can abort with a custom error', async () => {
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-    })
-    const giveUp: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'select') return { action: 'abort', error: new Error('strategy says no') }
-
-      return undefined
-    }
-    const fb = fallback([s0], undefined, { strategy: giveUp })
-
-    await expect(collect(fb)).rejects.toThrowError('strategy says no')
-  })
-
+describe('FallbackClient — probes, reclaim and head lookup', () => {
   it('ignores a capability probe that answers after its stream has ended', async () => {
     // Probes are fire-and-forget and outlive their stream (30s timeout by default). A late verdict
     // describes the query — and possibly the commitment — of a stream that is no longer running,
@@ -1321,16 +1176,8 @@ describe('FallbackClient — custom strategy (code as config)', () => {
       async () => cursor(50),
       (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
     )
-    // With lag detection off and the primary active, the boundary gate would skip standby polls
-    // entirely (nothing consumes them) — a passthrough custom strategy keeps them flowing, since
-    // a strategy is entitled to fresh snapshots.
-    const fb = fallback(
-      [s0, standby],
-      { headTtlMs: 0, capabilityProbeIntervalMs: 0, maxLagBlocks: null },
-      {
-        strategy: () => undefined,
-      },
-    )
+    // Lag detection keeps the standby polls (and so its probe) flowing at every boundary.
+    const fb = fallback([s0, standby], { headTtlMs: 0, capabilityProbeIntervalMs: 0 })
 
     await collect(fb) // stream 1: drives s0, fires the standby's probe, then ends
     expect(resolvers).toHaveLength(1)
@@ -1356,11 +1203,7 @@ describe('FallbackClient — custom strategy (code as config)', () => {
       async () => cursor(50),
       (() => new Promise((resolve) => resolvers.push(resolve as any))) as any,
     )
-    const fb = fallback(
-      [s0, standby],
-      { headTtlMs: 0, capabilityProbeIntervalMs: 0, maxLagBlocks: null },
-      { strategy: () => undefined },
-    )
+    const fb = fallback([s0, standby], { headTtlMs: 0, capabilityProbeIntervalMs: 0 })
 
     await collect(fb)
     expect(resolvers).toHaveLength(1)
@@ -1431,48 +1274,6 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     expect(servedLast(fb)).toBe(0)
   }, 10_000)
 
-  it('surfaces a throw from a custom strategy instead of blaming the source', async () => {
-    // The same class of programmer error as `abort` or a bad index: caught as a source fault it
-    // would re-drive the source forever, burning CPU and never reaching the caller.
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      yield batch(2)
-    })
-    const fb = fallback(
-      [s0],
-      { maxLagBlocks: null, maxStalenessMs: null },
-      {
-        strategy: (ctx) => {
-          if (ctx.event.type === 'batch') throw new Error('strategy exploded')
-          return undefined
-        },
-      },
-    )
-
-    await expect(collect(fb)).rejects.toThrowError('strategy exploded')
-  }, 10_000)
-
-  it('does not label a strategy-decided stall failover as staleness', async () => {
-    // With staleness detection off, a failover on a `stall` event is the strategy's call alone.
-    // Recording it as `stale` would also latch the stricter reclaim rule on an innocent source.
-    const slow = source('slow', async function* () {
-      yield batch(1)
-      await hang()
-    })
-    const other = source('other', async function* () {
-      yield batch(2)
-    })
-    const fb = fallback(
-      [slow, other],
-      { maxStalenessMs: null, freshnessTickMs: 5, headTtlMs: 0, maxLagBlocks: null },
-      { strategy: (ctx) => (ctx.event.type === 'stall' ? { action: 'failover' } : undefined) },
-    )
-
-    await collect(fb)
-
-    expect(fb.metrics().sources[0].cause).toMatchObject({ reason: 'strategy' })
-  }, 10_000)
-
   it('does not let one hung endpoint block the aggregate head lookup', async () => {
     // `from: 'latest'` resolves through getHead, so a source whose head poll never settles would
     // hang the pipe at startup even though another source can answer.
@@ -1534,100 +1335,6 @@ describe('FallbackClient — custom strategy (code as config)', () => {
 
     await expect(fb.getHead()).resolves.toBeUndefined()
   }, 5000)
-
-  it('rejects an out-of-range source index from the strategy', async () => {
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-    })
-    const offByOne: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'select') return { action: 'use', index: 5 }
-
-      return undefined
-    }
-    const fb = fallback([s0], undefined, { strategy: offByOne })
-
-    await expect(collect(fb)).rejects.toThrowError(/selected source index 5/)
-  })
-
-  it('sees classified errors and health snapshots in the `select` context', async () => {
-    const contexts: any[] = []
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      throw new Error('connection refused')
-    })
-    const s1 = source('s1', async function* () {
-      yield batch(2)
-    })
-    const observe: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'select') contexts.push(structuredClone({ event: ctx.event, sources: ctx.sources }))
-      return undefined // observe only; defer every decision to the default
-    }
-    const fb = fallback([s0, s1], undefined, { strategy: observe })
-
-    expect(await collect(fb)).toEqual([1, 2])
-
-    // First selection: no prior error, both sources unknown.
-    expect(contexts[0].event.error).toBeUndefined()
-    expect(contexts[0].sources.map((s: any) => s.health)).toEqual(['unknown', 'unknown'])
-    // Re-selection after s0's failure: the classified cause is on the event and in s0's snapshot.
-    expect(contexts[1].event.error?.detail).toContain('connection refused')
-    expect(contexts[1].sources[0].health).toBe('unhealthy')
-    expect(contexts[1].sources[0].cause?.detail).toContain('connection refused')
-  })
-
-  it('hands the stock decision to the custom strategy as ctx.defaultCommand', async () => {
-    const defaults: any[] = []
-    const s0 = source('s0', async function* () {
-      yield batch(1)
-      throw new Error('boom')
-    })
-    const s1 = source('s1', async function* () {
-      yield batch(2)
-    })
-    const observe: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'select') defaults.push(ctx.defaultCommand)
-      return undefined
-    }
-    const fb = fallback([s0, s1], undefined, { strategy: observe })
-
-    expect(await collect(fb)).toEqual([1, 2])
-
-    // First selection: the stock decision is the primary; after s0's failure, the standby.
-    expect(defaults[0]).toEqual({ action: 'use', index: 0 })
-    expect(defaults[1]).toEqual({ action: 'use', index: 1 })
-  })
-
-  it('a strategy can veto the stock decision it sees in ctx.defaultCommand', async () => {
-    // Same setup as freshness test (a): lag arms at the tip, then trips — the stock decision at
-    // the second boundary is `failover`. The custom strategy vetoes exactly that decision.
-    const s1heads = [95, 110]
-    const s0 = source('s0', async function* () {
-      yield batch(90)
-      yield batch(91)
-      yield batch(92)
-    })
-    const s1 = source(
-      's1',
-      async function* () {
-        yield batch(99) // must never serve
-      },
-      async () => cursor(s1heads.shift() ?? 110),
-    )
-    let vetoed = 0
-    const vetoFailover: FallbackStrategy = (ctx) => {
-      if (ctx.event.type === 'batch' && ctx.defaultCommand?.action === 'failover') {
-        vetoed++
-        return { action: 'hold' }
-      }
-      return undefined
-    }
-    const fb = fallback([s0, s1], { maxLagBlocks: 10, maxStalenessMs: null, headTtlMs: 0 }, { strategy: vetoFailover })
-
-    expect(await collect(fb)).toEqual([90, 91, 92]) // s0 served the whole range
-    expect(vetoed).toBeGreaterThan(0) // the stock failover was actually proposed — and overridden
-    expect(servedLast(fb)).toBe(0)
-    expect(s1.reads).toHaveLength(0)
-  })
 })
 
 describe('FallbackClient — abort', () => {

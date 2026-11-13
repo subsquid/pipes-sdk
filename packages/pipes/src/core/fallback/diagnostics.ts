@@ -16,16 +16,7 @@
 export type FailedCheck = 'stream' | 'liveness' | 'capability'
 
 /** Coarse, bounded failure category. Kept small so it is safe as a metric label. */
-export type FailureReason =
-  | 'http'
-  | 'rpc'
-  | 'timeout'
-  | 'connection'
-  | 'stale'
-  | 'lag'
-  | 'fork'
-  | 'strategy'
-  | 'unknown'
+export type FailureReason = 'http' | 'rpc' | 'timeout' | 'connection' | 'stale' | 'lag' | 'fork' | 'unknown'
 
 export interface SourceErrorInfo {
   /** Which check failed. */
@@ -145,9 +136,4 @@ export function freshnessFailure(check: FailedCheck, reason: 'stale' | 'lag', de
  */
 export function capabilityFailure(detail: string, reason: FailureReason = 'unknown'): SourceErrorInfo {
   return { check: 'capability', reason, detail: `capability check failed: ${detail}` }
-}
-
-/** A custom fallback strategy decided to abandon the active source (no fault of the source's own). */
-export function strategyFailure(detail: string): SourceErrorInfo {
-  return { check: 'stream', reason: 'strategy', detail }
 }

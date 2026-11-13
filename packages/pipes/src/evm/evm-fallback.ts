@@ -1,10 +1,9 @@
 import { redactUrl } from '~/core/fallback/diagnostics.js'
 import {
-  DefaultFallbackStrategyOptions,
   FallbackClient,
   FallbackClientSource,
   FallbackDetectionOptions,
-  FallbackStrategy,
+  FallbackStrategyOptions,
   Logger,
 } from '~/core/index.js'
 import { HttpClient } from '~/http-client/index.js'
@@ -55,19 +54,10 @@ export type EvmSourceSpec =
   | { type: 'custom'; name?: string; client: BlockStreamClient }
 
 export interface EvmFallbackOptions {
-  /**
-   * How source failure and recovery are *detected*: capability probes, head polls, liveness
-   * thresholds, cooldowns, and the freshness conditions whose verdicts reach the strategy as
-   * events (`stall.stale`, `batch.lagging`). See {@link FallbackDetectionOptions}.
-   */
+  /** How source failure and recovery are detected. See {@link FallbackDetectionOptions}. */
   detection?: FallbackDetectionOptions
-  /**
-   * What to *do* about the detected state: plain options tune the stock strategy
-   * ({@link DefaultFallbackStrategyOptions} — e.g. `{ preferPrimary: 'onFailureOnly' }`), a
-   * function replaces its decisions per event (the stock decision arrives as
-   * `ctx.defaultCommand`; returning `undefined` lets it stand).
-   */
-  strategy?: FallbackStrategy | DefaultFallbackStrategyOptions
+  /** What to do about the detected state, e.g. `{ preferPrimary: 'onFailureOnly' }`. */
+  strategy?: FallbackStrategyOptions
   /**
    * How many times a source retries a retryable transport failure before the failure reaches the
    * fallback machinery. A lone source retries indefinitely because there is nothing else to read;

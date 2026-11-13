@@ -13,10 +13,8 @@ export type FallbackHealth = 'healthy' | 'unhealthy' | 'unknown'
 /**
  * How the fallback engine *detects* failure and recovery — and nothing else. These knobs
  * configure the sensors (capability probes, head polls, liveness bookkeeping, cooldowns) and
- * define the freshness conditions whose verdicts are delivered to the strategy as events
- * (`stall.stale`, `batch.lagging`). What to *do* about a verdict is the strategy's job — the
- * stock decisions are tuned via `strategy: {…}` ({@link DefaultFallbackStrategyOptions}) or
- * replaced with a function.
+ * define the freshness conditions (`stale`, `lagging`). What to *do* about a verdict is tuned by
+ * `strategy` ({@link FallbackStrategyOptions}).
  */
 export interface FallbackDetectionOptions {
   /**
@@ -44,15 +42,13 @@ export interface FallbackDetectionOptions {
   capabilityProbeIntervalMs?: number
   /**
    * Defines the *stalled* condition: a request outstanding longer than this makes the active
-   * source count as stale (`stall` events carry the verdict; the stock strategy fails a stale
-   * source over when a fresher one is ahead). Default 3min; `null` disables the condition.
+   * source count as stale (a stale source fails over when a fresher one is ahead). Default 3min; `null` disables the condition.
    */
   maxStalenessMs?: number | null
   /**
    * Defines the *lagging* condition: falling more than this many blocks behind an independent
    * head makes the active source count as lagging — armed only once the stream first reaches the
-   * tip, so a backfill never trips it (`batch` events carry the verdict; the stock strategy fails
-   * a lagging source over). Default 10; `null` disables the condition.
+   * tip, so a backfill never trips it (a lagging source fails over). Default 10; `null` disables the condition.
    */
   maxLagBlocks?: number | null
   /** How often, while a request is outstanding, to re-check staleness. Default 1s. */

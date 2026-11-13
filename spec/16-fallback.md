@@ -64,10 +64,9 @@ sink MUST NOT make a healthy source look stalled.
 ## Driving the list (WP-60…)
 
 **WP-60 — Selection.** When no source is being read — at start, or after the active
-source was abandoned — the pipe consults the strategy with a `select` event carrying the
-classified cause of the previous failure, if any. `use(i)` reads source `i`; `hold` waits
-`P-FB-ALLDOWN-POLL-MS` and asks again; `abort` fails the read. A source index outside the
-list is a programmer error and MUST fail the read rather than be clamped or ignored.
+source was abandoned — the pipe reads the most-preferred source that is not `unhealthy`.
+With none, it waits `P-FB-ALLDOWN-POLL-MS` and selects again; once the configured all-down
+timeout (unbounded by default) has elapsed, it fails the read.
 
 **WP-61 — Reading and resuming.** The pipe reads the active source from the position
 after the last block delivered to the sink, anchored to that block's hash. This is the
@@ -75,15 +74,14 @@ same resume the ingestion contract already specifies (WP-12), applied unchanged 
 position was reached through a different source.
 
 **WP-62 — Switch points.** A switch MUST occur only between batches: after a batch has
-been delivered and before the next is requested. Mid-batch switching is not permitted
-even when the strategy asks for it, because a partially consumed batch has no resume
-position (INV-61).
+been delivered and before the next is requested. Mid-batch switching is not permitted,
+because a partially consumed batch has no resume position (INV-61).
 
 **WP-63 — Boundary decision.** After each delivered batch the pipe refreshes the other
 sources' heads (subject to `P-FB-HEAD-TTL-MS`), updates the freshness gauges, and consults
 the strategy with a `batch` event carrying the `lagging` and `stale` verdicts. The refresh
 runs only when something can consume it — lag detection enabled, the `stale` verdict
-raised, a custom strategy installed, or a more-preferred source available to reclaim;
+raised, or a more-preferred source available to reclaim;
 otherwise the boundary MUST NOT poll standbys (at tip pace the batch cadence outruns
 `P-FB-HEAD-TTL-MS`, so an unconditional refresh degenerates to one poll per batch per
 standby). `use(i)`
@@ -149,7 +147,6 @@ These are free for an implementation to choose; conformance tests MUST NOT pin t
   whether that value changes across a switch. Only the *block* stream is specified to be
   indistinguishable (INV-60).
 - The order in which standby heads are polled, and whether polls run concurrently.
-- Whether a strategy is consulted for sources it can never select.
 - The wording of any diagnostic message; only the bounded fields of a cause (OB-61) and
   the fact of a single transition log (OB-66) are contractual.
 
@@ -166,7 +163,7 @@ the same synthetic chain.
 **INV-61 — Switch continuity.** [transition]
 A switch preserves the resume position exactly: the next source is asked for the block
 after the last one delivered, anchored to its hash. No block is delivered twice and none
-is skipped, whatever the strategy returns.
+is skipped.
 *Why:* a gap is silent data loss; an overlap corrupts append-only sinks.
 *Check:* CT-1 forced-switch scenarios asserting the requested start of every source read.
 
@@ -220,17 +217,12 @@ refuse, and walks into an all-down gap.
 *Check:* CT-4 standby poisoned by capability failure while holding a head above the
 cursor; active source is retained.
 
-**INV-68 — Strategy faults are not source faults.** [response]
-A strategy that throws, aborts, or names a source outside the list ends the read with
-that error. It MUST NOT be attributed to the active source, retried, or allowed to
-re-drive the list.
-*Why:* attributing a programmer error to a source produces an unbounded retry loop and
-hides the defect.
-*Check:* CT-4 strategy throwing and aborting; error surfaces to the caller.
+**INV-68 — Withdrawn.** It guarded the custom strategy function, which was removed
+(ADR-25 §1).
 
 **INV-69 — Reported cause matches the trigger.** [response]
 The cause recorded when a source is abandoned names what actually tripped: a freshness
-verdict, a classified transport or protocol failure, or the strategy. A cause MUST NOT be
+verdict, or a classified transport or protocol failure. A cause MUST NOT be
 attributed to a verdict that did not fire.
 *Why:* the cause is both an operator-facing signal and an input to later decisions
 (WP-63, ADR-25); a mislabel corrupts both.

@@ -677,8 +677,8 @@ evmStream({
 })
 ```
 
-`fallback.detection` tunes how failure and recovery are detected; `fallback.strategy` tunes or replaces
-the switching decision. RPC sources need the optional peers `@subsquid/evm-rpc`,
+`fallback.detection` tunes how failure and recovery are detected; `fallback.strategy` tunes the
+switching decision. RPC sources need the optional peers `@subsquid/evm-rpc`,
 `@subsquid/evm-normalization`, `@subsquid/rpc-client` and `@subsquid/http-client`.
 
 The API is experimental and can change in a minor release. `evmPortalStream` is unchanged and stays the

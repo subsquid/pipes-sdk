@@ -67,7 +67,7 @@ export async function fallbackS1Portals({
 
 /**
  * Lets a recovered primary back after two standby answers: one liveness pass, no head cache and no
- * stall clock, which the virtual clock would distort. With no capability probe the stock strategy
+ * stall clock, which the virtual clock would distort. With no capability probe the strategy
  * reclaims it at a batch boundary.
  */
 export const RECLAIM_OPTIONS: EvmFallbackOptions = {
