@@ -22,17 +22,9 @@ export interface EvmRpcBlockClientOptions {
 }
 
 /**
- * An RPC-backed EVM {@link BlockStreamClient}: it slots into a `PortalStream` (directly or as a
- * fallback source) exactly where a portal client goes, and serves **portal-wire-shaped** blocks
- * for any EVM portal query. Per stream it delegates fetching, finality, continuity and fork
- * detection to `@subsquid/evm-rpc`'s `EvmRpcDataSource`, normalizes each raw block with the same
- * `mapRpcBlock` the portal's own dataset producers use, applies the ported client-side filter, and
- * yields the surviving items still in wire shape — the downstream normalize/cast step then decodes
- * them exactly as it would decode portal output. evm-rpc's fork exception is translated to Pipes'
- * `ForkException`.
- *
- * The query (fields + request + range) arrives per `getStream` call, so one client instance serves
- * any number of ranges/queries — including the multi-range plans a query builder produces.
+ * An RPC-backed EVM {@link BlockStreamClient} that serves portal-wire-shaped blocks for any EVM
+ * portal query. `@subsquid/evm-rpc` does the fetching, finality and fork detection; the blocks are
+ * normalized and filtered in `wire.ts`.
  */
 export class EvmRpcBlockClient {
   readonly finalized: boolean
@@ -75,11 +67,7 @@ export class EvmRpcBlockClient {
     return head ? { number: head.number, hash: head.hash } : undefined
   }
 
-  /**
-   * The cheap liveness poll: `eth_blockNumber` — no block header round-trip. The finalized
-   * commitment has no `eth_blockNumber` equivalent, so that path stays on the finalized-head
-   * block lookup.
-   */
+  /** `eth_blockNumber`; the finalized commitment has no such call, so it looks the block up. */
   async getHeight(options?: { finalized: boolean }): Promise<number | undefined> {
     const finalized = options?.finalized ?? this.finalized
     if (finalized) return (await this.#headSource.getFinalizedHead())?.number
@@ -99,16 +87,13 @@ export class EvmRpcBlockClient {
 
   async *#stream(query: EvmQuery, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<any>> {
     if (query.type !== 'evm') {
-      // The client implements the chain-generic contract but can only serve EVM queries; failing
-      // here names the mistake instead of surfacing it as a confusing mapping/decoding error.
       throw new Error(`EvmRpcBlockClient can only serve EVM queries, got type "${query.type}"`)
     }
     const { type: _type, fields = {}, fromBlock = 0, toBlock, parentBlockHash, ...request } = query
     const mapper = createWireBlockMapper(fields, request)
 
     const req: RpcDataRequest = {
-      // mapRpcBlock always maps the block's transactions, so full tx objects must be fetched. This
-      // is why `RequiredData` carries no `transactions` toggle — it could never be false.
+      // mapRpcBlock always maps the block's transactions, so full tx objects must be fetched.
       transactions: true,
       ...mapper.requiredData,
       ...this.#method,
@@ -128,7 +113,6 @@ export class EvmRpcBlockClient {
     try {
       for await (const { blocks, finalizedHead } of stream) {
         const wire = blocks.map((raw) => mapper.map(raw))
-        // Match the Portal: a block left empty by filtering is dropped (boundary blocks kept).
         const data = dropEmptyBlocks(wire, request.includeAllBlocks)
 
         // evm-rpc reports finality progress only in batches without blocks, so those must pass.
@@ -140,17 +124,11 @@ export class EvmRpcBlockClient {
 
         yield {
           blocks: data,
-          // `latest` is the CHAIN head (the portal fills it from its head header) and drives the
-          // progress denominator, so it must not be fabricated from the finalized head: that reads
-          // as "the chain ends here" and would report an unbounded run complete ~a finality window
-          // early. The stream gives no cheap latest head, so it is left absent — exactly what a
-          // portal response without a head header does. Freshness/lag come from `getHead()`, which
-          // the fallback polls independently.
+          // No `latest`: it is the chain head and drives progress, and the finalized head in its
+          // place would report an unbounded run complete a finality window early.
           head: { finalized: head },
           meta: {
-            // A real measurement, deliberately: the serialize is a few ms per batch while the RPC
-            // fetch it accompanies takes seconds, and 0 would render throughput as broken. The
-            // wire JSON is ASCII (hex strings + numbers), so string length equals byte length.
+            // The wire JSON is ASCII, so its string length is its byte length.
             bytes: JSON.stringify(data).length,
             requestedFromBlock: fromBlock,
             lastBlockReceivedAt: new Date(),

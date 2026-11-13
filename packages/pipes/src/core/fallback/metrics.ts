@@ -10,30 +10,17 @@ const HEALTH_STATES = ['healthy', 'unhealthy', 'unknown'] as const
 const PREFIX = 'sqd_fallback'
 
 /**
- * Every fallback registered against one metrics surface, keyed by pipe id. The gauges are created
- * once per surface and read this registry on each scrape, so a second pipe sharing the surface is
- * exported too.
- *
- * This indirection is load-bearing: a metrics server caches gauges by name and returns the existing
- * one on re-registration, *dropping the new `collect` callback*. Registering a second fallback the
- * naive way would therefore silently keep exporting only the first one's state.
+ * Every fallback on one metrics surface, by pipe id. A metrics server returns the existing gauge on
+ * re-registration and drops the new `collect`, so the gauges are created once and read this map.
  */
 const REGISTRIES = new WeakMap<Metrics, Map<string, FallbackMetricsSource>>()
 
-/**
- * Register pull-based gauges that export a {@link FallbackClient}'s observable state: which source
- * is active, each source's trinary health, the cumulative switch count, and the freshness gauges.
- * The gauges read `source.metrics()` on every scrape via the prom-style `collect` callback, so
- * there is nothing to push.
- *
- * Every series carries the pipe `id`, matching how the rest of the SDK labels per-pipe metrics, so
- * several pipes can share one metrics server and stay individually observable.
- */
+/** Register gauges that read a fallback's `metrics()` on every scrape, labelled with the pipe `id`. */
 export function registerFallbackMetrics(metrics: Metrics, source: FallbackMetricsSource, id: string): void {
   const registered = REGISTRIES.get(metrics)
   if (registered) {
-    // The gauges exist and already read this map — just make this pipe visible to them.
     registered.set(id, source)
+
     return
   }
 

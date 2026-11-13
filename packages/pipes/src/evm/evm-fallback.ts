@@ -24,9 +24,6 @@ import {
 
 import type { EvmRpcConnectionOptions, RpcMethodOptions } from './rpc/options.js'
 
-// Re-export the RPC config types so consumers can type an `rpc` source spec. Type-only, so they are
-// erased from the JS and never pull the optional peers at *runtime*; they also reference no
-// evm-rpc types, so a Portal-only TS consumer typechecks without the peers installed.
 export type { EvmRpcConnectionOptions, RpcMethodOptions } from './rpc/options.js'
 
 /**
@@ -59,40 +56,27 @@ export interface EvmFallbackOptions {
   /** What to do about the detected state, e.g. `{ preferPrimary: 'onFailureOnly' }`. */
   strategy?: FallbackStrategyOptions
   /**
-   * How many times a source retries a retryable transport failure before the failure reaches the
-   * fallback machinery. A lone source retries indefinitely because there is nothing else to read;
-   * inside a list the budget is short, so a struggling source is handed over rather than waited on.
-   * Per-source transport settings still win over this.
+   * How many times a source retries a retryable transport failure before the fallback takes over.
+   * Default 3. Per-source transport settings win over this.
    */
   sourceRetries?: number
   /**
-   * Stream finalized blocks only. Applied to every source that doesn't set it itself — sources may
-   * differ, which enables the "cheap bulk, then follow the tip" topology: a finalized-only portal
-   * first, a hot RPC behind it. The portal serves until its finalized head, its request then sits
-   * outstanding at the frontier, and `detection.maxStalenessMs` hands off to the source that is
-   * genuinely ahead. (Lag cannot do this — it is only evaluated when a batch arrives, and an
-   * exhausted source delivers none.) A set containing any hot source reports itself as hot, so the
-   * target keeps its fork handling.
+   * Stream finalized blocks only. Applies to every source that does not set it itself. Mixed
+   * settings give "cheap bulk, then follow the tip": a finalized-only portal first, a hot RPC
+   * behind it; `detection.maxStalenessMs` hands off at the finality frontier.
    */
   finalized?: boolean
   logger?: Logger
 }
 
-/**
- * Blocks of retrying a source's transport before the fallback is allowed to do its job. A lone
- * portal retries a retryable status indefinitely because there is nothing else to read; inside a
- * list there is, so the budget is short — long enough to ride out a blip, short enough that a
- * struggling source is handed over rather than waited on (ADR-25).
- */
+/** A lone portal retries forever; in a list another source can serve, so the budget is short. */
 const DEFAULT_SOURCE_RETRIES = 3
 
-/**
- * Portal client settings for a source in a list: the pipe's logger and the bounded retry budget,
- * with anything the caller specified winning. A ready-made client is passed through untouched —
- * its owner has already configured it.
- */
+/** A ready-made `HttpClient` is passed through: its owner has configured it. */
 function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http']): PortalClientOptions['http'] {
-  if (http instanceof HttpClient) return http
+  if (http instanceof HttpClient) {
+    return http
+  }
 
   return {
     retryAttempts: options.sourceRetries ?? DEFAULT_SOURCE_RETRIES,
@@ -101,12 +85,7 @@ function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http
   }
 }
 
-/**
- * Build a {@link FallbackClient} over an ordered list of EVM source specs. The result is a
- * {@link BlockStreamClient} — it slots into a `PortalStream` (and thus `evmStream`) exactly where
- * a single portal client goes, all sources serving the same query so their output is
- * interchangeable.
- */
+/** Build a {@link FallbackClient} over an ordered list of EVM source specs. */
 export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {
   return new FallbackClient({
     sources: specs.map((spec, i) => createSource(spec, i, options)),
@@ -177,18 +156,12 @@ function createSource(spec: EvmSourceSpec, i: number, options: EvmFallbackOption
   }
 }
 
-// The full optional "RPC stack": `@subsquid/evm-rpc` + `@subsquid/evm-normalization` and evm-rpc's
-// own peers (`@subsquid/http-client`, `@subsquid/rpc-client`). A consumer installing only the first
-// two can still hit a module-not-found for the transitive peers, so all four are detected and named.
+// evm-rpc's own peers are listed too: a consumer who installs only the first two still misses them.
 const RPC_PEERS = ['@subsquid/evm-rpc', '@subsquid/evm-normalization', '@subsquid/http-client', '@subsquid/rpc-client']
 
 /**
- * If `e` is a module-not-found for one of the optional RPC-stack peers, return an actionable error
- * naming the whole stack; otherwise return `e` unchanged. Matches the missing module by its exact
- * quoted name, so a module-not-found for a *different* module (a broken transitive dep) — and any
- * other fault thrown while loading the RPC stack (a syntax/init error) — surfaces as-is rather than
- * being masked as "peers missing". Handles both the ESM (`ERR_MODULE_NOT_FOUND`) and CJS
- * (`MODULE_NOT_FOUND`) loader codes, since the package ships both builds.
+ * A module-not-found for an RPC peer becomes an error that names the whole stack. Any other error,
+ * a missing transitive module included, is returned unchanged.
  */
 export function translateMissingRpcPeer(e: unknown, sourceName = 'rpc'): unknown {
   const err = e as NodeJS.ErrnoException
@@ -200,17 +173,13 @@ export function translateMissingRpcPeer(e: unknown, sourceName = 'rpc'): unknown
         `install them to use RPC sources, or use only 'portal' sources.`,
     )
   }
+
   return err
 }
 
 /**
- * An RPC {@link BlockStreamClient} whose `@subsquid/evm-rpc` dependency is loaded **lazily** — on
- * the first call that actually needs the endpoint. A multi-Portal fallback therefore never imports
- * the RPC stack, and a misconfigured RPC source fails with a clear, actionable error instead of an
- * opaque module-not-found at startup. (The RPC stack is declared as optional peer dependencies — a
- * Portal-only consumer never installs it.)
- *
- * `config` restates the `EvmRpcBlockClient` options: importing their type would pull the RPC peer
+ * An RPC {@link BlockStreamClient} that imports the optional RPC peers on first use only.
+ * `config` restates the `EvmRpcBlockClient` options: importing their type would pull the peers
  * into the type graph.
  */
 function lazyEvmRpcBlockClient(config: {
@@ -221,9 +190,7 @@ function lazyEvmRpcBlockClient(config: {
   strideSize?: number
   strideConcurrency?: number
 }): BlockStreamClient {
-  // Shared across concurrent callers: a head poll and a capability probe routinely race here, and
-  // constructing the client twice would give one configured endpoint two connection pools and two
-  // rate limiters.
+  // A head poll and a capability probe race here; two clients would mean two rate limiters.
   const load = once(async (): Promise<BlockStreamClient> => {
     let mod: typeof import('./rpc/block-client.js')
     try {
@@ -239,12 +206,8 @@ function lazyEvmRpcBlockClient(config: {
     finalized: config.finalized,
     getUrl: () => redactUrl(config.rpc.url) ?? config.name,
     getMetadata: async (): Promise<ApiDataset> => (await load()).getMetadata(),
-    // Head-polling a standby RPC source loads the RPC stack — that is fine/desirable: it is exactly
-    // when we want to confirm the source is loadable and viable before switching up to it.
     getHead: async (options?: { finalized: boolean }): Promise<BlockRef | undefined> => (await load()).getHead(options),
-    // Must be forwarded explicitly, like every method here: this wrapper is what the fallback
-    // holds, so an optional method it omits is invisible — the fallback would silently fall back
-    // to the full `getHead` block lookup and the cheap poll would never fire.
+    // Optional on the contract: without it here, the fallback falls back to the `getHead` block lookup.
     getHeight: async (options?: { finalized: boolean }): Promise<number | undefined> =>
       await (await load()).getHeight?.(options),
     resolveTimestamp: async (seconds: number): Promise<number> => (await load()).resolveTimestamp(seconds),

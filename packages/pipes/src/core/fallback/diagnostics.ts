@@ -1,15 +1,7 @@
 /**
- * Turning whatever a source throws into something usable by both logs and metrics. We rely on
- * sources *throwing* to detect incapability/unreachability, so the supervisor never knows the error
- * type up front — this normalizer duck-types the conventional fields the SDK already stamps on its
- * errors (`@subsquid/util-internal`'s `addErrorContext` puts `rpcUrl`/`rpcMethod`/`rpcParams` on a
- * thrown `RpcError`; `HttpError` carries `.response.{status,url,body}`; transport errors carry a
- * `name`) rather than importing every error class. The result splits cleanly:
- *
- *  - `reason` + `code` + `check` are bounded enums/numbers → safe as Prometheus labels.
- *  - `detail` (and the embedded, possibly large request) is for logs only — never a metric label.
- *
- * This mirrors the Squid SDK's `diagnostics.ts` (the two SDKs deliberately share no code).
+ * Turns whatever a source throws into a cause for logs and metrics, by the fields the SDK errors
+ * carry (`rpcUrl`/`rpcMethod` from `addErrorContext`, `HttpError.response`, the error `name`).
+ * `check`, `reason` and `code` are bounded and safe as metric labels; `detail` is for logs only.
  */
 
 /** Which health check tripped — the leading "<…> failed" in the message. */
@@ -128,12 +120,7 @@ export function freshnessFailure(check: FailedCheck, reason: 'stale' | 'lag', de
   return { check, reason, detail: `${check} check failed: ${detail}` }
 }
 
-/**
- * Build a {@link SourceErrorInfo} for a capability probe that reported not-capable without a thrown,
- * classifiable error. The reason is never `stale`: a probe fails for non-freshness reasons — pruned
- * state, disabled `trace_`/`debug_` APIs (`unknown`), or a slice that outran the probe timeout
- * (`timeout`) — so a `stale` label would misreport it in logs and metrics.
- */
+/** A capability probe said not-capable without a thrown error. */
 export function capabilityFailure(detail: string, reason: FailureReason = 'unknown'): SourceErrorInfo {
   return { check: 'capability', reason, detail: `capability check failed: ${detail}` }
 }
