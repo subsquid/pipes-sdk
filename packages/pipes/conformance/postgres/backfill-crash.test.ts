@@ -3,7 +3,7 @@ import { describe, expect } from 'vitest'
 import { TABLE_NAMES } from '../scenarios/erc20.js'
 import {
   COMMIT,
-  CURSOR_WRITE,
+  DATA_WRITE,
   type PostgresStore,
   S1_POSTGRES,
   TRIGGER_SET_UP,
@@ -16,22 +16,22 @@ import type { StatementKillPoint } from './kill-switch.js'
 
 /**
  * The class-T commit protocol (CN-10) statement by statement. A run first sets up the undo-log
- * triggers in a transaction of its own; then each batch commits in one transaction, which takes
- * the pipe's lock, tags the undo log with the batch's last block, writes the data rows, then the
- * cursor row. A point names its transaction by the block it tags: S1's first batch ends at 6, its
+ * triggers in a transaction of its own; then each batch commits in one transaction. Its first
+ * statement takes the pipe's lock, tags the undo log with the batch's last block and writes the
+ * cursor row; the data rows follow. A point names its transaction by the block it tags: S1's first batch ends at 6, its
  * second at 13.
  */
 const POINTS = {
   beforeWrites: { name: 'before the batch writes anything', statement: batchAt(13), at: 1, when: 'before' },
-  afterData: {
-    name: 'inside the transaction, after the data writes',
-    statement: CURSOR_WRITE,
+  afterCursor: {
+    name: 'inside the transaction, after the cursor write',
+    statement: DATA_WRITE,
     inTransaction: batchAt(13),
     at: 1,
     when: 'before',
   },
-  afterCursor: {
-    name: 'inside the transaction, after the cursor write',
+  afterData: {
+    name: 'inside the transaction, after the data writes',
     statement: COMMIT,
     inTransaction: batchAt(13),
     at: 1,
@@ -55,8 +55,8 @@ const POINTS = {
   },
 } satisfies Record<string, StatementKillPoint>
 
-/** What a batch transaction sends before its data writes. */
-const OPENING = ['begin', 'lock', 'set']
+/** What a batch transaction sends before its data writes: `lock` also tags the undo log and writes the cursor. */
+const OPENING = ['begin', 'lock']
 const DATA_WRITES = TABLE_NAMES.map((table) => `insert ${table}`)
 
 /** The statements of `transaction` after its opening that write data rows. */
@@ -96,35 +96,14 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
       point: POINTS.beforeWrites,
     })
 
-    expect(killed).toEqual({ statement: 'set', transaction: ['begin', 'lock'] })
+    expect(killed).toEqual({ statement: 'lock', transaction: ['begin'] })
     expect(batches).toHaveLength(2)
     expect(cursorOf(store)).toStrictEqual(batches[0].current)
 
     await resumeToEnd({ scenario, simulator, database, model, store })
   })
 
-  it('inside the transaction, after the data writes: none of them is visible (CN-10)', async ({
-    simulateS1,
-    database,
-  }) => {
-    const simulator = await simulateS1()
-    const model = scenario.oracle()
-
-    const { store, batches, killed } = await crashAt({ scenario, simulator, database, model, point: POINTS.afterData })
-    const writes = killed.transaction.slice(OPENING.length)
-
-    expect(killed.statement).toBe('insert sync')
-    expect(killed.transaction.slice(0, OPENING.length)).toEqual(OPENING)
-    // Which tables the batch writes is free; that it wrote rows, and nothing else, is not.
-    expect(writes.length).toBeGreaterThan(0)
-    expect(dataWritesOf(killed.transaction)).toEqual(writes)
-    expect(batches).toHaveLength(2)
-    expect(cursorOf(store)).toStrictEqual(batches[0].current)
-
-    await resumeToEnd({ scenario, simulator, database, model, store })
-  })
-
-  it('inside the transaction, after the cursor write: neither the rows nor the cursor is visible (CN-10)', async ({
+  it('inside the transaction, after the cursor write: the cursor is not visible (CN-10)', async ({
     simulateS1,
     database,
   }) => {
@@ -139,10 +118,27 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
       point: POINTS.afterCursor,
     })
 
+    expect(DATA_WRITES).toContain(killed.statement)
+    expect(killed.transaction).toEqual(OPENING)
+    expect(batches).toHaveLength(2)
+    expect(cursorOf(store)).toStrictEqual(batches[0].current)
+
+    await resumeToEnd({ scenario, simulator, database, model, store })
+  })
+
+  it('inside the transaction, after the data writes: neither the rows nor the cursor is visible (CN-10)', async ({
+    simulateS1,
+    database,
+  }) => {
+    const simulator = await simulateS1()
+    const model = scenario.oracle()
+
+    const { store, batches, killed } = await crashAt({ scenario, simulator, database, model, point: POINTS.afterData })
+
     expect(killed.statement).toBe('commit')
     expect(killed.transaction.slice(0, OPENING.length)).toEqual(OPENING)
-    expect(killed.transaction).toContain('insert sync')
     expect(killed.transaction).not.toContain('commit')
+    // Which tables the batch writes is free; that it wrote rows is not.
     expect(dataWritesOf(killed.transaction).length).toBeGreaterThan(0)
     expect(batches).toHaveLength(2)
     expect(cursorOf(store)).toStrictEqual(batches[0].current)
@@ -162,7 +158,7 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
 
     expect(killed.statement).toBe('commit')
     expect(killed.transaction.at(-1)).toBe('commit')
-    expect(killed.transaction).toContain('insert sync')
+    expect(killed.transaction.slice(0, OPENING.length)).toEqual(OPENING)
     expect(batches).toHaveLength(2)
     // The pipe cannot know whether the server committed; either is a commit point (CN-40).
     expect(commitPoints).toContainEqual(cursorOf(store))
@@ -209,7 +205,7 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
     })
 
     expect(killed.statement).toBe('commit')
-    expect(killed.transaction).toContain('insert sync')
+    expect(killed.transaction.slice(0, OPENING.length)).toEqual(OPENING)
     expect(batches).toHaveLength(1)
     expect(store.sync).toEqual([])
     expect(store.state).toBeUndefined()
@@ -243,7 +239,7 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
     const simulator = await simulateS1()
     const model = scenario.oracle()
 
-    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.afterCursor })
+    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.afterData })
     const second = await crashAt({ scenario, simulator, database, model, point: POINTS.recovery })
 
     // The restart died before its first batch, and left the store as the first crash did.
@@ -262,11 +258,11 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
     const model = scenario.oracle()
 
     // The first crash leaves the batch at 6, so the restart's first batch is the one at 13 again.
-    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.afterCursor })
-    const second = await crashAt({ scenario, simulator, database, model, point: POINTS.afterCursor })
+    const first = await crashAt({ scenario, simulator, database, model, point: POINTS.afterData })
+    const second = await crashAt({ scenario, simulator, database, model, point: POINTS.afterData })
     const delivered = second.batches.map((batch) => batch.current.number)
 
-    expect(second.killed.transaction).toContain('insert sync')
+    expect(second.killed.transaction.slice(0, OPENING.length)).toEqual(OPENING)
     expect(delivered).toEqual([13])
     expect(second.store).toStrictEqual(first.store)
 

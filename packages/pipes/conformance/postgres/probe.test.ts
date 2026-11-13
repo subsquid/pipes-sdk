@@ -175,12 +175,12 @@ describe('readPostgresSnapshot', () => {
       row: { number: 4, chain: json([cursor(3), { number: 4 }]) },
       reason: 'rollback_chain holds {"number":4}, which has no number and hash',
     },
-  ] satisfies { label: string; row: SyncRow; reason: string }[])('fails the read on a sync row with $label', async ({
-    row,
-    reason,
-  }, { database }) => {
-    await writeSync(database, [row])
+  ] satisfies { label: string; row: SyncRow; reason: string }[])(
+    'fails the read on a sync row with $label',
+    async ({ row, reason }, { database }) => {
+      await writeSync(database, [row])
 
-    await expect(read(database)).rejects.toThrow(`sync row 0 is not an IB-21 sync row: ${reason}`)
-  })
+      await expect(read(database)).rejects.toThrow(`sync row 0 is not an IB-21 sync row: ${reason}`)
+    },
+  )
 })

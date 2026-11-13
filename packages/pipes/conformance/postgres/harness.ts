@@ -26,14 +26,15 @@ const DISCONNECT_TIMEOUT_MS = 5_000
 
 /** The statements of the class-T protocol a kill point names, as SQL patterns. */
 export const COMMIT = String.raw`^commit$`
-export const CURSOR_WRITE = String.raw`^\s*insert into "[^"]+"\."sync"`
+/** A data row write. The batch's cursor row goes out earlier, with its lock, in one statement. */
+export const DATA_WRITE = String.raw`^\s*insert into (?!"[^"]+"\."sync")`
 /** The fork drops the sync rows above the ancestor; retention drops those at or below a safe block. */
 export const FORKED_ROWS = String.raw`^\s*delete from "[^"]+"\."sync"\s+where "id" = \$1 and "current_number" > `
 /** The undo-log set-up takes this lock. */
 export const TRIGGER_SET_UP = 'sqd_drizzle_triggers'
 
 /** The batch transaction whose batch ends at `block`: it tags its undo records with that block. */
-export const batchAt = (block: number) => String.raw`snapshot_block_number = ${block}\b`
+export const batchAt = (block: number) => String.raw`'sqd\.snapshot_block_number', '${block}'`
 
 /** A schema of one test's own: the tables, the pipe's sync table and the undo logs all live in it. */
 export type Database = { dsn: string; schema: string; admin: pg.Pool }
