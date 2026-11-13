@@ -4,8 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { FieldSelection, getBlockSchema } from '~/portal-client/query/evm.js'
 
-import { withRequiredFields } from './decode.js'
-import { createWireBlockMapper } from './wire.js'
+import { createWireBlockMapper, dropEmptyBlocks, shimWireBlock } from './wire.js'
 
 /**
  * The raw-RPC → portal-wire mapping, unit-tested on a hand-built block: filtering happens on a
@@ -103,8 +102,9 @@ describe('createWireBlockMapper', () => {
     const mapper = createWireBlockMapper(fields, { logs: [{ address: [ADDR_A] }] })
     const wire = mapper.map(rawBlock())
 
-    // The facade's normalize step: cast at the (required-augmented) user selection.
-    const decoded: any = cast(getBlockSchema(withRequiredFields(fields)), wire)
+    // The facade's normalize step: cast at the user selection plus the fields the query always adds.
+    const selection = { ...fields, block: { ...fields.block, number: true }, log: { ...fields.log, logIndex: true } }
+    const decoded: any = cast(getBlockSchema(selection), wire)
 
     expect(decoded.header.number).toBe(100)
     expect(typeof decoded.header.timestamp).toBe('number')
@@ -116,8 +116,7 @@ describe('createWireBlockMapper', () => {
   })
 
   it('filters on a where-clause field that is not in the output selection', () => {
-    // topic0 is filtered on but `topics` is not selected: the predicate runs on the augmented
-    // decode, and the output selection stays untouched.
+    // topic0 is filtered on but `topics` is not selected: the filter reads the full wire block.
     const mapper = createWireBlockMapper({ log: { data: true } }, { logs: [{ topic0: [TOPIC], address: [ADDR_B] }] })
     const wire = mapper.map(rawBlock())
 
@@ -135,9 +134,7 @@ describe('createWireBlockMapper', () => {
 
   it('serves a query that selects receipt-backed fields while requesting only logs', () => {
     // Receipts are only fetched when transactions are *requested*, so `gasUsed`/`status` are absent
-    // from the normalized block here. Decoding the pre-filter block at the user's OUTPUT selection
-    // would throw on this perfectly valid query (a shared field preset + a logs-only request); the
-    // internal cast is scoped to what filtering reads, so it doesn't.
+    // from the normalized block here. The mapper must not decode at the output selection.
     const mapper = createWireBlockMapper(
       { transaction: { gasUsed: true, status: true }, log: { address: true } },
       { logs: [{ address: [ADDR_A] }] },
@@ -148,5 +145,83 @@ describe('createWireBlockMapper', () => {
     expect(mapper.requiredData.receipts).toBe(false)
     expect(wire.logs).toHaveLength(1)
     expect(wire.transactions).toHaveLength(0) // no transactions requested ⇒ none survive filtering
+  })
+})
+
+describe('shimWireBlock', () => {
+  it('rewrites the selfdestruct trace tag to suicide', () => {
+    const block = { traces: [{ type: 'selfdestruct', action: { refundAddress: '0xa' } }] }
+    shimWireBlock(block)
+    expect(block.traces[0].type).toBe('suicide')
+  })
+
+  it('renames a reward action rewardType to type', () => {
+    const block = { traces: [{ type: 'reward', action: { author: '0xa', rewardType: 'block' } }] }
+    shimWireBlock(block)
+    expect(block.traces[0].action).toEqual({ author: '0xa', type: 'block' })
+    expect('rewardType' in block.traces[0].action).toBe(false)
+  })
+
+  it('leaves create / call traces and trace-less blocks untouched', () => {
+    const block = {
+      traces: [
+        { type: 'call', action: { to: '0xa', from: '0xb' } },
+        { type: 'create', action: { from: '0xc' } },
+      ],
+    }
+    shimWireBlock(block)
+    expect(block.traces[0]).toEqual({ type: 'call', action: { to: '0xa', from: '0xb' } })
+    expect(block.traces[1]).toEqual({ type: 'create', action: { from: '0xc' } })
+
+    // no traces at all — must not throw
+    expect(() => shimWireBlock({ header: {} })).not.toThrow()
+    expect(() => shimWireBlock({})).not.toThrow()
+  })
+
+  it('does not throw on malformed wire JSON (non-object action) — leaves it for schema validation', () => {
+    // A reward trace whose `action` is a truthy non-object must not make the `in` check throw before
+    // the downstream `cast()` can report a proper validation error.
+    const block = { traces: [{ type: 'reward', action: 'not-an-object' }] }
+    expect(() => shimWireBlock(block)).not.toThrow()
+    expect(block.traces[0].action).toBe('not-an-object') // left untouched for the schema to reject
+  })
+})
+
+describe('dropEmptyBlocks', () => {
+  const blk = (
+    number: number,
+    parts: { logs?: unknown[]; transactions?: unknown[]; traces?: unknown[]; stateDiffs?: unknown[] } = {},
+  ) => ({
+    header: { number },
+    logs: parts.logs ?? [],
+    transactions: parts.transactions ?? [],
+    traces: parts.traces ?? [],
+    stateDiffs: parts.stateDiffs ?? [],
+  })
+
+  it('drops empty interior blocks but keeps the boundaries', () => {
+    const blocks = [blk(1), blk(2, { logs: [{}] }), blk(3), blk(4)]
+    // 1 kept (first), 2 kept (has a log), 3 dropped (empty interior), 4 kept (last)
+    expect(dropEmptyBlocks(blocks).map((b) => b.header.number)).toEqual([1, 2, 4])
+  })
+
+  it('keeps every block when includeAllBlocks is set', () => {
+    const blocks = [blk(1), blk(2), blk(3)]
+    expect(dropEmptyBlocks(blocks, true).map((b) => b.header.number)).toEqual([1, 2, 3])
+  })
+
+  it('keeps an interior block that has any data (tx / trace / stateDiff)', () => {
+    const blocks = [
+      blk(1),
+      blk(2, { transactions: [{}] }),
+      blk(3, { traces: [{}] }),
+      blk(4, { stateDiffs: [{}] }),
+      blk(5),
+    ]
+    expect(dropEmptyBlocks(blocks).map((b) => b.header.number)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('keeps a lone empty block (it is both first and last — the progress cursor)', () => {
+    expect(dropEmptyBlocks([blk(7)]).map((b) => b.header.number)).toEqual([7])
   })
 })

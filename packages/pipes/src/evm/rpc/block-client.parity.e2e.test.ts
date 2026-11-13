@@ -5,7 +5,6 @@ import { BlockStreamClient, PortalClient } from '~/portal-client/index.js'
 import { FieldSelection, getBlockSchema } from '~/portal-client/query/evm.js'
 
 import { EvmRpcBlockClient } from './block-client.js'
-import { withRequiredFields } from './decode.js'
 
 /**
  * Live parity test: fetch the same historical block from a real RPC endpoint (through the RPC
@@ -20,9 +19,18 @@ const PORTAL_URL = process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets
 const BLOCK = Number(process.env['RPC_E2E_BLOCK'] || 22000000)
 
 const FIELDS = {
-  block: { timestamp: true, gasUsed: true, miner: true },
-  transaction: { from: true, to: true, value: true, gas: true, gasUsed: true, status: true, input: true },
-  log: { address: true, topics: true, data: true },
+  block: { number: true, hash: true, parentHash: true, timestamp: true, gasUsed: true, miner: true },
+  transaction: {
+    transactionIndex: true,
+    from: true,
+    to: true,
+    value: true,
+    gas: true,
+    gasUsed: true,
+    status: true,
+    input: true,
+  },
+  log: { logIndex: true, transactionIndex: true, address: true, topics: true, data: true },
 } satisfies FieldSelection
 
 /**
@@ -31,10 +39,10 @@ const FIELDS = {
  * RPC client and the Portal is what makes them interchangeable behind one stream.
  */
 async function fetchBlock(client: BlockStreamClient, fields: FieldSelection, request: any): Promise<any> {
-  const schema = getBlockSchema(withRequiredFields(fields))
+  const schema = getBlockSchema(fields)
   const query: any = {
     type: 'evm',
-    fields: withRequiredFields(fields),
+    fields,
     fromBlock: BLOCK,
     toBlock: BLOCK,
     ...request,
@@ -56,7 +64,7 @@ describe.skipIf(!ENABLED)('EvmRpcBlockClient — Portal parity', () => {
   it('reports a finalized head but never passes it off as the chain head', async () => {
     // `latest` is the progress denominator; filling it from the finalized head would report an
     // unbounded run complete ~a finality window early.
-    const query: any = { type: 'evm', fields: withRequiredFields(FIELDS), fromBlock: BLOCK, toBlock: BLOCK }
+    const query: any = { type: 'evm', fields: FIELDS, fromBlock: BLOCK, toBlock: BLOCK }
 
     let batches = 0
     for await (const batch of rpcClient().getStream(query, { finalized: true })) {

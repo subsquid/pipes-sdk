@@ -79,7 +79,6 @@
     "@subsquid/util-internal": "3.2.0",
     "@subsquid/util-internal-hex": "0.0.2",
     "@subsquid/util-internal-json": "^1.2.3",
-    "@subsquid/util-internal-processor-tools": "^4.4.0",
     "@subsquid/util-internal-validation": "0.8.0",
     "@subsquid/util-timeout": "^2.3.2",
     "express": "5.1.0",

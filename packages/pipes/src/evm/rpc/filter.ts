@@ -1,5 +1,4 @@
-import { assertNotNull, groupBy } from '@subsquid/util-internal'
-import { EntityFilter, FilterBuilder } from '@subsquid/util-internal-processor-tools'
+import { groupBy } from '@subsquid/util-internal'
 
 import {
   Block,
@@ -15,14 +14,13 @@ import {
 } from '~/portal-client/query/evm.js'
 
 /**
- * Client-side equivalent of the Portal server's filtering, for the RPC source: the Portal filters
- * server-side, but RPC fetches full blocks, so we match items + expand relations here. Ported from
- * the legacy `@subsquid/evm-processor` `ds-rpc/filter.ts` (and mirrors the Squid evm-rpc-stream
- * port) onto Pipes' flat `Block`/`DataRequest` model. Relations are kept in side-maps so the
- * yielded blocks stay plain projections.
+ * Client-side equivalent of the Portal server's filtering, for the RPC source, which fetches full
+ * blocks. Ported from `@subsquid/evm-processor` `ds-rpc/filter.ts` onto Pipes' flat
+ * `Block`/`DataRequest` model. It runs on the wire block, so hex values are compared in lowercase:
+ * the wire keeps the case the node sent.
  */
 
-type AnyBlock = Block<any>
+type AnyBlock = Pick<Block<any>, 'logs' | 'transactions' | 'traces' | 'stateDiffs'>
 type AnyLog = Log<any>
 type AnyTransaction = Transaction<any>
 type AnyTrace = Trace<any>
@@ -35,6 +33,76 @@ export interface Relations {
   stateDiffsByTx: Map<number, AnyStateDiff[]>
   traceParent: Map<AnyTrace, AnyTrace>
   traceChildren: Map<AnyTrace, AnyTrace[]>
+}
+
+type Predicate<T> = (item: T) => boolean
+
+function lower(value: unknown): unknown {
+  return typeof value === 'string' ? value.toLowerCase() : value
+}
+
+/** One where-clause: every field it lists must match one of the listed values. */
+class FilterBuilder<T> {
+  readonly #predicates: Predicate<T>[] = []
+  #never = false
+
+  getIn(get: (item: T) => unknown, values: readonly unknown[] | undefined): this {
+    if (values == null) {
+      return this
+    }
+    if (values.length === 0) {
+      this.#never = true
+    }
+
+    const accepted = new Set(values.map(lower))
+    this.#predicates.push((item) => accepted.has(lower(get(item))))
+
+    return this
+  }
+
+  /** `undefined` when the clause can never match. */
+  build(): Predicate<T> | undefined {
+    if (this.#never) {
+      return undefined
+    }
+
+    const predicates = this.#predicates
+
+    return (item) => predicates.every((p) => p(item))
+  }
+}
+
+/** All where-clauses for one item kind; a match returns the union of the matched clauses' relations. */
+class EntityFilter<T, R extends object> {
+  readonly #clauses: { match: Predicate<T>; relations: R }[] = []
+
+  add(builder: FilterBuilder<T>, relations: R): void {
+    const match = builder.build()
+    if (match) {
+      this.#clauses.push({ match, relations })
+    }
+  }
+
+  present(): boolean {
+    return this.#clauses.length > 0
+  }
+
+  match(item: T): R | undefined {
+    let merged: R | undefined
+    for (const clause of this.#clauses) {
+      if (!clause.match(item)) {
+        continue
+      }
+
+      merged = { ...merged, ...pickTrue(clause.relations) } as R
+    }
+
+    return merged
+  }
+}
+
+function pickTrue<R extends object>(relations: R): Partial<R> {
+  return Object.fromEntries(Object.entries(relations).filter(([, on]) => on)) as Partial<R>
 }
 
 function traceAddressOf(trace: AnyTrace): number[] {
@@ -66,7 +134,7 @@ function isDescendant(parent: AnyTrace, child: AnyTrace): boolean {
   return true
 }
 
-export function setUpRelations(block: AnyBlock): Relations {
+function setUpRelations(block: AnyBlock): Relations {
   const traces = [...block.traces].sort(traceCompare)
 
   const relations: Relations = {
@@ -105,11 +173,11 @@ function buildLogFilter(req: LogRequest[] = []) {
   >()
   for (const { address, topic0, topic1, topic2, topic3, ...relations } of req) {
     const filter = new FilterBuilder<AnyLog>()
-    filter.propIn('address' as any, address)
-    filter.getIn((log) => assertNotNull((log as any).topics)[0], topic0)
-    filter.getIn((log) => assertNotNull((log as any).topics)[1], topic1)
-    filter.getIn((log) => assertNotNull((log as any).topics)[2], topic2)
-    filter.getIn((log) => assertNotNull((log as any).topics)[3], topic3)
+    filter.getIn((it) => (it as any).address, address)
+    filter.getIn((log) => (log as any).topics?.[0], topic0)
+    filter.getIn((log) => (log as any).topics?.[1], topic1)
+    filter.getIn((log) => (log as any).topics?.[2], topic2)
+    filter.getIn((log) => (log as any).topics?.[3], topic3)
     items.add(filter, relations)
   }
 
@@ -120,10 +188,10 @@ function buildTransactionFilter(req: TransactionRequest[] = []) {
   const items = new EntityFilter<AnyTransaction, { logs?: boolean; traces?: boolean; stateDiffs?: boolean }>()
   for (const { to, from, sighash, type, ...relations } of req) {
     const filter = new FilterBuilder<AnyTransaction>()
-    filter.propIn('to' as any, to)
-    filter.propIn('from' as any, from)
-    filter.propIn('sighash' as any, sighash)
-    filter.propIn('type' as any, type)
+    filter.getIn((it) => (it as any).to, to)
+    filter.getIn((it) => (it as any).from, from)
+    filter.getIn((it) => (it as any).sighash, sighash)
+    filter.getIn((it) => (it as any).type, type)
     items.add(filter, relations)
   }
 
@@ -146,7 +214,7 @@ function buildTraceFilter(req: TraceRequest[] = []) {
     ...relations
   } of req) {
     const filter = new FilterBuilder<AnyTrace>()
-    filter.propIn('type' as any, type)
+    filter.getIn((it) => (it as any).type, type)
     // Read action fields nullable-safely: `getIn` treats `undefined` as a non-match, and several of
     // these are legitimately absent on valid traces (a `call` with empty input has no `sighash`; a
     // `suicide`'s `refundAddress` is nullable) — asserting non-null would crash the whole stream.
@@ -169,9 +237,9 @@ function buildStateDiffFilter(req: StateDiffRequest[] = []) {
   const items = new EntityFilter<AnyStateDiff, { transaction?: boolean }>()
   for (const { address, key, kind, ...relations } of req) {
     const filter = new FilterBuilder<AnyStateDiff>()
-    filter.propIn('address' as any, address)
-    filter.propIn('key' as any, key)
-    filter.propIn('kind' as any, kind)
+    filter.getIn((it) => (it as any).address, address)
+    filter.getIn((it) => (it as any).key, key)
+    filter.getIn((it) => (it as any).kind, kind)
     items.add(filter, relations)
   }
 
@@ -204,12 +272,29 @@ class IncludeSet {
   }
 }
 
-export function filterBlock(block: AnyBlock, req: DataRequest, relations: Relations): void {
-  const logFilter = buildLogFilter(req.logs)
-  const transactionFilter = buildTransactionFilter(req.transactions)
-  const traceFilter = buildTraceFilter(req.traces)
-  const stateDiffFilter = buildStateDiffFilter(req.stateDiffs)
+function buildFilters(req: DataRequest) {
+  return {
+    logFilter: buildLogFilter(req.logs),
+    transactionFilter: buildTransactionFilter(req.transactions),
+    traceFilter: buildTraceFilter(req.traces),
+    stateDiffFilter: buildStateDiffFilter(req.stateDiffs),
+  }
+}
 
+type BlockFilters = ReturnType<typeof buildFilters>
+
+/** Build the request's filters once; the result keeps, in place, the items of a block that the request matches. */
+export function createBlockFilter(req: DataRequest): (block: AnyBlock) => void {
+  const filters = buildFilters(req)
+
+  return (block) => filterBlock(block, filters)
+}
+
+function filterBlock(
+  block: AnyBlock,
+  { logFilter, transactionFilter, traceFilter, stateDiffFilter }: BlockFilters,
+): void {
+  const relations = setUpRelations(block)
   const include = new IncludeSet()
 
   if (logFilter.present()) {

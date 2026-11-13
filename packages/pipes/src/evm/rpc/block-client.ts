@@ -6,8 +6,7 @@ import { ForkException, GetBlock, PortalBlockStream, Query, StreamData } from '~
 import { Query as EvmQuery } from '~/portal-client/query/evm.js'
 
 import { EvmRpcConnectionOptions, RpcMethodOptions } from './options.js'
-import { dropEmptyBlocks } from './project.js'
-import { createWireBlockMapper } from './wire.js'
+import { createWireBlockMapper, dropEmptyBlocks } from './wire.js'
 
 export type { EvmRpcConnectionOptions, RpcMethodOptions } from './options.js'
 

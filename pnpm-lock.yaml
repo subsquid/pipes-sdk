@@ -144,12 +144,9 @@ importers:
       '@subsquid/util-internal-json':
         specifier: ^1.2.3
         version: 1.2.3
-      '@subsquid/util-internal-processor-tools':
-        specifier: ^4.4.0
-        version: 4.4.0
       '@subsquid/util-internal-validation':
         specifier: 0.8.0
-        version: 0.8.0(@subsquid/logger@1.4.0)
+        version: 0.8.0(@subsquid/logger@1.6.0)
       '@subsquid/util-timeout':
         specifier: ^2.3.2
         version: 2.3.2
@@ -198,7 +195,7 @@ importers:
         version: 0.3.0
       '@subsquid/evm-normalization':
         specifier: ^0.0.2
-        version: 0.0.2(@subsquid/http-client@1.9.0)(@subsquid/logger@1.4.0)(@subsquid/rpc-client@4.17.0)
+        version: 0.0.2(@subsquid/http-client@1.9.0)(@subsquid/logger@1.6.0)(@subsquid/rpc-client@4.17.0)
       '@subsquid/evm-rpc':
         specifier: ^0.0.2
         version: 0.0.2(@subsquid/http-client@1.9.0)(@subsquid/rpc-client@4.17.0)
@@ -2958,7 +2955,6 @@ packages:
 
   '@subsquid/logger@1.6.0':
     resolution: {integrity: sha512-k33Cw1uO+Boha08arS8nhr0VHfT+bTWGe/hTZDeCDMoa2i0SUgkiDGDkgqTQof6y/N/kl30KzPvAAGqwJ6MJNw==}
-
 
   '@subsquid/rpc-client@4.17.0':
     resolution: {integrity: sha512-LOpMRkWlvbdE3Y9Qsp2ZI+aDY1A+pxBwUnYrx3obyLNwiQloJWXCQfEdmw1Fje1AhZXcHvEwj1lR0i/zrtMwUA==}
@@ -8595,11 +8591,11 @@ snapshots:
     dependencies:
       '@subsquid/util-internal-hex': 1.2.2
 
-  '@subsquid/evm-normalization@0.0.2(@subsquid/http-client@1.9.0)(@subsquid/logger@1.4.0)(@subsquid/rpc-client@4.17.0)':
+  '@subsquid/evm-normalization@0.0.2(@subsquid/http-client@1.9.0)(@subsquid/logger@1.6.0)(@subsquid/rpc-client@4.17.0)':
     dependencies:
       '@subsquid/evm-rpc': 0.0.2(@subsquid/http-client@1.9.0)(@subsquid/rpc-client@4.17.0)
       '@subsquid/util-internal': 3.3.1
-      '@subsquid/util-internal-validation': 0.9.0(@subsquid/logger@1.4.0)
+      '@subsquid/util-internal-validation': 0.9.0(@subsquid/logger@1.6.0)
     transitivePeerDependencies:
       - '@subsquid/http-client'
       - '@subsquid/logger'
@@ -8641,7 +8637,6 @@ snapshots:
       '@subsquid/util-internal-hex': 1.2.3
       '@subsquid/util-internal-json': 1.2.3
       supports-color: 8.1.1
-
 
   '@subsquid/rpc-client@4.17.0':
     dependencies:
@@ -8791,9 +8786,9 @@ snapshots:
     optionalDependencies:
       '@subsquid/logger': 1.4.0
 
-  '@subsquid/util-internal-validation@0.9.0(@subsquid/logger@1.4.0)':
+  '@subsquid/util-internal-validation@0.8.0(@subsquid/logger@1.6.0)':
     optionalDependencies:
-      '@subsquid/logger': 1.4.0
+      '@subsquid/logger': 1.6.0
 
   '@subsquid/util-internal-validation@0.9.0(@subsquid/logger@1.6.0)':
     optionalDependencies:

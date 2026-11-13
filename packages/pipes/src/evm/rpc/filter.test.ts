@@ -3,8 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { DataRequest } from '~/portal-client/query/evm.js'
 
 import { EvmQueryBuilder } from '../evm-query-builder.js'
-import { filterBlock, setUpRelations } from './filter.js'
-import { keptByPosition } from './project.js'
+import { createBlockFilter } from './filter.js'
 import { toRequiredData } from './request.js'
 
 /**
@@ -37,11 +36,22 @@ function makeBlock(parts: { transactions?: any[]; logs?: any[]; traces?: any[]; 
   }
 }
 function run(block: any, req: DataRequest) {
-  filterBlock(block, req, setUpRelations(block))
+  createBlockFilter(req)(block)
+
   return block
 }
 
-describe('filterBlock', () => {
+describe('createBlockFilter', () => {
+  it('compares hex values in lowercase: the wire keeps the case the node sent', () => {
+    const block = makeBlock({ logs: [log(0, '0xAbC', ['0xT0']), log(1, '0xbbb')] })
+    run(block, { logs: [{ address: ['0xabc'], topic0: ['0xt0'] }] })
+    expect(block.logs.map((l: any) => l.transactionIndex)).toEqual([0])
+
+    const checksummed = makeBlock({ logs: [log(0, '0xabc')] })
+    run(checksummed, { logs: [{ address: ['0xABC'] }] })
+    expect(checksummed.logs).toHaveLength(1)
+  })
+
   it('matches logs by address and topic0', () => {
     const block = makeBlock({ logs: [log(0, '0xaaa', ['0xt0']), log(1, '0xbbb', ['0xz'])] })
     run(block, { logs: [{ address: ['0xaaa'] }] })
@@ -216,23 +226,5 @@ describe('merged multi-request required-data (#510 regression)', () => {
     // though one of the merged items asked for logs. Deduping per-request (the pre-#510 bug) would
     // leave `logs: true` here.
     expect(required).toEqual({ logs: false, receipts: true, traces: false, stateDiffs: false })
-  })
-})
-
-describe('keptByPosition', () => {
-  it('projects by position/identity, so structurally identical items never collide', () => {
-    // Two structurally identical pre-filter items that a synthesized structural key couldn't tell
-    // apart. A keyed projection would confuse them; position + identity won't.
-    const preA = { tag: 'reward' }
-    const preB = { tag: 'reward' }
-    const pre = [preA, preB]
-    // The decode at exactly the output fields: distinct objects, aligned 1:1 with `pre` by position.
-    const projected = [{ n: 0 }, { n: 1 }]
-
-    // Only the *second* survived filtering — the projection must keep the second, not the first.
-    expect(keptByPosition(projected, pre, [preB])).toEqual([{ n: 1 }])
-    expect(keptByPosition(projected, pre, [preA])).toEqual([{ n: 0 }])
-    expect(keptByPosition(projected, pre, [preA, preB])).toEqual([{ n: 0 }, { n: 1 }])
-    expect(keptByPosition(projected, pre, [])).toEqual([])
   })
 })
