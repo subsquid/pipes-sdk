@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { BlockRef, ForkException, StreamData } from '~/portal-client/index.js'
-import { mockBlockStreamClient } from '~/testing/index.js'
+import { StubPortalClient } from '~/testing/stub-portal.js'
 
 import { defaultLogger } from '../logger.js'
 import { BlockCursor } from '../types.js'
@@ -45,9 +45,10 @@ type ProbeFn = () => Promise<{ ok: boolean; cause?: any }>
 
 type MockSource = FallbackClientSource & { reads: any[] }
 
-/** A mock underlying source; `reads` records every `getStream` query it received. */
+/** A source over a stub client; `reads` records every `getStream` query it received. */
 function source(name: string, stream: StreamFn, getHead?: HeadFn, probeCapability?: ProbeFn): MockSource {
-  const client = mockBlockStreamClient({ name, stream, getHead })
+  const client = new StubPortalClient(stream, { url: `http://${name}.invalid` })
+  vi.spyOn(client, 'getHead').mockImplementation(getHead ?? (async () => undefined))
 
   return { name, client, reads: client.reads, ...(probeCapability ? { probeCapability: probeCapability as any } : {}) }
 }
@@ -466,7 +467,7 @@ describe('FallbackClient — metrics', () => {
     expect(m.sources.map((s) => s.active)).toEqual([false, false])
     expect(m.lag).toBeUndefined()
     expect(m.chainHead).toBeUndefined()
-    expect(fb.getUrl()).toBe('mock://s0') // the last source driven
+    expect(fb.getUrl()).toBe(s0.client.getUrl()) // the last source driven
   })
 
   it('reports the active source, switch count, and per-source health', async () => {
@@ -1037,6 +1038,14 @@ describe('FallbackClient — BlockStreamClient surface', () => {
       async function* () {},
       async () => cursor(42),
     )
+    for (const s of [s0, s1]) {
+      vi.spyOn(s.client, 'getMetadata').mockResolvedValue({
+        dataset: s.name,
+        aliases: [],
+        real_time: true,
+        start_block: 0,
+      })
+    }
     const fb = fallback([s0, s1])
 
     expect((await fb.getHead())?.number).toBe(42)
@@ -1048,11 +1057,10 @@ describe('FallbackClient — BlockStreamClient surface', () => {
     // and whether a finalized-requiring target forces the finalized stream. One hot source in the
     // list is enough to make a fork reachable, so a mixed set must report hot.
     const hot = () => source('hot', async function* () {})
-    const finalizedOnly = () => {
-      const s = source('final', async function* () {})
-      ;(s.client as any).finalized = true
-      return s
-    }
+    const finalizedOnly = () => ({
+      name: 'final',
+      client: new StubPortalClient(async function* () {}, { finalized: true }),
+    })
 
     expect(fallback([finalizedOnly(), hot()]).finalized).toBe(false) // mixed ⇒ hot
     expect(fallback([hot(), finalizedOnly()]).finalized).toBe(false) // order does not matter
@@ -1069,9 +1077,9 @@ describe('FallbackClient — BlockStreamClient surface', () => {
     })
     const fb = fallback([s0, s1])
 
-    expect(fb.getUrl()).toBe('mock://s0') // nothing driven yet → primary
+    expect(fb.getUrl()).toBe(s0.client.getUrl()) // nothing driven yet → primary
     await collect(fb)
-    expect(fb.getUrl()).toBe('mock://s1')
+    expect(fb.getUrl()).toBe(s1.client.getUrl())
   })
 })
 
@@ -1164,20 +1172,23 @@ describe('FallbackClient — standby traffic', () => {
     const s0 = source('s0', async function* () {
       for (let n = 1; n <= 3; n++) yield batch(n)
     })
-    const standbyClient = mockBlockStreamClient({
-      name: 'standby',
-      stream: async function* () {},
-      getHead: async () => {
+    const standby = source(
+      'standby',
+      async function* () {},
+      async () => {
         heads++
         return cursor(1000)
       },
+    )
+    // A PortalClient has no `getHeight`; an RPC client does.
+    Object.assign(standby.client, {
       getHeight: async () => {
         heights++
         return 1000
       },
     })
 
-    const fb = fallback([s0, { name: 'standby', client: standbyClient }], { headTtlMs: 0 })
+    const fb = fallback([s0, standby], { headTtlMs: 0 })
     await collect(fb)
 
     expect(heights).toBeGreaterThan(0)
