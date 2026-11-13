@@ -43,7 +43,7 @@ function wholePipeTransform(): Transformer<FullOutputs, FullOutputs> {
 async function cli() {
   const stream = evmPortalStream({
     id: 'simple-decoder',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs,
   }).pipe(wholePipeTransform())
 

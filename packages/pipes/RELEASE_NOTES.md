@@ -12,7 +12,7 @@ An output is built with the `query().build().pipe()` chain:
 
 ```ts
 evmPortalStream({
-  portal: '...',
+  source: '...',
   outputs: evmQuery()
     .addLogRequest({
       range: { from: 'latest' },
@@ -34,7 +34,7 @@ They are also chainable:
 ```ts
 // decoder is a shorthand for query().build().pipe()
 evmPortalStream({
-  portal: '...',
+  source: '...',
   outputs: evmEventDecoder({
     range: { from: 'latest' },
     events: { transfers: erc20.events.Transfer },
@@ -54,7 +54,7 @@ evmPortalSource({ portal: '...' })
 
 // after
 evmPortalStream({
-  portal: '...',
+  source: '...',
   outputs: {
     transfers: erc20Transfers({ range }),
     swaps:     uniswapV3Decoder({ range }),
@@ -81,7 +81,7 @@ for await (const { data } of stream) {
 
 // after
 const stream = evmPortalStream({
-  portal: '...',
+  source: '...',
   // evmQuery() is a shorthand for new EvmQueryBuilder()
   outputs: evmQuery()
     .addLogRequest({ range: { from: 0 }, request: { topic0: [erc20.events.Transfer.topic] } })
@@ -114,10 +114,10 @@ evmPortalSource({ portal: '...' })
   .pipeTo(myTarget)
 
 // after — id is required
-evmPortalStream({ id: 'eth-transfers', portal: '...', outputs: evmEventDecoder({ ... }) })
+evmPortalStream({ id: 'eth-transfers', source: '...', outputs: evmEventDecoder({ ... }) })
   .pipeTo(myTarget) // cursor stored under key "eth-transfers"
 
-solanaPortalStream({ id: 'sol-swaps', portal: '...', outputs: solanaInstructionDecoder({ ... }) })
+solanaPortalStream({ id: 'sol-swaps', source: '...', outputs: solanaInstructionDecoder({ ... }) })
   .pipeTo(myTarget) // cursor stored under key "sol-swaps"
 ```
 
@@ -360,6 +360,27 @@ This is an API and state compatibility break:
 encoded value requires, the table DDL, the subscription flags, the IAM grants for a subscription
 that lives in a different project than the topic, and the limits that come with the design.
 
+
+### 16. The `portal` option and context field are renamed to `source`
+
+A pipe can read from a portal, a JSON-RPC endpoint or a fallback list, so the option that names where
+blocks come from is `source` on every portal stream, and the transformer start context carries it as
+`source`.
+
+```ts
+// before
+evmPortalStream({ id: 'eth-transfers', portal: '...', outputs })
+start: async ({ portal }) => { await portal.getHead() }
+
+// after
+evmPortalStream({ id: 'eth-transfers', source: '...', outputs })
+start: async ({ source }) => { await source.getHead() }
+```
+
+`source` is typed as `BlockStreamClient`, the contract `PortalClient` implements. Narrow with
+`instanceof PortalClient` where portal-specific options are needed. A custom `PortalCache` still
+receives `portal`: the cache reads through a portal client only.
+
 ---
 
 ## New features
@@ -371,7 +392,7 @@ Ranges now accept ISO date strings and `Date` objects in addition to block numbe
 
 ```ts
 evmPortalStream({
-  portal: '...',
+  source: '...',
   outputs: evmEventDecoder({
     range: { from: '2024-01-01' },              // date string
     events: { transfers: erc20.events.Transfer },
@@ -492,7 +513,7 @@ const portal = await mockPortal({ blocks, finalized: 5, latest: 10 })
 // Use portal.url with any portal stream in your test
 const stream = evmPortalStream({
   id: 'test',
-  portal: portal.url,
+  source: portal.url,
   logger: testLogger(),
   metrics: mockMetricsServer(),
   outputs: evmEventDecoder({ ... }),
@@ -549,7 +570,7 @@ Export profiler spans to Jaeger, Tempo, or any OTEL-compatible backend:
 import { opentelemetryProfiler } from '@subsquid/pipes/opentelemetry'
 
 evmPortalStream({
-  portal: '...',
+  source: '...',
   profiler: opentelemetryProfiler(), // drop-in for profiler: true
   outputs: evmEventDecoder({ ... }),
 })
@@ -568,7 +589,7 @@ import { devRunner } from '@subsquid/pipes/runtime/node'
 async function indexTransfers({ id, params, logger, metrics }: PipeContext<{ portal: string }>) {
   const stream = evmPortalStream({
     id,
-    portal: params.portal,
+    source: params.portal,
     logger,
     metrics,
     outputs: evmEventDecoder({
@@ -684,9 +705,8 @@ switching decision. RPC sources need the optional peers `@subsquid/evm-rpc`,
 The API is experimental and can change in a minor release. `evmPortalStream` is unchanged and stays the
 recommended entry point for a single portal.
 
-`StartContext.portal` and `Factory.runPreindex` are now typed as `BlockStreamClient`, the contract
-`PortalClient` implements, because a pipe's source may be an RPC or fallback client. Narrow with
-`instanceof PortalClient` where portal-specific options are needed.
+A pipe's source may be an RPC or fallback client, so the transformer context exposes it as `source`
+(breaking change 16).
 
 ---
 

@@ -34,7 +34,7 @@ function streamTo(portal: MockPortal, to: number, emitted: Row[][]) {
     id: 'memory-target-test',
     // `maxBytes: 1` keeps each mock response its own batch; without it they coalesce and a target
     // that only emitted once at stream end would pass the arrival-order assertions unchanged.
-    portal: { url: portal.url, maxBytes: 1 },
+    source: { url: portal.url, maxBytes: 1 },
     outputs: evmEventDecoder({
       range: { from: 1, to },
       events: {

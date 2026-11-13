@@ -99,7 +99,7 @@ import { metricsServer } from '@subsquid/pipes/metrics/node'
 
 const pipeline = evmPortalStream({
     id: 'my-pipe',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     /**
      * Enables the metrics server.
      * Default port is 9090, but you can change it by passing a custom port.

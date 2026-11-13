@@ -26,7 +26,7 @@ async function main() {
   // Create a stream of new blocks from the Base mainnet portal
   const stream = solanaPortalStream({
     id: 'solana-latency',
-    portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+    source: 'https://portal.sqd.dev/datasets/solana-mainnet',
     outputs: solanaRpcLatencyWatcher({
       rpcUrl: ['https://api.mainnet-beta.solana.com'], // RPC endpoints to monitor
     }).pipe({

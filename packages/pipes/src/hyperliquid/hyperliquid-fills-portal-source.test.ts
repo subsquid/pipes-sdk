@@ -24,7 +24,7 @@ describe('Portal abstract stream', () => {
 
     const stream = hyperliquidFillsPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: new HyperliquidFillsQueryBuilder()
         .addFields({
           block: {

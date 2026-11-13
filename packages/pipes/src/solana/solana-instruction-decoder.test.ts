@@ -39,7 +39,7 @@ describe('solanaInstructionDecoder transform', () => {
 
     const stream = solanaPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       outputs: solanaInstructionDecoder({
         range: { from: 0, to: 1 },
@@ -80,7 +80,7 @@ describe('solanaInstructionDecoder transform', () => {
 
     const stream = solanaPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       outputs: solanaInstructionDecoder({
         range: { from: 0, to: 1 },
@@ -101,7 +101,7 @@ describe('solanaInstructionDecoder transform', () => {
 
     const stream = solanaPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       outputs: {
         validProgramId: solanaInstructionDecoder({
@@ -216,7 +216,7 @@ describe('solanaInstructionDecoder deprecated programId', () => {
 
     const stream = solanaPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger,
       outputs: solanaInstructionDecoder({
         range: { from: 0, to: 1 },
@@ -238,7 +238,7 @@ describe('solanaInstructionDecoder deprecated programId', () => {
 
     const stream = solanaPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger,
       outputs: solanaInstructionDecoder({
         range: { from: 0, to: 1 },
@@ -267,7 +267,7 @@ describe('solanaInstructionDecoder decode errors', () => {
   ) {
     return solanaPortalStream({
       id: 'test',
-      portal: portalUrl,
+      source: portalUrl,
       logger: false,
       metrics: metrics.server,
       outputs: solanaInstructionDecoder({

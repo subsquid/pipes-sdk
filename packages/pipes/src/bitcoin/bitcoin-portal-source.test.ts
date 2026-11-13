@@ -36,7 +36,7 @@ describe('Bitcoin portal stream', () => {
 
     const stream = bitcoinPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: new BitcoinQueryBuilder()
         .addFields({
           block: { number: true, hash: true, timestamp: true },
@@ -77,7 +77,7 @@ describe('Bitcoin portal stream', () => {
 
     const stream = bitcoinPortalStream({
       id: 'real-data',
-      portal: portal.url,
+      source: portal.url,
       outputs: new BitcoinQueryBuilder()
         .addFields({
           block: {

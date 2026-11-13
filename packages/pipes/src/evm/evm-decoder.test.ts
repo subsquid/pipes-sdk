@@ -900,7 +900,7 @@ describe('evmEventDecoder transform', () => {
   it('should decode the events when passed AbiEvent', async () => {
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -978,7 +978,7 @@ describe('evmEventDecoder transform', () => {
   ])(`should filter events by specified contracts $contracts -> $expected`, async ({ contracts, expected }) => {
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         contracts: contracts, // No contracts should filter out all events
@@ -996,7 +996,7 @@ describe('evmEventDecoder transform', () => {
   it('should decode the events when passed an EventWithArgs', async () => {
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -1072,7 +1072,7 @@ describe('evmEventDecoder transform', () => {
   it('should decode the events when mixed EventWithArgs and AbiEvent', async () => {
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -1233,7 +1233,7 @@ describe('evmEventDecoder multi-output isolation', () => {
 
     for await (const batch of evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: {
         decoderA: evmEventDecoder({
           range: { from: 0, to: 1 },
@@ -1311,7 +1311,7 @@ describe('evmEventDecoder decode errors', () => {
   function stream(metrics: ReturnType<typeof mockMetricsServer>, onError?: (ctx: any, error: any) => unknown) {
     return evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       metrics: metrics.server,
       outputs: evmEventDecoder({
@@ -1482,7 +1482,7 @@ describe('evmEventDecoder factory decode errors', () => {
 
     return evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       metrics: metrics.server,
       outputs: evmEventDecoder({
@@ -1554,7 +1554,7 @@ describe('evmEventDecoder events sharing topic0', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
@@ -1598,7 +1598,7 @@ describe('evmEventDecoder indexed-parameter filters', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
@@ -1626,7 +1626,7 @@ describe('evmEventDecoder indexed-parameter filters', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: false,
       outputs: {
         alice: evmEventDecoder({

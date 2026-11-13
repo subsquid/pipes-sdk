@@ -27,7 +27,7 @@ async function main() {
   // Create a stream of new blocks from the Base mainnet portal
   const stream = evmPortalStream({
     id: 'indexing-latency',
-    portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+    source: 'https://portal.sqd.dev/datasets/base-mainnet',
     outputs: evmRpcLatencyWatcher({
       rpcUrl: ['https://base.drpc.org', 'https://base-rpc.publicnode.com'], // RPC endpoints to monitor
     }).pipe((data, { metrics }) => {

@@ -187,14 +187,14 @@ export class Factory<T extends EventArgs> {
   }
 
   /** @internal */
-  async runPreindex({ portal, range, logger }: { portal: BlockStreamClient; range: PortalRange; logger: Logger }) {
+  async runPreindex({ source, range, logger }: { source: BlockStreamClient; range: PortalRange; logger: Logger }) {
     const name = `factory preindexing ${this.factoryAddress().join(', ')}`
 
     logger.info(`Starting ${name}`)
 
     await evmPortalStream({
       id: name,
-      portal,
+      source,
       logger,
       outputs: evmEventDecoder({
         profiler: { name },

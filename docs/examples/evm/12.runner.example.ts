@@ -6,7 +6,7 @@ export type Params = { dataset: string }
 async function transfers({ id, params, metrics, logger }: PipeContext<Params>) {
   const stream = evmPortalStream({
     id,
-    portal: `https://portal.sqd.dev/datasets/${params.dataset}`,
+    source: `https://portal.sqd.dev/datasets/${params.dataset}`,
     metrics,
     logger,
     outputs: evmEventDecoder({

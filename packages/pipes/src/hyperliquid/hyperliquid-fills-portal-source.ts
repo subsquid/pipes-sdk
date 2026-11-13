@@ -39,7 +39,7 @@ type HyperliquidFillsPortalStream<T extends HyperliquidFillsOutputs> =
 
 export function hyperliquidFillsPortalStream<Out extends HyperliquidFillsOutputs>({
   id,
-  portal,
+  source,
   outputs,
   cache,
   logger,
@@ -53,7 +53,7 @@ export function hyperliquidFillsPortalStream<Out extends HyperliquidFillsOutputs
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions
+  source: string | PortalClientOptions
   outputs: Out
   cache?: PortalCache
   metrics?: MetricsServer
@@ -68,7 +68,7 @@ export function hyperliquidFillsPortalStream<Out extends HyperliquidFillsOutputs
 
   return new PortalStream<HyperliquidFillsQueryBuilder<F>, HyperliquidFillsPortalStream<Out>>({
     id,
-    portal,
+    source,
     query,
     cache,
     logger,

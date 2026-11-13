@@ -37,7 +37,7 @@ describe('Tron portal stream', () => {
 
     const stream = tronPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: new TronQueryBuilder()
         .addFields({
           block: { number: true, hash: true, timestamp: true },
@@ -78,7 +78,7 @@ describe('Tron portal stream', () => {
 
     const stream = tronPortalStream({
       id: 'real-data',
-      portal: portal.url,
+      source: portal.url,
       outputs: new TronQueryBuilder()
         .addFields({
           block: {
@@ -200,7 +200,7 @@ describe('Tron portal stream', () => {
 
     const stream = tronPortalStream({
       id: 'huge-timestamp',
-      portal: portal.url,
+      source: portal.url,
       outputs: new TronQueryBuilder()
         .addFields({
           block: { number: true, hash: true, timestamp: true },
@@ -247,7 +247,7 @@ describe('Tron portal stream', () => {
 
     const stream = tronPortalStream({
       id: 'negative-amounts',
-      portal: portal.url,
+      source: portal.url,
       outputs: new TronQueryBuilder()
         .addFields({
           block: { number: true, hash: true },

@@ -71,7 +71,7 @@ async function main() {
   // Configure Portal API source to fetch data from Ethereum mainnet
   await evmPortalStream({
     id: 'ethereum-transfers',
-    portal: {
+    source: {
       url: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     },
     // Configure decoder to extract ERC20 Transfer events from raw blockchain data

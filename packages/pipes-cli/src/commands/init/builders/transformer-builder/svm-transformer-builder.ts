@@ -13,7 +13,7 @@ export const template = `{{#deduplicatedImports}}
 export async function main() {
   await solanaPortalStream({
     id: '{{pipeId}}',
-    portal: 'https://portal.sqd.dev/datasets/{{network}}',
+    source: 'https://portal.sqd.dev/datasets/{{network}}',
     outputs: {
 {{#transformerTemplates}}
       {{{templateId}}},

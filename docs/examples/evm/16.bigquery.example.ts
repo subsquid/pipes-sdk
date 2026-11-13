@@ -80,7 +80,7 @@ async function main() {
 
   await evmPortalStream({
     id: 'erc20-transfers',
-    portal: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet' },
+    source: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet' },
     outputs: evmEventDecoder({
       // 'latest' starts near the head — useful for exercising reorg handling. Use a fixed
       // block number for deterministic backfills.

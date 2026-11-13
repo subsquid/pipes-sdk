@@ -62,7 +62,7 @@ describe('Clickhouse state', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         clickhouseTarget({
@@ -118,7 +118,7 @@ describe('Clickhouse state', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: {
+        source: {
           url: portal.url,
           // we need to save each response separately
           // to create multiple rows in the status table,
@@ -180,7 +180,7 @@ describe('Clickhouse state', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         clickhouseTarget({
@@ -229,7 +229,7 @@ describe('Clickhouse state', () => {
       try {
         await evmPortalStream({
           id: 'test',
-          portal: {
+          source: {
             url: portal.url,
             // force one batch per response so each triggers a saveCursor call
             maxBytes: 1,
@@ -285,7 +285,7 @@ describe('Clickhouse state', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         clickhouseTarget({
@@ -338,7 +338,7 @@ describe('Clickhouse state', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         clickhouseTarget({
@@ -349,7 +349,7 @@ describe('Clickhouse state', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 1, to: 2 }),
       }).pipeTo(
         clickhouseTarget({
@@ -379,7 +379,7 @@ describe('Clickhouse state', () => {
       // pinning the legacy key explicitly for the first run.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         clickhouseTarget({
@@ -393,7 +393,7 @@ describe('Clickhouse state', () => {
       // migrated to it automatically, and indexing continues from the migrated cursor.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       }).pipeTo(
         clickhouseTarget({
@@ -432,7 +432,7 @@ describe('Clickhouse state', () => {
 
         await evmPortalStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           outputs: blockDecoder({ from: 0, to: 2 }),
         }).pipeTo(
           clickhouseTarget({
@@ -570,7 +570,7 @@ describe('Clickhouse state', () => {
       let rollbackCalls = 0
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         clickhouseTarget({
@@ -710,7 +710,7 @@ describe('Clickhouse state', () => {
         try {
           await evmPortalStream({
             id: 'test',
-            portal: portal.url,
+            source: portal.url,
             outputs: blockDecoder({ from: 0, to: 7 }),
           }).pipeTo(
             clickhouseTarget({
@@ -968,7 +968,7 @@ describe('clickhouseTarget onRollback bounds', () => {
     try {
       await evmPortalStream({
         id: 'first-batch',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to }),
       }).pipeTo(clickhouseTarget({ client, onData, onRollback }))
     } finally {
@@ -1151,7 +1151,7 @@ describe('clickhouseTarget cursor order', () => {
   async function runPipe(portal: MockChainPortal, client: ClickHouseClient, to: number) {
     await evmPortalStream({
       id: 'cursor-order',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockDecoder({ from: 0, to }),
     }).pipeTo(clickhouseTarget({ client, onData: () => {} }))
   }

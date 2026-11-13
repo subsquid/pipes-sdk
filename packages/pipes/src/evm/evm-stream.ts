@@ -16,7 +16,7 @@ import { EvmOutputs, EvmPortalStreamOptions, evmPortalStream } from './evm-porta
  */
 export type EvmStreamSource = EvmSourceSpec | BlockStreamClient | EvmSourceSpec[]
 
-export interface EvmStreamOptions<Out extends EvmOutputs> extends Omit<EvmPortalStreamOptions<Out>, 'portal'> {
+export interface EvmStreamOptions<Out extends EvmOutputs> extends Omit<EvmPortalStreamOptions<Out>, 'source'> {
   /** Where to read blocks from — see {@link EvmStreamSource}. */
   source: EvmStreamSource
   /** Fallback behavior when `source` is a source list. Rejected for a single source. */
@@ -44,7 +44,7 @@ export function evmStream<Out extends EvmOutputs>({ source, fallback, logger, ..
   const log = pipeLogger(options.id, logger)
 
   if (!Array.isArray(source)) {
-    return evmPortalStream({ ...options, portal: resolveEvmSource(source), logger: log })
+    return evmPortalStream({ ...options, source: resolveEvmSource(source), logger: log })
   }
 
   // The fallback logs source switches and health transitions; it is part of this pipe, so it
@@ -54,5 +54,5 @@ export function evmStream<Out extends EvmOutputs>({ source, fallback, logger, ..
     registerFallbackMetrics(options.metrics.metrics, client, options.id)
   }
 
-  return evmPortalStream({ ...options, portal: client, logger: log })
+  return evmPortalStream({ ...options, source: client, logger: log })
 }

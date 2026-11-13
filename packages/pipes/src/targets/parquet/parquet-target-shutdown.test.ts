@@ -50,7 +50,7 @@ function pipe(url: string, dir: string, onBlock: (block: number) => void = () =>
 
   return evmPortalStream({
     id: 'parquet-stop',
-    portal: { url, maxBytes: 1, finalized: true },
+    source: { url, maxBytes: 1, finalized: true },
     logger: 'silent',
     outputs: blockDecoder({ from: 1, to: 5 }),
   }).pipeTo(parquetTarget({ dir, tables: [TABLE], onData }))

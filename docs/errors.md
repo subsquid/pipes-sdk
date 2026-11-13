@@ -54,7 +54,7 @@ key would let two pipes silently overwrite each other's progress.
 cursor id when driving it directly:
 
 ```ts
-evmPortalStream({ id: 'eth-transfers', portal: '...', outputs })
+evmPortalStream({ id: 'eth-transfers', source: '...', outputs })
 ```
 
 ### E0002 · Invalid block range
@@ -159,7 +159,7 @@ evmEventDecoder({
 ```ts
 evmPortalStream({
   id: 'transfers',
-  portal: '...',
+  source: '...',
   outputs: {
     fromAlice: evmEventDecoder({
       range: { from: 'latest' },

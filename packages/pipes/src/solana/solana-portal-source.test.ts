@@ -36,7 +36,7 @@ describe('Portal abstract stream', () => {
 
     const stream = solanaPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: solanaQuery().addFields(fields).addRange({ from: 0, to: 2 }),
     })
 

@@ -62,7 +62,7 @@ function decodeOpReturn(asm: string): string {
 async function main() {
   const stream = bitcoinPortalStream({
     id: 'bitcoin-simple',
-    portal: process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets/bitcoin-mainnet',
+    source: process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets/bitcoin-mainnet',
     outputs: new BitcoinQueryBuilder()
       .addFields({
         block: {

@@ -753,7 +753,7 @@ describe('bigqueryTarget — graceful shutdown', () => {
   function blockStream(url: string) {
     return evmPortalStream({
       id: 'test-pipe',
-      portal: { url, maxBytes: 1 },
+      source: { url, maxBytes: 1 },
       logger: 'silent',
       outputs: evmQuery()
         .addRange({ from: 1, to: 5 })

@@ -73,7 +73,7 @@ describe('EVM Template Builder', () => {
       export async function main() {
         await evmPortalStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             erc20Transfers,
           },
@@ -205,7 +205,7 @@ describe('EVM Template Builder', () => {
       export async function main() {
         await evmPortalStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             erc20Transfers,
             uniswapV3Swaps,
@@ -349,7 +349,7 @@ describe('EVM Template Builder', () => {
       export async function main() {
         await evmPortalStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             custom,
           },

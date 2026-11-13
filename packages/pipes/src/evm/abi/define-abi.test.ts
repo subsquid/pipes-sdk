@@ -768,7 +768,7 @@ describe('defineAbi', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
@@ -816,7 +816,7 @@ describe('defineAbi', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
@@ -891,7 +891,7 @@ describe('defineAbi', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
@@ -946,7 +946,7 @@ describe('defineAbi', () => {
       const mockPortal1 = await mockPortal(PORTAL_MOCK_RESPONSE)
       const stream1 = evmPortalStream({
         id: 'test',
-        portal: mockPortal1.url,
+        source: mockPortal1.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
@@ -962,7 +962,7 @@ describe('defineAbi', () => {
       const mockPortal2 = await mockPortal(PORTAL_MOCK_RESPONSE)
       const stream2 = evmPortalStream({
         id: 'test',
-        portal: mockPortal2.url,
+        source: mockPortal2.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {

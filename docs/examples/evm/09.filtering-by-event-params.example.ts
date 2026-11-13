@@ -10,7 +10,7 @@ import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/ev
 async function cli() {
   const stream = evmPortalStream({
     id: 'event-params-filter',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: '24171448', to: '24171449' },
       events: {

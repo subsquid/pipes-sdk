@@ -27,7 +27,7 @@ import { bitcoinPortalStream, bitcoinRpcLatencyWatcher } from '@subsquid/pipes/b
 async function main() {
   const stream = bitcoinPortalStream({
     id: 'bitcoin-indexing-latency',
-    portal: process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets/bitcoin-mainnet',
+    source: process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets/bitcoin-mainnet',
 
     outputs: bitcoinRpcLatencyWatcher({
       // Public, keyless Bitcoin Core JSON-RPC. PublicNode is the simplest one to

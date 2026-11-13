@@ -193,7 +193,7 @@ describe('parquetTarget', () => {
 
       try {
         await expect(
-          evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
+          evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
             parquetTarget({
               dir,
               tables: [BLOCKS_TABLE],
@@ -224,7 +224,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, finalized: false },
+        source: { url: portal.url, finalized: false },
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }))
 
@@ -237,7 +237,7 @@ describe('parquetTarget', () => {
       // maxBytes:1 keeps the two responses as distinct batches.
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }))
 
@@ -251,7 +251,7 @@ describe('parquetTarget', () => {
       // below would re-fetch and duplicate them.
       portal = await mockPortal([blocksResponse([1, 2, 3], 1)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -262,7 +262,7 @@ describe('parquetTarget', () => {
       // Restart: the range is already covered, so nothing is re-fetched and nothing duplicates.
       await portal.close()
       portal = await mockPortal([], { finalized: true })
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -280,7 +280,7 @@ describe('parquetTarget', () => {
 
       const run = evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         // Checkpoint on the first batch, so there is something published for the 409 to spare.
@@ -305,7 +305,7 @@ describe('parquetTarget', () => {
     it('writes exactly the finalized rows with correct types and a <from>-<to> coverage filename', async () => {
       portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -321,7 +321,7 @@ describe('parquetTarget', () => {
     it('reads INT64 columns back as bigint (input contract)', async () => {
       portal = await mockPortal([blocksResponse([1], 1)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -353,7 +353,7 @@ describe('parquetTarget', () => {
       const at = new Date('2024-01-01T15:30:45.123Z')
 
       portal = await mockPortal([blocksResponse([1, 2], 2)], { finalized: true })
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) }).pipeTo(
         parquetTarget({
           dir,
           tables: [kitchenSink],
@@ -428,7 +428,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         parquetTarget({
@@ -478,7 +478,7 @@ describe('parquetTarget', () => {
         { finalized: true },
       )
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -497,7 +497,7 @@ describe('parquetTarget', () => {
     it('persists the source-clamped finalized head through the loop at checkpoint', async () => {
       portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -524,7 +524,7 @@ describe('parquetTarget', () => {
       // Hot stream on purpose: the inline target below does not require a finalized one.
       portal = await mockPortal([blocksResponse([6], 3)])
       const seen: unknown[] = []
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 6 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 6 }) }).pipeTo(
         createTarget({
           write: async ({ read }) => {
             for await (const { ctx } of read(resume)) {
@@ -551,7 +551,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 6 }),
       }).pipeTo(
         parquetTarget({
@@ -612,7 +612,7 @@ describe('parquetTarget', () => {
       portal = await mockPortal([blocksResponse([1], 1), blocksResponse([2, 3], 3)], { finalized: true })
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(parquetTarget({ dir, tables, settings: { rollover: { maxBytes: 1 } }, onData }))
       await portal.close()
@@ -630,7 +630,7 @@ describe('parquetTarget', () => {
       portal = await mockPortal([blocksResponse([4, 5], 5)], { finalized: true })
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(parquetTarget({ dir, tables, settings: { rollover: { maxBytes: 1 } }, onData }))
 
@@ -657,7 +657,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: twoRangeDecoder({ from: 0, to: 1 }, { from: 5, to: 6 }),
       }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], settings: { rollover: { maxBytes: 1 } }, onData: insertBlocks }),
@@ -687,7 +687,7 @@ describe('parquetTarget', () => {
       portal = await mockPortal([blocksResponse([5, 6], 6)], { finalized: true })
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: twoRangeDecoder({ from: 0, to: 1 }, { from: 5, to: 6 }),
       }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], settings: { rollover: { maxBytes: 1 } }, onData: insertBlocks }),
@@ -725,7 +725,7 @@ describe('parquetTarget', () => {
       portal = await mockPortal([blocksResponse([6, 7], 7)], { finalized: true })
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         parquetTarget({
@@ -765,7 +765,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         parquetTarget({
@@ -796,7 +796,7 @@ describe('parquetTarget', () => {
     it('starts coverage at the stream start, not block 0, for a backfill from a non-zero block', async () => {
       portal = await mockPortal([blocksResponse([100, 101], 101)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 100, to: 101 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 100, to: 101 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -814,7 +814,7 @@ describe('parquetTarget', () => {
       )
       portal = await mockPortal([blocksResponse([3, 4], 4)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 4 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 4 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -837,7 +837,7 @@ describe('parquetTarget', () => {
       ])
 
       portal = await mockPortal([], { finalized: true })
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -862,7 +862,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 4 }),
       }).pipeTo(
         parquetTarget({
@@ -986,7 +986,7 @@ describe('parquetTarget', () => {
       const emptyTable: ParquetTable = { table: 'empty', schema: { blockNumber: { type: 'INT64' } } }
       portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE, emptyTable], onData: insertBlocks }),
       )
 
@@ -1008,7 +1008,7 @@ describe('parquetTarget', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: { url: portal.url, maxBytes: 1 },
+        source: { url: portal.url, maxBytes: 1 },
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         parquetTarget({
@@ -1028,7 +1028,7 @@ describe('parquetTarget', () => {
       // No `head` → no finalized head → threshold Infinity → nothing is buffered.
       portal = await mockPortal([blocksResponse([1, 2, 3])], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -1046,7 +1046,7 @@ describe('parquetTarget', () => {
       // write stream having reached disk by the time `size()` stats it.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         profiler: spans.hooks,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
@@ -1077,7 +1077,7 @@ describe('parquetTarget', () => {
       await expect(
         evmPortalStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           profiler: spans.hooks,
           outputs: blockDecoder({ from: 0, to: 3 }),
         }).pipeTo(
@@ -1112,7 +1112,7 @@ describe('parquetTarget', () => {
       }
       portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({
           dir,
           tables: [BLOCKS_TABLE, logsTable],
@@ -1153,7 +1153,7 @@ describe('parquetTarget', () => {
       portal = await mockPortal([blocksResponse([1], 1)], { finalized: true })
 
       await expect(
-        evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
+        evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
           parquetTarget({
             dir,
             tables: [BLOCKS_TABLE],
@@ -1168,7 +1168,7 @@ describe('parquetTarget', () => {
     it('accumulates multiple inserts into the same table within a batch', async () => {
       portal = await mockPortal([blocksResponse([1, 2], 2)], { finalized: true })
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) }).pipeTo(
         parquetTarget({
           dir,
           tables: [BLOCKS_TABLE],
@@ -1196,7 +1196,7 @@ describe('parquetTarget', () => {
       await expect(
         evmPortalStream({
           id: 'test',
-          portal: { url: portal.url, maxBytes: 1 },
+          source: { url: portal.url, maxBytes: 1 },
           outputs: blockDecoder({ from: 0, to: 2 }),
         }).pipeTo(
           parquetTarget({
@@ -1586,7 +1586,7 @@ describe('one pipe per directory', () => {
   withDir('refuses a directory another pipe writes, before touching its files', async ({ portal: open, dir }) => {
     const portal = await open({ latest: 3 })
     const runPipe = (id: string) =>
-      evmPortalStream({ id, portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      evmPortalStream({ id, source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -1647,7 +1647,7 @@ describe('before the first commit', () => {
       let stateBefore: unknown
       let publishedBefore: string[] | undefined
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 3, to: 5 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 3, to: 5 }) }).pipeTo(
         parquetTarget({
           dir,
           tables: [BLOCKS_TABLE],
@@ -1686,7 +1686,7 @@ describe('before the first commit', () => {
         { finalized: true },
       )
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 
@@ -1720,7 +1720,7 @@ describe('before the first commit', () => {
       const before = await listAll(dir, 'blocks')
       const portal = await open({ latest: 3 })
 
-      const run = evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+      const run = evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
         parquetTarget({ dir, tables: [BLOCKS_TABLE], onData: insertBlocks }),
       )
 

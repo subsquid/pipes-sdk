@@ -132,7 +132,7 @@ describe('parquetTarget with a custom engine', () => {
     portal = await mockPortal([blocksResponse([1, 2, 3], 3)], { finalized: true })
     const calls: string[] = []
 
-    await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+    await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
       parquetTarget({
         dir,
         tables: [
@@ -180,7 +180,7 @@ describe('parquetTarget with a custom engine', () => {
       const portal = await open([blocksResponse([1, 2, 3], 3)], { finalized: true })
 
       await expect(
-        evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
+        evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 3 }) }).pipeTo(
           parquetTarget({
             dir,
             tables: [{ table: 'blocks', schema: { blockNumber: { type: 'INT64' } } }],

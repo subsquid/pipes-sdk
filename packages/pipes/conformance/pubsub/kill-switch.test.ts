@@ -151,22 +151,19 @@ describe('armStepKillSwitch', () => {
     expect(stored).toEqual({ n: when === 'before' ? 0 : 1 })
   })
 
-  it.for([
-    'before',
-    'after',
-  ] as const)('lands %s a publish: the bus takes the message only after, and the producer never reads its answer', async (when, {
-    arm,
-    pubsub,
-  }) => {
-    const { kills } = arm({ name: 'publish', step: PUBLISH, at: 1, when })
-    const client = new PubSub({ projectId: pubsub.bus.projectId, apiEndpoint: pubsub.bus.endpoint })
+  it.for(['before', 'after'] as const)(
+    'lands %s a publish: the bus takes the message only after, and the producer never reads its answer',
+    async (when, { arm, pubsub }) => {
+      const { kills } = arm({ name: 'publish', step: PUBLISH, at: 1, when })
+      const client = new PubSub({ projectId: pubsub.bus.projectId, apiEndpoint: pubsub.bus.endpoint })
 
-    const publish = client.topic(TOPIC).publishMessage({ data: Buffer.from('m') })
-    await expect(publish).rejects.toThrow("killed at 'publish'")
-    await client.close()
-    const taken = pubsub.bus.messages.map((message) => message.data.toString())
+      const publish = client.topic(TOPIC).publishMessage({ data: Buffer.from('m') })
+      await expect(publish).rejects.toThrow("killed at 'publish'")
+      await client.close()
+      const taken = pubsub.bus.messages.map((message) => message.data.toString())
 
-    expect(kills).toEqual([{ step: PUBLISH, sent: when === 'before' ? [] : [PUBLISH] }])
-    expect(taken).toEqual(when === 'before' ? [] : ['m'])
-  })
+      expect(kills).toEqual([{ step: PUBLISH, sent: when === 'before' ? [] : [PUBLISH] }])
+      expect(taken).toEqual(when === 'before' ? [] : ['m'])
+    },
+  )
 })

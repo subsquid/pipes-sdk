@@ -42,7 +42,7 @@ sdk.start()
 async function cli() {
   const stream = evmPortalStream({
     id: 'jaeger-tracing',
-    portal: 'https://portal.sqd.dev/datasets/arbitrum-one',
+    source: 'https://portal.sqd.dev/datasets/arbitrum-one',
     // Optionally pass an OTEL context to attach pipe spans to an existing trace:
     //   profiler: opentelemetryProfiler(requestContext)
     profiler: opentelemetryProfiler(),

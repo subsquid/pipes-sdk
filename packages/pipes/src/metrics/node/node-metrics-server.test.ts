@@ -193,7 +193,7 @@ describe('metrics server', () => {
     ] as const) {
       evmPortalStream({
         id,
-        portal: 'http://127.0.0.1:1',
+        source: 'http://127.0.0.1:1',
         logger: 'silent',
         outputs: blockDecoder({ from: 0 }),
         metrics: server,
@@ -227,7 +227,13 @@ describe('metrics server', () => {
     })
 
     const run = readAll(
-      evmPortalStream({ id: 'test', portal, logger: 'silent', outputs: blockDecoder({ from: 1 }), metrics: server }),
+      evmPortalStream({
+        id: 'test',
+        source: portal,
+        logger: 'silent',
+        outputs: blockDecoder({ from: 1 }),
+        metrics: server,
+      }),
     )
     await headSeen.promise
     const progress = await statsProgress(url)

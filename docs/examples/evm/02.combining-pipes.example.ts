@@ -16,7 +16,7 @@ async function cli() {
   // from Base Mainnet using Portal API
   const stream = evmPortalStream({
     id: 'combining-pipes',
-    portal: 'https://portal.sqd.dev/datasets/base-mainnet',
+    source: 'https://portal.sqd.dev/datasets/base-mainnet',
     outputs: {
       transfers: erc20Transfers({
         range: { from: '20,000,000', to: '+1,000' },

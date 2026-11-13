@@ -125,7 +125,7 @@ async function runPipe({
 
   await evmPortalStream({
     id,
-    portal: portal.url,
+    source: portal.url,
     outputs: keyedBlockDecoder({ from: 0, to }),
     metrics: metrics?.server,
   }).pipeTo(
@@ -336,7 +336,7 @@ describe('pubsubTarget', () => {
 
     await evmPortalStream({
       id: 'test-pipe',
-      portal: portal.url,
+      source: portal.url,
       outputs: keyedBlockDecoder({ from: 0, to: 3 }),
     }).pipeTo(
       pubsubTarget<Blocks>({
@@ -403,7 +403,7 @@ describe('pubsubTarget', () => {
 
       await evmPortalStream({
         id: 'test-pipe',
-        portal: portal.url,
+        source: portal.url,
         outputs: keyedBlockDecoder({ from: 0, to: 4 }),
       }).pipeTo(
         pubsubTarget<Blocks>({

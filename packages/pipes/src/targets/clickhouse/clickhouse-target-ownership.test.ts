@@ -25,7 +25,7 @@ describe('clickhouseTarget — client ownership', () => {
 
     await evmPortalStream({
       id: 'ownership',
-      portal: chain.url,
+      source: chain.url,
       logger: 'silent',
       outputs: blockDecoder({ from: 1, to: 1 }),
     }).pipeTo(

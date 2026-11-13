@@ -38,7 +38,7 @@ import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/ev
 async function main() {
   const stream = evmPortalStream({
     id: 'erc20-transfers',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: '12,000,000' },
       events: {

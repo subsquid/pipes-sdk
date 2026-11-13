@@ -104,7 +104,7 @@ describe('Drizzle target', () => {
       await expect(async () => {
         await evmPortalStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           outputs: blockDecoder({ from: 0, to: 5 }),
         }).pipeTo(
           drizzleTarget({
@@ -144,7 +144,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -246,7 +246,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         drizzleTarget({
@@ -261,7 +261,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 1, to: 2 }),
       }).pipeTo(
         drizzleTarget({
@@ -293,7 +293,7 @@ describe('Drizzle target', () => {
       // pinning the legacy key explicitly for the first run.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         drizzleTarget({
@@ -308,7 +308,7 @@ describe('Drizzle target', () => {
       // re-keyed to it in a single atomic UPDATE, and indexing continues from the migrated cursor.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
       }).pipeTo(
         drizzleTarget({
@@ -434,7 +434,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         drizzleTarget({
@@ -548,7 +548,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -640,7 +640,7 @@ describe('Drizzle target', () => {
       let callCount = 0
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -754,7 +754,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 6 }),
       }).pipeTo(
         drizzleTarget({
@@ -849,7 +849,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -925,7 +925,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1026,7 +1026,7 @@ describe('Drizzle target', () => {
 
       let forkCursor: number | undefined
 
-      await evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
+      await evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
         balancesTarget((cursor) => {
           forkCursor = cursor
         }),
@@ -1043,7 +1043,7 @@ describe('Drizzle target', () => {
       async ({ portal: serve }) => {
         const first = await serve([finalizedBlockOne])
 
-        await evmPortalStream({ id: 'test', portal: first.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
+        await evmPortalStream({ id: 'test', source: first.url, outputs: blockDecoder({ from: 0, to: 1 }) }).pipeTo(
           balancesTarget(),
         )
 
@@ -1051,7 +1051,7 @@ describe('Drizzle target', () => {
 
         let forkCursor: number | undefined
 
-        await evmPortalStream({ id: 'test', portal: second.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
+        await evmPortalStream({ id: 'test', source: second.url, outputs: blockDecoder({ from: 0, to: 5 }) }).pipeTo(
           balancesTarget((cursor) => {
             forkCursor = cursor
           }),
@@ -1135,7 +1135,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
       }).pipeTo(
         drizzleTarget({
@@ -1259,7 +1259,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1317,7 +1317,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1375,7 +1375,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1443,7 +1443,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1476,7 +1476,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(
         drizzleTarget({
@@ -1535,7 +1535,7 @@ describe('Drizzle target', () => {
 
       const run = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         drizzleTarget({
@@ -1560,7 +1560,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         logger,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
@@ -1591,7 +1591,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
 
@@ -1606,7 +1606,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
 
@@ -1622,7 +1622,7 @@ describe('Drizzle target', () => {
 
       const run = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
 
@@ -1635,7 +1635,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(drizzleTarget({ db, tables: [], onData: async () => {} }))
 
@@ -1647,7 +1647,7 @@ describe('Drizzle target', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(
         drizzleTarget({

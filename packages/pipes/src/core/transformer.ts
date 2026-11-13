@@ -16,7 +16,7 @@ export type StartContext = {
    * The client this pipe reads blocks through: a portal, an RPC-backed client, or a fallback over
    * several. Narrow with `instanceof PortalClient` when you need portal-specific request options.
    */
-  portal: BlockStreamClient
+  source: BlockStreamClient
   /** Effective stream mode for this run. Pass it to additional portal reads. */
   finalized: boolean
   /** Pass to portal requests as `abort` to cancel their reads and retries when the pipe stops. */

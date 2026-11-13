@@ -60,7 +60,7 @@ const shutdown =
 
 const run = evmPortalStream({
   id: 'stopped-run',
-  portal: url,
+  source: url,
   logger: 'silent',
   outputs: blockDecoder({ from: 1, to }),
 }).pipeTo(target, { shutdown })

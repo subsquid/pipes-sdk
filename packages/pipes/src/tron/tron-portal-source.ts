@@ -39,7 +39,7 @@ type TronPortalStream<T extends TronOutputs> =
 
 export function tronPortalStream<Out extends TronOutputs>({
   id,
-  portal,
+  source,
   outputs,
   cache,
   logger,
@@ -53,7 +53,7 @@ export function tronPortalStream<Out extends TronOutputs>({
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions
+  source: string | PortalClientOptions
   outputs: Out
   cache?: PortalCache
   metrics?: MetricsServer
@@ -68,7 +68,7 @@ export function tronPortalStream<Out extends TronOutputs>({
 
   return new PortalStream<TronQueryBuilder<F>, TronPortalStream<Out>>({
     id,
-    portal,
+    source,
     query,
     cache,
     logger,

@@ -197,7 +197,7 @@ export type PortalStreamOptions<Query> = {
    * custom {@link BlockStreamClient} (e.g. the RPC-backed EVM client or a fallback client
    * multiplexing several sources).
    */
-  portal: string | PortalClientOptions | BlockStreamClient
+  source: string | PortalClientOptions | BlockStreamClient
   query: Query
   logger?: Logger | LogLevel
   profiler?: boolean | SpanHooks
@@ -229,7 +229,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
   readonly #watermark = new FinalizedWatermark()
   #started = false
 
-  constructor({ portal, id, query, logger, progress, ...options }: PortalStreamOptions<Q>) {
+  constructor({ source, id, query, logger, progress, ...options }: PortalStreamOptions<Q>) {
     // Targets key their persisted cursor by this id, and every state class treats an empty id as
     // "not bound" and falls back to the shared legacy "stream" key — which would silently put
     // this pipe back into the cross-pipe cursor collision the id exists to prevent.
@@ -240,23 +240,23 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     this.#id = id
     this.#logger = pipeLogger(this.#id, logger)
 
-    this.#portal = isBlockStreamClient(portal)
-      ? portal
+    this.#portal = isBlockStreamClient(source)
+      ? source
       : new PortalClient(
-          typeof portal === 'string'
+          typeof source === 'string'
             ? {
-                url: portal,
+                url: source,
                 http: {
                   logger: this.#logger,
                   retryAttempts: Number.MAX_SAFE_INTEGER,
                 },
               }
             : {
-                ...portal,
+                ...source,
                 http: {
                   logger: this.#logger,
                   retryAttempts: Number.MAX_SAFE_INTEGER,
-                  ...portal.http,
+                  ...source.http,
                 },
               },
         )
@@ -534,7 +534,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
 
     return new PortalStream<Q, Out>({
       id: this.#id,
-      portal: this.#portal,
+      source: this.#portal,
       query: this.#queryBuilder,
       logger: this.#logger,
       profiler: this.#options.profiler,
@@ -619,7 +619,7 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
       id: this.#id,
       metrics: this.#metricServer.metrics,
       state,
-      portal: this.#portal,
+      source: this.#portal,
       ...options,
     })
     await Promise.all(this.#transformers.map((t) => t.start(ctx)))

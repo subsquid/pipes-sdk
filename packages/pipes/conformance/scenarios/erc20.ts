@@ -113,7 +113,7 @@ export function erc20Stream({
   return evmPortalStream({
     id: PIPE_ID,
     // Small reads keep batches small, so the run takes many commits, not one.
-    portal: { url, maxBytes: 1 },
+    source: { url, maxBytes: 1 },
     outputs,
     logger,
   })

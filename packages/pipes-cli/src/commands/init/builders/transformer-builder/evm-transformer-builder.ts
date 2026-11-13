@@ -14,7 +14,7 @@ export async function main() {
 {{^rpcFallback}}
   await evmPortalStream({
     id: '{{pipeId}}',
-    portal: 'https://portal.sqd.dev/datasets/{{network}}',
+    source: 'https://portal.sqd.dev/datasets/{{network}}',
 {{/rpcFallback}}
 {{#rpcFallback}}
   await evmStream({

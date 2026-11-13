@@ -40,7 +40,7 @@ type SolanaPortalStream<T extends SolanaOutputs> =
 
 export function solanaPortalStream<Out extends SolanaOutputs>({
   id,
-  portal,
+  source,
   outputs,
   cache,
   logger,
@@ -54,7 +54,7 @@ export function solanaPortalStream<Out extends SolanaOutputs>({
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions
+  source: string | PortalClientOptions
   outputs: Out
   cache?: PortalCache
   metrics?: MetricsServer
@@ -69,7 +69,7 @@ export function solanaPortalStream<Out extends SolanaOutputs>({
 
   return new PortalStream<SolanaQueryBuilder<F>, SolanaPortalStream<Out>>({
     id,
-    portal,
+    source,
     query,
     cache,
     logger,

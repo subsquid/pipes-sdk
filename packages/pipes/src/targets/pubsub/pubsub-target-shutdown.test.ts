@@ -68,7 +68,7 @@ function pipe({
 }) {
   return evmPortalStream({
     id: 'test-pipe',
-    portal: { url, maxBytes: 1 },
+    source: { url, maxBytes: 1 },
     logger: 'silent',
     outputs: keyedBlockDecoder({ from: 1, to }),
   }).pipeTo(
@@ -201,7 +201,7 @@ describe('pubsubTarget — graceful shutdown', () => {
 
     await evmPortalStream({
       id: 'test-pipe',
-      portal: chain.url,
+      source: chain.url,
       logger: 'silent',
       outputs: keyedBlockDecoder({ from: 1, to: 1 }),
     }).pipeTo(

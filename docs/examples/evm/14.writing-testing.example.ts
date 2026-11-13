@@ -90,7 +90,7 @@ describe('EVM pipe testing example', () => {
     // 3. Create the pipe exactly as you would in production, but with the mock portal URL
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 2 },
         events: {
@@ -138,7 +138,7 @@ describe('EVM pipe testing example', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {
@@ -173,7 +173,7 @@ describe('EVM pipe testing example', () => {
     // Test a custom transformation pipeline
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 0, to: 1 },
         events: {

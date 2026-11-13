@@ -12,8 +12,8 @@ import {
   normalizeFinalized,
   resolveForkCursor,
 } from '~/core/index.js'
-import { doWithRetry } from '~/internal/function.js'
 import { isPersistedCursor, parsePersistedHeight } from '~/internal/cursor.js'
+import { doWithRetry } from '~/internal/function.js'
 import { toEpochSeconds } from '~/internal/time.js'
 import { Transaction } from '~/targets/drizzle/node-postgres/drizzle-target.js'
 import { syncTable, tableNotExists } from '~/targets/drizzle/node-postgres/tables.js'

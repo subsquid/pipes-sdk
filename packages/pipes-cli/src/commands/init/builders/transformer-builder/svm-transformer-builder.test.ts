@@ -66,7 +66,7 @@ describe('SVM Template Builder', () => {
       export async function main() {
         await solanaPortalStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+          source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
           outputs: {
             custom,
           },
@@ -207,7 +207,7 @@ describe('SVM Template Builder', () => {
       export async function main() {
         await solanaPortalStream({
           id: 'a1b2c3d4',
-          portal: 'https://portal.sqd.dev/datasets/solana-mainnet',
+          source: 'https://portal.sqd.dev/datasets/solana-mainnet',
           outputs: {
             tokenBalances,
           },

@@ -30,7 +30,7 @@ describe('evmPortalStream', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmQuery().addFields(fields).addRange({ from: 0, to: 2 }),
     })
 
@@ -49,7 +49,7 @@ describe('evmPortalStream', () => {
     const bad = mockBlock({ number: 2 })
     const portal = await open({ blocks: [{ ...bad, header: { ...bad.header, timestamp: 'noon' as any } }] })
 
-    const stream = evmPortalStream({ id: 'test', portal: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) })
+    const stream = evmPortalStream({ id: 'test', source: portal.url, outputs: blockDecoder({ from: 0, to: 2 }) })
     const reading = readAll(stream)
 
     await expect(reading).rejects.toThrow(BlockValidationError)

@@ -355,7 +355,7 @@ describe('mockPortal over a chain', () => {
         resolveForkCursor([{ rollbackChain, finalized: state?.finalized ?? undefined }], canonical),
     })
     const run = (to: number) =>
-      evmPortalStream({ id: 'test', portal: portal.url, logger: 'silent', outputs: blockDecoder({ from: 1, to }) })
+      evmPortalStream({ id: 'test', source: portal.url, logger: 'silent', outputs: blockDecoder({ from: 1, to }) })
         // createTarget's input type cannot name the decoder's output here
         .pipeTo(target as any)
 

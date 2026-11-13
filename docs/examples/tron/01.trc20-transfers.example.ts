@@ -41,7 +41,7 @@ function topicToTronAddress(topic: string): string {
 async function main() {
   const stream = tronPortalStream({
     id: 'tron-usdt-transfers',
-    portal: process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets/tron-mainnet',
+    source: process.env['PORTAL_URL'] || 'https://portal.sqd.dev/datasets/tron-mainnet',
     outputs: new TronQueryBuilder()
       .addFields({
         block: {

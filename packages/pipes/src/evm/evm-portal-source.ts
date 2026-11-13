@@ -44,7 +44,7 @@ export interface EvmPortalStreamOptions<Out extends EvmOutputs> {
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions | BlockStreamClient
+  source: string | PortalClientOptions | BlockStreamClient
   outputs: Out
   cache?: PortalCache
   metrics?: MetricsServer
@@ -55,7 +55,7 @@ export interface EvmPortalStreamOptions<Out extends EvmOutputs> {
 
 export function evmPortalStream<Out extends EvmOutputs>({
   id,
-  portal,
+  source,
   outputs,
   cache,
   logger,
@@ -70,7 +70,7 @@ export function evmPortalStream<Out extends EvmOutputs>({
 
   return new PortalStream<EvmQueryBuilder<F>, EvmStreamData<Out>>({
     id,
-    portal,
+    source,
     query,
     cache,
     logger,

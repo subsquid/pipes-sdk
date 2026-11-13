@@ -176,7 +176,7 @@ export function runPipe({
       })),
   )
 
-  return evmPortalStream({ id, portal: { url }, outputs, logger: 'error', profiler }).pipeTo(
+  return evmPortalStream({ id, source: { url }, outputs, logger: 'error', profiler }).pipeTo(
     witnessed(target, witness),
     { shutdown: false },
   )

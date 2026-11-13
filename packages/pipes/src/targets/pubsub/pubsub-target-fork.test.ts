@@ -33,7 +33,7 @@ async function run({
 
   await evmPortalStream({
     id: 'test-pipe',
-    portal: portal.url,
+    source: portal.url,
     outputs: keyedBlockDecoder({ from: 0, to }),
   }).pipeTo(
     pubsubTarget<Blocks>({
@@ -250,7 +250,7 @@ describe('pubsubTarget — fork compensation', () => {
 
     await evmPortalStream({
       id: 'test-pipe',
-      portal: portal.url,
+      source: portal.url,
       outputs: keyedBlockDecoder({ from: 0, to: 3 }),
     }).pipeTo(
       pubsubTarget<Blocks>({

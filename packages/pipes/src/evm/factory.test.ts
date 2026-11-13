@@ -190,7 +190,7 @@ describe('Factory', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: poolFactory,
@@ -273,7 +273,7 @@ describe('Factory', () => {
     const db = await contractFactorySqliteStore({ path: ':memory:' })
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: contractFactory({
@@ -301,7 +301,7 @@ describe('Factory', () => {
     const db = await contractFactorySqliteStore({ path: ':memory:' })
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: {
         v1: evmEventDecoder({
           range: { from: 1, to: 2 },
@@ -380,7 +380,7 @@ describe('Factory', () => {
 
     await evmPortalStream({
       id: 'test-factory',
-      portal: {
+      source: {
         url: portal.url,
       },
       outputs: evmEventDecoder({
@@ -428,7 +428,7 @@ describe('Factory', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: contractFactory({
@@ -472,7 +472,7 @@ describe('Factory', () => {
 
       return evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: evmEventDecoder({
           range: { from: 1, to: 3 },
           contracts: contractFactory({
@@ -525,7 +525,7 @@ describe('Factory', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: evmEventDecoder({
         range: { from: 1, to: 2 },
         contracts: contractsFactory,

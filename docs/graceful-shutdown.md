@@ -59,12 +59,12 @@ never runs. Further signals do not restart the timeout.
 
 ### Portal reads in hooks and caches
 
-Start hooks receive the original portal client, the run's effective `finalized` mode and
+Start hooks receive the original block source as `source`, the run's effective `finalized` mode and
 an optional `signal`. Pass the signal as `abort` to cancel additional portal requests and retries:
 
 ```ts
-start: async ({ portal, finalized, signal }) => {
-  const head = await portal.getHead({ finalized, abort: signal })
+start: async ({ source, finalized, signal }) => {
+  const head = await source.getHead({ finalized, abort: signal })
 }
 ```
 

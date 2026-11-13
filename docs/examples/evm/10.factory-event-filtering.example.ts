@@ -16,7 +16,7 @@ async function cli() {
   const weth = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
   const stream = evmPortalStream({
     id: 'factory-event-filter',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: '12,369,621' },
       contracts: contractFactory({

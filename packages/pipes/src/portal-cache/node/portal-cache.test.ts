@@ -117,7 +117,7 @@ describe('Portal cache', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
         cache,
       })
@@ -233,7 +233,7 @@ describe('Portal cache', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 2 }),
         cache: portalSqliteCache({ path: DB_PATH }),
       })
@@ -284,7 +284,7 @@ describe('Portal cache', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 6, to: 10 }),
         cache,
       })
@@ -294,7 +294,7 @@ describe('Portal cache', () => {
       // now request from 0 to 5, should not reuse data from 6 to 10
       const stream2 = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
         cache,
       })
@@ -424,7 +424,7 @@ describe('Portal cache', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 5 }),
         cache,
       })
@@ -694,7 +694,7 @@ describe('Portal cache', () => {
       const run = () =>
         evmPortalStream({
           id: 'test',
-          portal: { url: portal.url, finalized: false },
+          source: { url: portal.url, finalized: false },
           logger: 'silent',
           outputs: blockDecoder({ from: 0, to: 2 }).pipe((d) => d.map((b) => ({ blockNumber: b.number }))),
           cache,
@@ -745,7 +745,7 @@ describe('Portal cache finalized floor', () => {
 
     await evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       logger: 'silent',
       outputs: blockDecoder({ from: 0, to: 8 }),
       cache: portalSqliteCache({ path: DB_PATH }),
@@ -781,7 +781,7 @@ describe('Portal cache finalized floor', () => {
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         logger: 'silent',
         outputs: blockDecoder({ from: 1, to }),
         cache,
@@ -829,7 +829,7 @@ describe('Portal cache codec', () => {
       readAll(
         evmPortalStream({
           id: 'test',
-          portal: portal.url,
+          source: portal.url,
           logger: 'silent',
           outputs: blockDecoder({ from: 1, to: 5 }),
           cache: portalSqliteCache({ path: file, ...options }),
@@ -879,7 +879,7 @@ describe('Portal cache codec', () => {
         readAll(
           evmPortalStream({
             id: 'test',
-            portal: portal.url,
+            source: portal.url,
             logger: 'silent',
             outputs: blockDecoder({ from: 1, to: 5 }),
             cache,

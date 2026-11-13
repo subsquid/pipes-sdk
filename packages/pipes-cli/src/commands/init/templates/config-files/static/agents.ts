@@ -101,7 +101,7 @@ import { commonAbis, evmEventDecoder, evmPortalStream } from '@subsquid/pipes/ev
 async function main() {
   const stream = evmPortalStream({
     id: 'erc20-transfers',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: 'latest' },
       events: {
@@ -130,7 +130,7 @@ import { events as swapsAbi } from './abi/uniswap.v3/swaps'
 async function main() {
   const stream = evmPortalStream({
     id: 'uniswap-v3-swaps',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: '12,369,621' },
       contracts: contractFactory({
@@ -164,7 +164,7 @@ import { clickhouseTarget } from '@subsquid/pipes/targets/clickhouse'
 async function main() {
   await evmPortalStream({
     id: 'erc20-transfers-clickhouse',
-    portal: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
+    source: 'https://portal.sqd.dev/datasets/ethereum-mainnet',
     outputs: evmEventDecoder({
       range: { from: 'latest' },
       events: {

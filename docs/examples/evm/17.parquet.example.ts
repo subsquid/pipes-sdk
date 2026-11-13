@@ -47,7 +47,7 @@ const OUT = process.env['PARQUET_OUT'] ?? './parquet-out'
 async function main() {
   await evmPortalStream({
     id: 'erc20-parquet',
-    portal: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet', finalized: true },
+    source: { url: 'https://portal.sqd.dev/datasets/ethereum-mainnet', finalized: true },
     outputs: evmEventDecoder({
       // A small historical range so files appear immediately and the run terminates. Swap to
       // `{ from: 'latest' }` to follow the finalized head without an in-memory finality buffer.

@@ -306,7 +306,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       let afterRollbacks = 0
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 7 }),
       }).pipeTo(
         buildTarget(events, sync, {
@@ -398,7 +398,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
         try {
           await evmPortalStream({
             id: 'test',
-            portal: portal.url,
+            source: portal.url,
             outputs: blockDecoder({ from: 0, to: 7 }),
           }).pipeTo(
             buildTarget(events, sync, {
@@ -468,7 +468,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       // First run: ingest block 1 and stop cleanly.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 1 }),
       }).pipeTo(buildTarget(events, sync))
 
@@ -477,7 +477,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
       // expected parentBlockHash. validateRequest in the mock asserts that.
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 1, to: 2 }),
       }).pipeTo(buildTarget(events, sync))
 
@@ -504,7 +504,7 @@ describe.skipIf(!RUN)('bigquery target — fork lifecycle (integration)', () => 
 
       await evmPortalStream({
         id: 'test',
-        portal: portal.url,
+        source: portal.url,
         outputs: blockDecoder({ from: 0, to: 3 }),
       }).pipeTo(buildTarget(events, sync))
 

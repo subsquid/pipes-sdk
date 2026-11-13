@@ -39,7 +39,7 @@ type BitcoinPortalStream<T extends BitcoinOutputs> =
 
 export function bitcoinPortalStream<Out extends BitcoinOutputs>({
   id,
-  portal,
+  source,
   outputs,
   cache,
   logger,
@@ -53,7 +53,7 @@ export function bitcoinPortalStream<Out extends BitcoinOutputs>({
    * same `id` will share (and overwrite) each other's cursor.
    */
   id: string
-  portal: string | PortalClientOptions
+  source: string | PortalClientOptions
   outputs: Out
   cache?: PortalCache
   metrics?: MetricsServer
@@ -68,7 +68,7 @@ export function bitcoinPortalStream<Out extends BitcoinOutputs>({
 
   return new PortalStream<BitcoinQueryBuilder<F>, BitcoinPortalStream<Out>>({
     id,
-    portal,
+    source,
     query,
     cache,
     logger,

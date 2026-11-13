@@ -29,7 +29,7 @@ describe('Pipeline metrics', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockOutputs({ from: 0, to: 3 }),
       metrics: metrics.server,
     })
@@ -58,7 +58,7 @@ describe('Pipeline metrics', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockOutputs({ from: 0, to: 1 }),
       metrics: metrics.server,
     })
@@ -88,7 +88,7 @@ describe('Pipeline metrics', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockOutputs({ from: 0, to: 2 }),
       metrics: metrics.server,
     })
@@ -124,7 +124,7 @@ describe('Pipeline metrics', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockOutputs({ from: 0, to: 3 }),
       metrics: metrics.server,
     })
@@ -157,7 +157,7 @@ describe('Pipeline metrics', () => {
 
     const stream = evmPortalStream({
       id: 'test',
-      portal: portal.url,
+      source: portal.url,
       outputs: blockOutputs({ from: 0, to: 3 }),
       metrics: metrics.server,
     })
@@ -186,7 +186,9 @@ describe('Pipeline metrics', () => {
     })
     const metrics = mockMetricsServer()
 
-    await readAll(evmPortalStream({ id: 'test', portal, outputs: blockOutputs({ from: 1 }), metrics: metrics.server }))
+    await readAll(
+      evmPortalStream({ id: 'test', source: portal, outputs: blockOutputs({ from: 1 }), metrics: metrics.server }),
+    )
 
     const statuses = metrics.counter('sqd_portal_requests_total').calls.map((call) => call.labels?.['status'])
     expect(statuses).toEqual(['200', '204'])
@@ -202,7 +204,9 @@ describe('Pipeline metrics', () => {
     })
     const metrics = mockMetricsServer()
 
-    await readAll(evmPortalStream({ id: 'test', portal, outputs: blockOutputs({ from: 1 }), metrics: metrics.server }))
+    await readAll(
+      evmPortalStream({ id: 'test', source: portal, outputs: blockOutputs({ from: 1 }), metrics: metrics.server }),
+    )
 
     const statuses = metrics.counter('sqd_portal_requests_total').calls.map((call) => call.labels?.['status'])
     expect(statuses).toEqual(['204', '200', '204'])

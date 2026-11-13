@@ -142,7 +142,7 @@ describe('test-evm-data helpers', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: mockPortal.url,
+        source: mockPortal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 2 },
           events: {
@@ -186,7 +186,7 @@ describe('test-evm-data helpers', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: mockPortal.url,
+        source: mockPortal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
@@ -227,7 +227,7 @@ describe('test-evm-data helpers', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: mockPortal.url,
+        source: mockPortal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {

@@ -32,7 +32,7 @@ const listeners = () => process.listeners('SIGTERM').length + process.listeners(
 function streamFrom(url: string, range: { from: number | 'latest' | Date; to?: number } = { from: 1 }) {
   return evmPortalStream({
     id: 'shutdown',
-    portal: { url, maxBytes: 1 },
+    source: { url, maxBytes: 1 },
     logger: 'silent',
     outputs: evmQuery()
       .addRange(range)
@@ -418,7 +418,7 @@ describe('pipeTo shutdown', () => {
 
       const run = evmPortalStream({
         id: 'shutdown',
-        portal: chain.url,
+        source: chain.url,
         logger: 'silent',
         cache,
         outputs: blockDecoder({ from: 1 }),
@@ -505,10 +505,10 @@ describe('pipeTo shutdown', () => {
         .pipe(
           createTransformer({
             transform: (data) => data,
-            start: async ({ portal, signal }) => {
+            start: async ({ source, signal }) => {
               setTimeout(() => process.emit('SIGTERM', 'SIGTERM'), 20)
 
-              await portal.getHead({ abort: signal })
+              await source.getHead({ abort: signal })
             },
           }),
         )
