@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { ForkException, StreamData } from '~/portal-client/index.js'
-import { MockBlockStreamClient, mockBlockStreamClient } from '~/testing/index.js'
+import { StubPortalClient } from '~/testing/stub-portal.js'
 
 import { BlockCursor } from '../types.js'
 import { makeCapabilityProbe } from './capability.js'
@@ -18,18 +18,11 @@ function batch(n: number): StreamData<{ header: { number: number; hash: string }
   }
 }
 
-type StreamFn = (query: any) => AsyncGenerator<StreamData<any>>
-
-/** A mock client; `reads` records every `getStream` query it received. */
-function client(stream: StreamFn): MockBlockStreamClient {
-  return mockBlockStreamClient({ stream })
-}
-
 const QUERY = { type: 'evm', fields: { block: { number: true } }, fromBlock: 0, parentBlockHash: '0xdead' }
 
 describe('makeCapabilityProbe', () => {
   it('reads a one-block slice AT the cursor and reports capable when it serves', async () => {
-    const c = client(async function* () {
+    const c = new StubPortalClient(async function* () {
       yield batch(99)
     })
     expect(await makeCapabilityProbe(c, QUERY)(cursor(99))).toEqual({ ok: true })
@@ -44,7 +37,7 @@ describe('makeCapabilityProbe', () => {
   })
 
   it('anchors at the query start when no cursor is given', async () => {
-    const c = client(async function* () {
+    const c = new StubPortalClient(async function* () {
       yield batch(0)
     })
     expect(await makeCapabilityProbe(c, QUERY)()).toEqual({ ok: true })
@@ -52,12 +45,12 @@ describe('makeCapabilityProbe', () => {
   })
 
   it('reports capable when the slice is empty (served the query, nothing matched)', async () => {
-    const c = client(async function* () {})
+    const c = new StubPortalClient(async function* () {})
     expect(await makeCapabilityProbe(c, QUERY)(cursor(99))).toEqual({ ok: true })
   })
 
   it('reports not-capable, with the classified cause, when the source cannot serve the slice', async () => {
-    const c = client(async function* () {
+    const c = new StubPortalClient(async function* () {
       throw new Error('the method trace_block does not exist')
     })
     const r = await makeCapabilityProbe(c, QUERY)(cursor(99))
@@ -67,7 +60,7 @@ describe('makeCapabilityProbe', () => {
   })
 
   it('classifies a Portal HTTP 400 as an http failure carrying its status code', async () => {
-    const c = client(async function* () {
+    const c = new StubPortalClient(async function* () {
       throw Object.assign(new Error('Got 400 from https://portal.example/q'), {
         name: 'HttpError',
         response: { status: 400, url: 'https://portal.example/q', body: 'not a hypothetical' },
@@ -80,14 +73,14 @@ describe('makeCapabilityProbe', () => {
   })
 
   it('treats a ForkException as capable (served + reorg, not an inability to serve)', async () => {
-    const c = client(async function* () {
+    const c = new StubPortalClient(async function* () {
       throw new ForkException([cursor(99)], { fromBlock: 100, parentBlockHash: '0x99' })
     })
     expect(await makeCapabilityProbe(c, QUERY)(cursor(99))).toEqual({ ok: true })
   })
 
   it('reports not-capable when the slice exceeds the probe timeout', async () => {
-    const c = client(async function* () {
+    const c = new StubPortalClient(async function* () {
       await new Promise<void>(() => {}) // hang — never yields
     })
     const r = await makeCapabilityProbe(c, QUERY, { timeoutMs: 20 })(cursor(99))
