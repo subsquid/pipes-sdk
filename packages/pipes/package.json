@@ -58,6 +58,10 @@
     "@grpc/grpc-js": "1.14.3",
     "@grpc/proto-loader": "0.8.0",
     "@subsquid/borsh": "0.3.0",
+    "@subsquid/evm-normalization": "^0.0.2",
+    "@subsquid/evm-rpc": "^0.0.2",
+    "@subsquid/http-client": "^1.8.1",
+    "@subsquid/rpc-client": "^4.15.1",
     "@types/better-sqlite3": "9.6.0",
     "@types/express": "5.0.6",
     "@types/node": "22.20.5",
@@ -74,6 +78,7 @@
     "@subsquid/solana-stream": "0.3.1",
     "@subsquid/util-internal": "3.2.0",
     "@subsquid/util-internal-hex": "0.0.2",
+    "@subsquid/util-internal-json": "^1.2.3",
     "@subsquid/util-internal-validation": "0.8.0",
     "@subsquid/util-timeout": "^2.3.2",
     "express": "5.1.0",
@@ -88,6 +93,10 @@
     "@google-cloud/bigquery-storage": "5.1.0",
     "@google-cloud/pubsub": "6.0.0",
     "@opentelemetry/api": "^1.9.0",
+    "@subsquid/evm-normalization": "^0.0.2",
+    "@subsquid/evm-rpc": "^0.0.2",
+    "@subsquid/http-client": "^1.8.1",
+    "@subsquid/rpc-client": "^4.15.1",
     "better-sqlite3": "12.4.5",
     "drizzle-orm": "0.44.7",
     "pg": "8.16.3",
@@ -95,6 +104,18 @@
   },
   "peerDependenciesMeta": {
     "@dsnp/parquetjs": {
+      "optional": true
+    },
+    "@subsquid/evm-normalization": {
+      "optional": true
+    },
+    "@subsquid/evm-rpc": {
+      "optional": true
+    },
+    "@subsquid/http-client": {
+      "optional": true
+    },
+    "@subsquid/rpc-client": {
       "optional": true
     },
     "@opentelemetry/api": {

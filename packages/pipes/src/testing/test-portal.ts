@@ -125,12 +125,25 @@ export type MockChainPortal = MockPortal & {
   fail(fault: MockPortalFault): void
 }
 
+/** Options of a mock portal that answers an exact response list. */
+export type ScriptedPortalOptions = {
+  finalized?: boolean
+  /**
+   * Served from `/head` and `/finalized-head`. Without it those endpoints 404, which a source
+   * health model reads as an unreachable source — set it whenever the test drives head polling.
+   */
+  head?: { number: number; hash: string }
+  /** Served from `/finalized-head` when it should differ from {@link ScriptedPortalOptions.head}. */
+  finalizedHead?: { number: number; hash: string }
+}
+
 /**
  * @deprecated Use `mockPortal({ blocks, ... })`: it answers both `/stream` and `/finalized-stream`.
  * For an exact response list, use `mockPortal(responses, { finalized: true })`.
  */
-export async function finalizedMockPortal(mockResponses: MockResponse[]) {
+export async function finalizedMockPortal(mockResponses: MockResponse[], options: ScriptedPortalOptions = {}) {
   return mockPortal(mockResponses, {
+    ...options,
     finalized: true,
   })
 }
@@ -161,9 +174,9 @@ export async function finalizedMockPortal(mockResponses: MockResponse[]) {
  * portal.append(mockBlock({ number: 21 }))
  * ```
  */
-export function mockPortal(mockResponses: MockResponse[], options?: { finalized?: boolean }): Promise<MockPortal>
+export function mockPortal(mockResponses: MockResponse[], options?: ScriptedPortalOptions): Promise<MockPortal>
 export function mockPortal(options: MockPortalOptions): Promise<MockChainPortal>
-export function mockPortal(mockResponses: MockResponse[], options?: { finalized?: boolean }): Promise<MockPortal>
+export function mockPortal(mockResponses: MockResponse[], options?: ScriptedPortalOptions): Promise<MockPortal>
 export function mockPortal(
   input: MockResponse[] | MockPortalOptions,
   options: { finalized?: boolean } = {},
@@ -308,7 +321,7 @@ function writeAnswer(res: ServerResponse, answer: ChainAnswer, head: WireHead) {
 
 async function scriptedPortal(
   mockResponses: MockResponse[],
-  { finalized = false }: { finalized?: boolean },
+  { finalized = false, head, finalizedHead }: ScriptedPortalOptions,
 ): Promise<MockPortal> {
   const promise = new Promise<Server>((resolve, reject) => {
     let requestCount = 0
@@ -316,6 +329,19 @@ async function scriptedPortal(
     const streamUrl = finalized ? '/finalized-stream' : '/stream'
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const headFor = req.url?.startsWith('/finalized-head') ? (finalizedHead ?? head) : head
+      if (req.url?.startsWith('/head') || req.url?.startsWith('/finalized-head')) {
+        if (!headFor) {
+          res.statusCode = 404
+          res.end()
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.write(JSON.stringify(headFor))
+        res.end()
+        return
+      }
+
       if (req.url?.startsWith('/metadata')) {
         writeMetadata(res, 'evm')
 

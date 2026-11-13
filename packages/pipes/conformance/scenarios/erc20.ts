@@ -1,7 +1,9 @@
 import { type BlockCursor, type Logger } from '~/core/index.js'
 import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
+import type { EvmFallbackOptions } from '~/evm/evm-fallback.js'
 import { evmPortalStream } from '~/evm/evm-portal-source.js'
+import { evmStream } from '~/evm/evm-stream.js'
 import { encodeEvent } from '~/testing/evm/index.js'
 
 import type { OracleRow } from '../oracle/reference-model.js'
@@ -64,16 +66,19 @@ export type Observation = {
 
 /**
  * The source and transform of the ERC-20 scenarios over `range`, whatever sink they stream into.
- * `observe` sees every batch before the sink does, and fails the run by throwing.
+ * `observe` sees every batch before the sink does, and fails the run by throwing. A list of URLs
+ * reads them as a source list in preference order (spec/16).
  */
 export function erc20Stream({
   range,
   url,
+  fallback,
   logger,
   observe,
 }: {
   range: { from: number; to: number }
-  url: string
+  url: string | string[]
+  fallback?: EvmFallbackOptions
   logger: Logger
   observe: (observation: Observation) => void
 }) {
@@ -94,6 +99,16 @@ export function erc20Stream({
       })),
     }
   })
+
+  if (Array.isArray(url)) {
+    return evmStream({
+      id: PIPE_ID,
+      source: url.map((each) => ({ url: each, maxBytes: 1 })),
+      fallback,
+      outputs,
+      logger,
+    })
+  }
 
   return evmPortalStream({
     id: PIPE_ID,

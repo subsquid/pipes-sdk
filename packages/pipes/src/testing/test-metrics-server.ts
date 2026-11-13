@@ -40,6 +40,10 @@ export class MockGauge<T extends string = string> implements Gauge<T> {
     }
   }
 
+  reset(): void {
+    this.calls = []
+  }
+
   get lastValue(): number | undefined {
     return this.calls[this.calls.length - 1]?.value
   }

@@ -12,6 +12,8 @@ export type MakeContextOverrides = {
   templates?: Config<NetworkType>['templates']
   writer?: FakeProjectWriter
   regenerate?: boolean
+  rpcFallback?: boolean
+  rpcUrl?: string
 }
 
 export function makeTestContext(overrides: MakeContextOverrides = {}): {
@@ -26,6 +28,7 @@ export function makeTestContext(overrides: MakeContextOverrides = {}): {
     templates: overrides.templates ?? [],
     target: overrides.target ?? 'clickhouse',
     packageManager: overrides.packageManager ?? 'pnpm',
+    ...(overrides.rpcFallback !== undefined ? { rpcFallback: overrides.rpcFallback } : {}),
   }
   return {
     writer,
@@ -35,6 +38,7 @@ export function makeTestContext(overrides: MakeContextOverrides = {}): {
       projectPath: writer.getAbsolutePath(),
       projectWriter: writer.asProjectWriter(),
       regenerate: overrides.regenerate,
+      rpcUrl: overrides.rpcUrl,
     },
   }
 }
