@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest'
+import { beforeEach, describe, expect, expectTypeOf, it } from 'vitest'
 
 import { commonAbis } from '~/evm/abi/common.js'
 import { evmEventDecoder } from '~/evm/evm-decoder.js'
 import { evmPortalStream } from '~/evm/evm-portal-source.js'
 
-import { MockPortal, readAll } from '../index.js'
-import { mockEvmPortalStream } from './evm-portal-mock-stream.js'
+import { readAll } from '../index.js'
+import { withPortal } from '../portal-fixture.js'
 import { MOCK_GENESIS_TIMESTAMP, encodeEvent, mockBlock, resetMockBlockCounter } from './mock-block.js'
 
 const WETH_ADDRESS = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' as const
@@ -13,14 +13,8 @@ const ALICE = '0x7a250d5630b4cf539739df2c5dacb4c659f2488d' as const
 const BOB = '0xc82e11e709deb68f3631fc165ebd8b4e3fc3d18f' as const
 
 describe('test-evm-data helpers', () => {
-  let mockPortal: MockPortal
-
   beforeEach(() => {
     resetMockBlockCounter()
-  })
-
-  afterEach(async () => {
-    await mockPortal?.close()
   })
 
   describe('encodeEvent', () => {
@@ -124,8 +118,8 @@ describe('test-evm-data helpers', () => {
     })
   })
 
-  describe('mockEvmPortalStream', () => {
-    it('should work end-to-end with evmEventDecoder', async () => {
+  describe('mockPortal with mock blocks', () => {
+    withPortal('should work end-to-end with evmEventDecoder', async ({ portal: openPortal }) => {
       const transfer = encodeEvent({
         abi: commonAbis.erc20.abi,
         eventName: 'Transfer',
@@ -133,7 +127,7 @@ describe('test-evm-data helpers', () => {
         args: { from: ALICE, to: BOB, value: 100n },
       })
 
-      mockPortal = await mockEvmPortalStream({
+      const portal = await openPortal({
         blocks: [
           mockBlock({ transactions: [{ logs: [transfer] }] }),
           mockBlock({ transactions: [{ logs: [transfer] }] }),
@@ -142,7 +136,7 @@ describe('test-evm-data helpers', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: mockPortal.url,
+        portal: portal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 2 },
           events: {
@@ -161,7 +155,7 @@ describe('test-evm-data helpers', () => {
       expect(res[1].event.from).toBe(ALICE)
     })
 
-    it('should work with multiple events per block', async () => {
+    withPortal('should work with multiple events per block', async ({ portal: openPortal }) => {
       const transfer1 = encodeEvent({
         abi: commonAbis.erc20.abi,
         eventName: 'Transfer',
@@ -176,7 +170,7 @@ describe('test-evm-data helpers', () => {
         args: { from: BOB, to: ALICE, value: 50n },
       })
 
-      mockPortal = await mockEvmPortalStream({
+      const portal = await openPortal({
         blocks: [
           mockBlock({
             transactions: [{ logs: [transfer1, transfer2] }],
@@ -186,7 +180,7 @@ describe('test-evm-data helpers', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: mockPortal.url,
+        portal: portal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
@@ -202,7 +196,7 @@ describe('test-evm-data helpers', () => {
       expect(res[1].event.value).toBe(50n)
     })
 
-    it('should work with mixed event types', async () => {
+    withPortal('should work with mixed event types', async ({ portal: openPortal }) => {
       const transfer = encodeEvent({
         abi: commonAbis.erc20.abi,
         eventName: 'Transfer',
@@ -217,7 +211,7 @@ describe('test-evm-data helpers', () => {
         args: { owner: ALICE, spender: BOB, value: 200n },
       })
 
-      mockPortal = await mockEvmPortalStream({
+      const portal = await openPortal({
         blocks: [
           mockBlock({
             transactions: [{ logs: [transfer, approval] }],
@@ -227,7 +221,7 @@ describe('test-evm-data helpers', () => {
 
       const stream = evmPortalStream({
         id: 'test',
-        portal: mockPortal.url,
+        portal: portal.url,
         outputs: evmEventDecoder({
           range: { from: 0, to: 1 },
           events: {
