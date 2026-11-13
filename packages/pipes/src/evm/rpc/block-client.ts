@@ -95,14 +95,7 @@ export class EvmRpcBlockClient {
   }
 
   getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
-    const self = this
-    return {
-      [Symbol.asyncIterator]() {
-        return self.#stream(query as EvmQuery, options)[Symbol.asyncIterator]() as AsyncIterator<
-          StreamData<GetBlock<Q>>
-        >
-      },
-    }
+    return this.#stream(query as EvmQuery, options)
   }
 
   async *#stream(query: EvmQuery, options?: PortalBlockStreamOptions): AsyncGenerator<StreamData<any>> {

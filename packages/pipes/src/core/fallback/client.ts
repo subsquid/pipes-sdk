@@ -271,12 +271,7 @@ export class FallbackClient implements BlockStreamClient {
   }
 
   getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
-    const self = this
-    return {
-      [Symbol.asyncIterator]() {
-        return self.#run(query, options)[Symbol.asyncIterator]()
-      },
-    }
+    return this.#run(query, options)
   }
 
   /** The supervisor: switches sources internally; only `ForkException` (and completion) escape. */

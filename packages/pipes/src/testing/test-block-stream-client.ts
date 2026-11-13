@@ -47,7 +47,8 @@ export function mockBlockStreamClient(options: MockBlockStreamClientOptions = {}
     },
     getStream: (query: any) => {
       reads.push(query)
-      return { [Symbol.asyncIterator]: () => stream(query)[Symbol.asyncIterator]() }
+
+      return stream(query)
     },
   } as MockBlockStreamClient
 }

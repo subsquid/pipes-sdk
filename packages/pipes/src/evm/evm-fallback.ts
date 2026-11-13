@@ -1,3 +1,4 @@
+import { redactUrl } from '~/core/fallback/diagnostics.js'
 import {
   DefaultFallbackStrategyOptions,
   FallbackClient,
@@ -5,7 +6,6 @@ import {
   FallbackDetectionOptions,
   FallbackStrategy,
   Logger,
-  redactUrl,
 } from '~/core/index.js'
 import { HttpClient } from '~/http-client/index.js'
 import { once } from '~/internal/function.js'
@@ -118,48 +118,73 @@ function portalHttp(options: EvmFallbackOptions, http: PortalClientOptions['http
  * interchangeable.
  */
 export function createEvmFallbackClient(specs: EvmSourceSpec[], options: EvmFallbackOptions = {}): FallbackClient {
-  const sources: FallbackClientSource[] = specs.map((spec, i) => {
-    if (typeof spec === 'string') {
-      spec = { url: spec }
-    }
-    if (spec.type === 'custom') {
-      if (!isBlockStreamClient(spec.client)) {
-        throw new Error(`fallback source ${i}: 'custom' spec requires a BlockStreamClient in \`client\``)
-      }
-      return { name: spec.name ?? `custom-${i}`, client: spec.client }
-    }
-    if (spec.type === 'rpc') {
-      const { type: _type, name = `rpc-${i}`, method, strideSize, strideConcurrency, finalized, ...rpc } = spec
-      return {
-        name,
-        client: lazyEvmRpcBlockClient({
-          rpc,
-          name,
-          finalized: finalized ?? options.finalized ?? false,
-          method,
-          strideSize,
-          strideConcurrency,
-        }),
-      }
-    }
-
-    const { type: _type, name, ...portalOptions } = spec
-    return {
-      name: name ?? `portal-${i}`,
-      client: new PortalClient({
-        finalized: options.finalized,
-        ...portalOptions,
-        http: portalHttp(options, portalOptions.http),
-      }),
-    }
-  })
-
   return new FallbackClient({
-    sources,
+    sources: specs.map((spec, i) => createSource(spec, i, options)),
     detection: options.detection,
     strategy: options.strategy,
     logger: options.logger,
   })
+}
+
+/**
+ * What `evmStream` reads from for a lone source. A portal spec stays plain portal options, so the
+ * portal keeps its unbounded retries; an `rpc` or `custom` spec is built as a list entry is.
+ */
+export function resolveEvmSource(
+  source: EvmSourceSpec | BlockStreamClient,
+): string | PortalClientOptions | BlockStreamClient {
+  if (typeof source === 'string' || isBlockStreamClient(source)) {
+    return source
+  }
+
+  if (source.type === 'rpc' || source.type === 'custom') {
+    return createSource(source, 0, {}).client
+  }
+
+  const { type: _type, name: _name, ...portalOptions } = source
+
+  return portalOptions
+}
+
+function createSource(spec: EvmSourceSpec, i: number, options: EvmFallbackOptions): FallbackClientSource {
+  if (typeof spec === 'string') {
+    spec = { url: spec }
+  }
+
+  if (spec.type === 'custom') {
+    if (!isBlockStreamClient(spec.client)) {
+      throw new Error(`fallback source ${i}: 'custom' spec requires a BlockStreamClient in \`client\``)
+    }
+
+    return { name: spec.name ?? `custom-${i}`, client: spec.client }
+  }
+
+  if (spec.type === 'rpc') {
+    const { type: _type, name = `rpc-${i}`, method, strideSize, strideConcurrency, finalized, ...rpc } = spec
+
+    return {
+      name,
+      client: lazyEvmRpcBlockClient({
+        rpc,
+        name,
+        finalized: finalized ?? options.finalized ?? false,
+        method,
+        strideSize,
+        strideConcurrency,
+      }),
+    }
+  }
+
+  const { type: _type, name, ...portalOptions } = spec
+
+  return {
+    name: name ?? `portal-${i}`,
+    client: new PortalClient({
+      finalized: options.finalized,
+      ...portalOptions,
+      http: portalHttp(options, portalOptions.http),
+    }),
+  }
 }
 
 // The full optional "RPC stack": `@subsquid/evm-rpc` + `@subsquid/evm-normalization` and evm-rpc's
@@ -233,14 +258,9 @@ function lazyEvmRpcBlockClient(config: {
     getHeight: async (options?: { finalized: boolean }): Promise<number | undefined> =>
       await (await load()).getHeight?.(options),
     resolveTimestamp: async (seconds: number): Promise<number> => (await load()).resolveTimestamp(seconds),
-    getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
-      async function* stream(): AsyncGenerator<StreamData<GetBlock<Q>>> {
-        const client = await load()
-        yield* client.getStream(query, options)
-      }
-      return {
-        [Symbol.asyncIterator]: () => stream()[Symbol.asyncIterator](),
-      }
+    async *getStream<Q extends Query>(query: Q, options?: PortalBlockStreamOptions): PortalBlockStream<GetBlock<Q>> {
+      const client = await load()
+      yield* client.getStream(query, options)
     },
   }
 }

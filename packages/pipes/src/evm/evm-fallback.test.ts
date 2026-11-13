@@ -4,11 +4,11 @@ import { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { FallbackClient } from '~/core/index.js'
-import { BlockStreamClient } from '~/portal-client/index.js'
-import { MockPortal, mockPortal } from '~/testing/index.js'
+import { BlockStreamClient, PortalClient } from '~/portal-client/index.js'
+import { MockPortal, mockBlockStreamClient, mockPortal } from '~/testing/index.js'
 
 import * as evmBarrel from './browser.js'
-import { createEvmFallbackClient, translateMissingRpcPeer } from './evm-fallback.js'
+import { createEvmFallbackClient, resolveEvmSource, translateMissingRpcPeer } from './evm-fallback.js'
 
 describe('public ./evm exports', () => {
   it('surfaces the fallback + facade through the evm barrel (reachable by consumers)', () => {
@@ -238,6 +238,28 @@ describe('createEvmFallbackClient — source specs', () => {
 
     expect(fb.finalized).toBe(false)
     expect(fb.metrics().sources.map((s) => s.name)).toEqual(['bulk', 'tip'])
+  })
+})
+
+describe('resolveEvmSource — a lone source', () => {
+  it("builds the lazy RPC client for an {type: 'rpc'} spec, not a portal client", async () => {
+    const client = resolveEvmSource({ type: 'rpc', url: 'https://rpc.example/eth/verysecretapikeyvalue1234567890' })
+
+    expect(client).not.toBeInstanceOf(PortalClient)
+    expect(await (client as BlockStreamClient).getMetadata()).toMatchObject({ dataset: 'rpc-0', real_time: true })
+  })
+
+  it("returns the client of a {type: 'custom'} spec", () => {
+    const client = mockBlockStreamClient()
+
+    expect(resolveEvmSource({ type: 'custom', client })).toBe(client)
+  })
+
+  it('keeps a portal spec as plain portal options, so the portal keeps its own retry policy', () => {
+    expect(resolveEvmSource('http://localhost:1/datasets/eth')).toBe('http://localhost:1/datasets/eth')
+    expect(resolveEvmSource({ type: 'portal', name: 'main', url: 'http://localhost:1' })).toEqual({
+      url: 'http://localhost:1',
+    })
   })
 })
 

@@ -37,16 +37,7 @@ export type EvmStreamData<T extends EvmOutputs> =
           }
         : never
 
-export function evmPortalStream<Out extends EvmOutputs>({
-  id,
-  portal,
-  outputs,
-  cache,
-  logger,
-  metrics,
-  profiler,
-  progress,
-}: {
+export interface EvmPortalStreamOptions<Out extends EvmOutputs> {
   /**
    * Globally unique, stable identifier for this pipe.
    * Targets use it as a cursor key to persist progress — two pipes with the
@@ -60,7 +51,18 @@ export function evmPortalStream<Out extends EvmOutputs>({
   logger?: Logger | LogLevel
   profiler?: boolean | SpanHooks
   progress?: ProgressTrackerOptions
-}) {
+}
+
+export function evmPortalStream<Out extends EvmOutputs>({
+  id,
+  portal,
+  outputs,
+  cache,
+  logger,
+  metrics,
+  profiler,
+  progress,
+}: EvmPortalStreamOptions<Out>) {
   type F = { block: { hash: true; number: true } }
   const query = new EvmQueryBuilder<F>().addFields({
     block: { hash: true, number: true },

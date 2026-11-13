@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { FallbackStrategy, Logger } from '~/core/index.js'
 
-import { MockPortal, mockPortal } from '../testing/index.js'
+import { MockPortal, mockBlockStreamClient, mockPortal } from '../testing/index.js'
 import { evmQuery } from './evm-query-builder.js'
 import { evmStream } from './evm-stream.js'
 
@@ -51,6 +51,33 @@ describe('evmStream', () => {
       expect(block.transactions).toBeInstanceOf(Array)
       expect(block.stateDiffs).toBeInstanceOf(Array)
     }
+  })
+
+  it("reads a lone {type: 'custom'} source directly, without a fallback list", async () => {
+    const client = mockBlockStreamClient({
+      stream: async function* () {
+        yield {
+          blocks: [{ header: { number: 1, hash: '0x1', timestamp: 1000 } }],
+          head: {},
+          meta: { bytes: 0, requestedFromBlock: 0, lastBlockReceivedAt: new Date(), requests: {} },
+        }
+      },
+    })
+
+    const stream = evmStream({
+      id: 'test',
+      source: { type: 'custom', client },
+      outputs: evmQuery()
+        .addFields({ block: { number: true, hash: true } })
+        .addRange({ from: 0, to: 1 }),
+    })
+
+    const numbers: number[] = []
+    for await (const { data } of stream) {
+      numbers.push(...data.map((b) => b.header.number))
+    }
+
+    expect(numbers).toEqual([1])
   })
 
   it('streams through a fallback source list — same pipeline, multiplexed source', async () => {

@@ -7,16 +7,18 @@ export interface FallbackMetricsSource {
 
 const HEALTH_STATES = ['healthy', 'unhealthy', 'unknown'] as const
 
+const PREFIX = 'sqd_fallback'
+
 /**
- * Every fallback registered against one metrics surface, keyed by metric prefix and then by pipe
- * id. The gauges are created once per prefix and read this registry on each scrape, so a second
- * pipe sharing the surface is exported too.
+ * Every fallback registered against one metrics surface, keyed by pipe id. The gauges are created
+ * once per surface and read this registry on each scrape, so a second pipe sharing the surface is
+ * exported too.
  *
  * This indirection is load-bearing: a metrics server caches gauges by name and returns the existing
  * one on re-registration, *dropping the new `collect` callback*. Registering a second fallback the
  * naive way would therefore silently keep exporting only the first one's state.
  */
-const REGISTRIES = new WeakMap<Metrics, Map<string, Map<string, FallbackMetricsSource>>>()
+const REGISTRIES = new WeakMap<Metrics, Map<string, FallbackMetricsSource>>()
 
 /**
  * Register pull-based gauges that export a {@link FallbackClient}'s observable state: which source
@@ -27,19 +29,8 @@ const REGISTRIES = new WeakMap<Metrics, Map<string, Map<string, FallbackMetricsS
  * Every series carries the pipe `id`, matching how the rest of the SDK labels per-pipe metrics, so
  * several pipes can share one metrics server and stay individually observable.
  */
-export function registerFallbackMetrics(
-  metrics: Metrics,
-  source: FallbackMetricsSource,
-  id: string,
-  prefix = 'sqd_fallback',
-): void {
-  let byPrefix = REGISTRIES.get(metrics)
-  if (!byPrefix) {
-    byPrefix = new Map()
-    REGISTRIES.set(metrics, byPrefix)
-  }
-
-  const registered = byPrefix.get(prefix)
+export function registerFallbackMetrics(metrics: Metrics, source: FallbackMetricsSource, id: string): void {
+  const registered = REGISTRIES.get(metrics)
   if (registered) {
     // The gauges exist and already read this map — just make this pipe visible to them.
     registered.set(id, source)
@@ -47,10 +38,10 @@ export function registerFallbackMetrics(
   }
 
   const sources = new Map<string, FallbackMetricsSource>([[id, source]])
-  byPrefix.set(prefix, sources)
+  REGISTRIES.set(metrics, sources)
 
   metrics.gauge<'id' | 'source'>({
-    name: `${prefix}_active`,
+    name: `${PREFIX}_active`,
     help: 'Currently active fallback source (1 = active, 0 = standby)',
     labelNames: ['id', 'source'],
     collect() {
@@ -64,7 +55,7 @@ export function registerFallbackMetrics(
   })
 
   metrics.gauge<'id' | 'source' | 'state' | 'check' | 'reason' | 'code'>({
-    name: `${prefix}_source_health`,
+    name: `${PREFIX}_source_health`,
     help:
       'Per-source trinary health (1 for the current state, 0 otherwise). The unhealthy row carries ' +
       'the cause as `check`/`reason`/`code` labels (empty otherwise); the full detail incl. the ' +
@@ -103,7 +94,7 @@ export function registerFallbackMetrics(
    */
   const scalar = (name: string, help: string, read: (m: FallbackMetrics) => number | undefined) => {
     metrics.gauge<'id'>({
-      name: `${prefix}_${name}`,
+      name: `${PREFIX}_${name}`,
       help,
       labelNames: ['id'],
       collect() {
