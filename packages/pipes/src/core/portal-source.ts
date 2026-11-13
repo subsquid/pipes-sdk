@@ -10,7 +10,7 @@ import {
 } from '~/portal-client/index.js'
 
 import { last, partition } from '../internal/array.js'
-import { stallWatchdog } from '../internal/stall-watchdog.js'
+import { StallWatchdog, stallWatchdog } from '../internal/stall-watchdog.js'
 import {
   DefaultPipeIdError,
   ForkCursorMissingError,
@@ -24,7 +24,14 @@ import { LogLevel, Logger, defaultLogger, formatWarning } from './logger.js'
 import { Metrics, MetricsServer, noopMetricsServer } from './metrics-server.js'
 import { Profiler, Span, SpanHooks } from './profiling.js'
 import { ProgressEvent, StartEvent } from './progress-tracker.js'
-import { QueryBuilder, type Range, type RangeAnchors, hashQuery } from './query-builder.js'
+import {
+  PlannedRangeRequest,
+  PlannedRequest,
+  QueryBuilder,
+  type Range,
+  type RangeAnchors,
+  hashQuery,
+} from './query-builder.js'
 import { PipeToOptions, resolveShutdown, withShutdown } from './shutdown.js'
 import { ReadOptions, Target, TargetState } from './target.js'
 import { QueryAwareTransformer, Transformer, TransformerArgs, TransformerOptions } from './transformer.js'
@@ -347,147 +354,207 @@ export class PortalStream<Q extends QueryBuilder<any>, T = any> {
     // The newest block handed downstream; a head-only response reports progress at it.
     let processed = cursor
 
-    for (const { range, request } of bounded) {
+    for (const { range, request, planners } of bounded) {
       // Anchor the cursor's hash only to the range that continues from it; a later disjoint range
       // doesn't border the cursor and would fault a spurious 409, so it starts unanchored (ADR-20).
-      const isResumeContinuation = cursor?.hash != null && range.from === cursor.number + 1
+      let parentBlockHash = cursor?.hash != null && range.from === cursor.number + 1 ? cursor.hash : undefined
+      let from = range.from
 
-      const query = {
-        ...request,
-        type: this.#queryBuilder.getType(),
-        fields: this.#queryBuilder.getFields(),
-        fromBlock: range.from,
-        toBlock: range.to,
-        parentBlockHash: isResumeContinuation ? cursor.hash : undefined,
-      }
+      // One pass without planners. With planners, one segment per planned request.
+      while (true) {
+        const segment = await this.planSegment({ from, range, request, planners, watchdog })
 
-      const source = this.#options.cache
-        ? // use cache if available
-          this.#options.cache.getStream({
-            portal,
-            logger: this.#logger,
-            query,
-            finalized,
-            signal: stop,
-          })
-        : portal.getStream(query, { finalized, request: { abort: stop } })
-
-      const batchContext = async (
-        batch: StreamData<any>,
-        { finalized, current }: { finalized: BlockCursor | undefined; current: BlockCursor },
-        profiler: Profiler,
-      ): Promise<BatchContext> => {
-        // The last block this run can reach. A configured end bounds it, but never past the
-        // chain head: a progress denominator above the head is one the run cannot hit, so the
-        // ETA never lands. With no configured end the run just tracks the head. `??` throughout
-        // — block 0 is a valid range end and a valid head.
-        // A 204 reports no head, but it means the portal holds nothing above `current`.
-        const headOnly = batch.blocks.length === 0
-        const chainHead = batch.head.latest?.number ?? (headOnly ? current.number : undefined)
-        const runEnd = last(bounded)?.range?.to ?? chainHead ?? finalized?.number ?? Infinity
-        const lastBlockNumber = Math.max(Math.min(runEnd, chainHead ?? Infinity), current.number)
-
-        return {
-          id: this.#id,
-          profiler,
-          metrics: this.#metricServer.metrics,
-          logger: this.#logger,
-          stream: {
-            dataset: datasetMetadata,
-            head: {
-              finalized,
-              latest: batch.head.latest,
-            },
-            query: {
-              url: portal.getUrl(),
-              hash: await hashQuery(query),
-              raw: query,
-            },
-            state: {
-              initial,
-              ranges,
-              current,
-              last: lastBlockNumber,
-              rollbackChain: extractRollbackChain({
-                blocks: batch.blocks,
-                head: finalized,
-              }),
-            },
-          },
-          batch: batchMetadata(batch),
+        const query = {
+          ...segment.request,
+          type: this.#queryBuilder.getType(),
+          fields: this.#queryBuilder.getFields(),
+          fromBlock: from,
+          toBlock: segment.to,
+          parentBlockHash,
         }
-      }
 
-      let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
-      let readSpan = batchSpan.start('fetch data').addLabels('core')
-      try {
-        watchdog.begin(WAITING_FOR_PORTAL)
+        const source = this.#options.cache
+          ? // use cache if available
+            this.#options.cache.getStream({
+              portal,
+              logger: this.#logger,
+              query,
+              finalized,
+              signal: stop,
+            })
+          : portal.getStream(query, { finalized, request: { abort: stop } })
 
-        for await (const { batch, finalized } of this.applyFinality(source, options)) {
-          readSpan.end()
+        const batchContext = async (
+          batch: StreamData<any>,
+          { finalized, current }: { finalized: BlockCursor | undefined; current: BlockCursor },
+          profiler: Profiler,
+        ): Promise<BatchContext> => {
+          // The last block this run can reach. A configured end bounds it, but never past the
+          // chain head: a progress denominator above the head is one the run cannot hit, so the
+          // ETA never lands. With no configured end the run just tracks the head. `??` throughout
+          // — block 0 is a valid range end and a valid head.
+          // A 204 reports no head, but it means the portal holds nothing above `current`.
+          const headOnly = batch.blocks.length === 0
+          const chainHead = batch.head.latest?.number ?? (headOnly ? current.number : undefined)
+          const runEnd = last(bounded)?.range?.to ?? chainHead ?? finalized?.number ?? Infinity
+          const lastBlockNumber = Math.max(Math.min(runEnd, chainHead ?? Infinity), current.number)
 
-          // A batch read ahead of the target: nothing committed it, so the restart reads it again.
-          if (stop?.aborted) {
-            return
+          return {
+            id: this.#id,
+            profiler,
+            metrics: this.#metricServer.metrics,
+            logger: this.#logger,
+            stream: {
+              dataset: datasetMetadata,
+              head: {
+                finalized,
+                latest: batch.head.latest,
+              },
+              query: {
+                url: portal.getUrl(),
+                hash: await hashQuery(query),
+                raw: query,
+              },
+              state: {
+                initial,
+                ranges,
+                current,
+                last: lastBlockNumber,
+                rollbackChain: extractRollbackChain({
+                  blocks: batch.blocks,
+                  head: finalized,
+                }),
+              },
+            },
+            batch: batchMetadata(batch),
           }
+        }
 
-          const blocks = batch.blocks
+        let lastDelivered: BlockCursor | undefined
+        let batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
+        let readSpan = batchSpan.start('fetch data').addLabels('core')
+        try {
+          watchdog.begin(WAITING_FOR_PORTAL)
 
-          // Held until the consumer comes back for the next batch, so it covers the transformers
-          // and everything the target does with this batch, not just the code in this loop.
-          watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
+          for await (const { batch, finalized } of this.applyFinality(source, options)) {
+            readSpan.end()
 
-          if (blocks.length > 0) {
-            const ctx = await batchContext(batch, { finalized, current: cursorFromHeader(last(blocks)) }, batchSpan)
-            processed = ctx.stream.state.current
-
-            const data = await this.applyTransformers(ctx, batch.blocks as T)
-
+            // A batch read ahead of the target: nothing committed it, so the restart reads it again.
             if (stop?.aborted) {
               return
             }
 
-            yield { data, ctx }
-          } else {
-            // A head-only response: no blocks to yield, but its head and request counts still reach
-            // the progress tracker and the stats (WP-13).
-            if (processed) {
-              const ctx = await batchContext(batch, { finalized, current: processed }, batchSpan)
-              await this.applyHead(ctx)
-              this.#metricServer.headProcessed?.(ctx)
+            const blocks = batch.blocks
+
+            // Held until the consumer comes back for the next batch, so it covers the transformers
+            // and everything the target does with this batch, not just the code in this loop.
+            watchdog.begin(processingPhase(blocks as { header: { number: number } }[], batch.meta.requestedFromBlock))
+
+            if (blocks.length > 0) {
+              const ctx = await batchContext(batch, { finalized, current: cursorFromHeader(last(blocks)) }, batchSpan)
+              processed = ctx.stream.state.current
+              lastDelivered = processed
+
+              const data = await this.applyTransformers(ctx, batch.blocks as T)
+
+              if (stop?.aborted) {
+                return
+              }
+
+              yield { data, ctx }
             } else {
-              await this.applyHead({
-                id: this.#id,
-                profiler: batchSpan,
-                metrics: this.#metricServer.metrics,
-                logger: this.#logger,
-                batch: batchMetadata(batch),
-              })
+              // A head-only response: no blocks to yield, but its head and request counts still reach
+              // the progress tracker and the stats (WP-13).
+              if (processed) {
+                const ctx = await batchContext(batch, { finalized, current: processed }, batchSpan)
+                await this.applyHead(ctx)
+                this.#metricServer.headProcessed?.(ctx)
+              } else {
+                await this.applyHead({
+                  id: this.#id,
+                  profiler: batchSpan,
+                  metrics: this.#metricServer.metrics,
+                  logger: this.#logger,
+                  batch: batchMetadata(batch),
+                })
+              }
+
+              // Never yielded, so batchEnd won't run.
+              batchSpan.end()
             }
 
-            // Never yielded, so batchEnd won't run.
-            batchSpan.end()
+            batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
+            readSpan = batchSpan.start('fetch data').addLabels('core')
+            watchdog.begin(WAITING_FOR_PORTAL)
           }
 
-          batchSpan = Span.root('batch', this.#options.profiler).addLabels('core')
-          readSpan = batchSpan.start('fetch data').addLabels('core')
-          watchdog.begin(WAITING_FOR_PORTAL)
+          watchdog.end()
+        } finally {
+          // The last pair is always armed for a batch that never arrives.
+          readSpan.end()
+          batchSpan.end()
+          // A no-op once the loop has run to completion; on a throw or a cancelled consumer it
+          // stops the clock without claiming the phase recovered.
+          watchdog.abort()
         }
+        const segmentEnd = segment.to
+        if (segmentEnd === undefined || segmentEnd === range.to) break
 
-        watchdog.end()
-      } finally {
-        // The last pair is always armed for a batch that never arrives.
-        readSpan.end()
-        batchSpan.end()
-        // A no-op once the loop has run to completion; on a throw or a cancelled consumer it
-        // stops the clock without claiming the phase recovered.
-        watchdog.abort()
+        // Adjacent segments border each other, so the next one is anchored to the last block of this
+        // one. The portal delivers the last block of every range it covers, so that hash is known.
+        parentBlockHash = lastDelivered?.number === segmentEnd ? lastDelivered.hash : undefined
+        from = segmentEnd + 1
       }
     }
 
     // Cleanup is owned by the callers (pipeTo/[Symbol.asyncIterator]), which run stop() in a
     // finally on every exit path. Calling it here too is what caused the double stop() on normal
     // completion; the idempotency guard in stop() remains as a safety net.
+  }
+
+  /**
+   * Picks the request for the blocks from `from` on: the range's static request merged with what
+   * each of its planners picked, up to the nearest block where one of those answers stops holding.
+   */
+  private async planSegment({
+    from,
+    range,
+    request,
+    planners,
+    watchdog,
+  }: PlannedRangeRequest<any> & { from: number; watchdog: StallWatchdog }): Promise<PlannedRequest<any>> {
+    if (!planners?.length) return { request, to: range.to }
+
+    watchdog.begin(`planning the request from block ${formatBlock(from)}`)
+
+    let planned: PlannedRequest<any>[]
+    try {
+      planned = await Promise.all(
+        planners.map((planner) => planner({ from, to: range.to, portal: this.#portal, logger: this.#logger })),
+      )
+    } catch (error) {
+      watchdog.abort()
+
+      throw error
+    }
+
+    watchdog.end()
+
+    let merged = request
+    let to = range.to
+    for (const answer of planned) {
+      if (answer.to !== undefined) {
+        if (answer.to < from) {
+          throw new Error(`A request planner asked for block ${from} answered with a request that ends at ${answer.to}`)
+        }
+
+        to = to === undefined ? answer.to : Math.min(to, answer.to)
+      }
+
+      merged = this.#queryBuilder.mergeDataRequests(merged, answer.request)
+    }
+
+    return { request: merged, to }
   }
 
   /**

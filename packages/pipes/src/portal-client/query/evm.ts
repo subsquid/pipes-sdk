@@ -361,8 +361,17 @@ export type FieldSelection = {
   stateDiff?: StateDiffFieldSelection
 }
 
+/** Stands for every value of a set the query declares under `sets`. */
+export type SetReference = { set: string }
+
+/**
+ * A value set too long to send as a list: a fuse8 filter with a few of its values as canaries.
+ * It matches a value it was not built from about once in 256, so the client drops those rows.
+ */
+export type ValueSet = { fuse8: string; canaries: string[] }
+
 export type LogRequest = {
-  address?: Hex[]
+  address?: (Hex | SetReference)[]
   topic0?: Hex[]
   topic1?: Hex[]
   topic2?: Hex[]
@@ -405,6 +414,8 @@ export type StateDiffRequest = {
 }
 
 export type DataRequest = {
+  /** Value sets that item filters refer to. Only workers on the dynamic query engine serve them. */
+  sets?: Record<string, ValueSet>
   logs?: LogRequest[]
   transactions?: TransactionRequest[]
   traces?: TraceRequest[]

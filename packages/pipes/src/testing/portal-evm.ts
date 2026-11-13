@@ -1,3 +1,5 @@
+import { fuse8Contains } from '~/internal/fuse8/index.js'
+
 type EvmLog = { address: string; topics: string[]; transactionIndex: number }
 
 /** `to` is `null` on a contract creation. */
@@ -12,8 +14,15 @@ type EvmTrace = {
 
 type EvmStateDiff = { transactionIndex: number; address: string; key: string; kind: string }
 
+/** A filter value that names a set of the query instead of listing addresses. */
+type SetReference = { set: string }
+
+type ValueSet = { fuse8: string; canaries: string[] }
+
+type ValueSets = Record<string, ValueSet>
+
 type LogRequest = {
-  address?: string[]
+  address?: (string | SetReference)[]
   topic0?: string[]
   topic1?: string[]
   topic2?: string[]
@@ -78,9 +87,19 @@ function matches(values: string[] | undefined, value: string | null | undefined)
   return values.some((v) => v.toLowerCase() === value.toLowerCase())
 }
 
-function matchesLog(request: LogRequest, log: EvmLog): boolean {
+function matchesAddress(values: (string | SetReference)[] | undefined, address: string, sets: ValueSets): boolean {
+  if (values === undefined) {
+    return true
+  }
+
+  const text = address.toLowerCase()
+
+  return values.some((v) => (typeof v === 'string' ? v.toLowerCase() === text : fuse8Contains(sets[v.set]!, text)))
+}
+
+function matchesLog(request: LogRequest, log: EvmLog, sets: ValueSets): boolean {
   return (
-    matches(request.address, log.address) &&
+    matchesAddress(request.address, log.address, sets) &&
     matches(request.topic0, log.topics[0]) &&
     matches(request.topic1, log.topics[1]) &&
     matches(request.topic2, log.topics[2]) &&
@@ -142,6 +161,7 @@ function isAbove(ancestor: number[], descendant: number[]): boolean {
  * and the subtraces or parents of a trace.
  */
 export function selectEvm(items: Record<string, unknown>, query: Record<string, unknown>): Record<string, unknown> {
+  const sets = (query['sets'] ?? {}) as ValueSets
   const logs = list<EvmLog>(items, 'logs')
   const transactions = list<EvmTransaction>(items, 'transactions')
   const traces = list<EvmTrace>(items, 'traces')
@@ -154,7 +174,7 @@ export function selectEvm(items: Record<string, unknown>, query: Record<string, 
 
   for (const log of logs) {
     for (const request of list<LogRequest>(query, 'logs')) {
-      if (!matchesLog(request, log)) {
+      if (!matchesLog(request, log, sets)) {
         continue
       }
 
@@ -260,4 +280,42 @@ export function selectEvm(items: Record<string, unknown>, query: Record<string, 
   }
 
   return selected
+}
+
+/**
+ * The query engine's refusals for sets: an unknown or unused name, a canary the set does not hold.
+ * `undefined` when the query's sets are valid.
+ */
+export function checkEvmSets(query: Record<string, unknown>): string | undefined {
+  const sets = (query['sets'] ?? {}) as ValueSets
+  const referenced = new Set<string>()
+
+  for (const request of list<LogRequest>(query, 'logs')) {
+    for (const value of request.address ?? []) {
+      if (typeof value === 'string') {
+        continue
+      }
+      if (!sets[value.set]) {
+        return `UnknownSet: ${value.set}`
+      }
+
+      referenced.add(value.set)
+    }
+  }
+
+  for (const [name, set] of Object.entries(sets)) {
+    if (!referenced.has(name)) {
+      return `InvalidSet: no filter refers to ${name}`
+    }
+    if (set.canaries.length === 0) {
+      return `InvalidSet: ${name} has no canaries`
+    }
+
+    const holdsCanaries = set.canaries.every((canary) => fuse8Contains(set, canary.toLowerCase()))
+    if (!holdsCanaries) {
+      return `SetCanaryMismatch: ${name}`
+    }
+  }
+
+  return undefined
 }
