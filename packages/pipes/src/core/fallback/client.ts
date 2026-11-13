@@ -1,4 +1,3 @@
-import { sleep } from '~/internal/function.js'
 import { ApiDataset, BlockRef, PortalRequestOptions } from '~/portal-client/client.js'
 import {
   BlockStreamClient,
@@ -13,7 +12,7 @@ import {
 import { Logger, defaultLogger } from '../logger.js'
 import { cursorFromHeader } from '../portal-source.js'
 import { BlockCursor } from '../types.js'
-import { delay, safeReturn, withTimeout } from './async.js'
+import { abortableSleep, delay, safeReturn, withTimeout } from './async.js'
 import { ProbeResult, makeCapabilityProbe } from './capability.js'
 import { SourceErrorInfo, capabilityFailure, classifyError, freshnessFailure, strategyFailure } from './diagnostics.js'
 import {
@@ -205,21 +204,46 @@ export class FallbackClient implements BlockStreamClient {
   /**
    * The highest head any source reports. It throws when no source answers: resolving
    * `from: 'latest'` runs through here, and `undefined` would resolve to block 0 (WP-69).
+   *
+   * The first answer has no time limit, because a cold start can take seconds on every source.
+   * After it, the other sources get `headPollTimeoutMs`, so one hung endpoint cannot block startup.
    */
   async getHead(options?: PortalRequestOptions & { finalized?: boolean }): Promise<BlockRef | undefined> {
-    const heads = await Promise.allSettled(this.#sources.map((s) => this.#headWithTimeout(s.client.getHead(options))))
+    const polls = this.#sources.map((s) => s.client.getHead(options))
+    const heads: (PromiseSettledResult<BlockRef | undefined> | undefined)[] = polls.map(() => undefined)
+    const allSettled = Promise.all(
+      polls.map((poll, i) =>
+        poll.then(
+          (value) => {
+            heads[i] = { status: 'fulfilled', value }
+          },
+          (reason) => {
+            heads[i] = { status: 'rejected', reason }
+          },
+        ),
+      ),
+    )
+
+    // Wait for the first answer (or for every poll to fail), then give the rest a grace window.
+    await Promise.any(polls).catch(() => allSettled)
+    await this.#headWithTimeout(allSettled).catch(() => {})
 
     let best: BlockRef | undefined
     let answered = false
     for (const h of heads) {
-      if (h.status !== 'fulfilled') continue
+      if (h?.status !== 'fulfilled') {
+        continue
+      }
+
       answered = true
-      if (h.value && (!best || h.value.number > best.number)) best = h.value
+      if (h.value && (!best || h.value.number > best.number)) {
+        best = h.value
+      }
     }
 
     if (!answered) {
       throw new AggregateError(
-        heads.map((h) => (h.status === 'rejected' ? h.reason : undefined)).filter(Boolean),
+        heads.map((h) => (h?.status === 'rejected' ? h.reason : undefined)).filter(Boolean),
         'no fallback source could report a chain head',
       )
     }
@@ -314,7 +338,11 @@ export class FallbackClient implements BlockStreamClient {
       // fault and the supervisor would re-drive another source.
       if (abort?.aborted) return
 
-      const active = forced ?? (await this.#selectSource(lastError, cursor))
+      const active = forced ?? (await this.#selectSource(lastError, cursor, abort))
+      if (active === undefined) {
+        return
+      }
+
       forced = undefined
       lastError = undefined
       this.#setActive(active)
@@ -488,11 +516,21 @@ export class FallbackClient implements BlockStreamClient {
   /**
    * Pick the source to drive: consult the strategy, waiting out an all-down gap (`hold`) with
    * `allDownPollMs` naps — cooldown expiry and head polls make recovery visible between naps.
+   * Resolves `undefined` when `abort` fires during the wait.
    */
-  async #selectSource(lastError: SourceErrorInfo | undefined, cursor: BlockCursor | undefined): Promise<number> {
+  async #selectSource(
+    lastError: SourceErrorInfo | undefined,
+    cursor: BlockCursor | undefined,
+    abort: AbortSignal | undefined,
+  ): Promise<number | undefined> {
     let allDownSince: number | undefined
 
     while (true) {
+      if (abort?.aborted) {
+        this.#clearActive()
+        return undefined
+      }
+
       const eligible = this.#health.some((h) => h.state !== 'unhealthy')
       if (eligible) {
         allDownSince = undefined
@@ -516,7 +554,7 @@ export class FallbackClient implements BlockStreamClient {
       }
       // 'hold' (and a nonsensical 'failover' with nothing active) both wait and ask again.
       this.#clearActive()
-      await sleep(this.#detection.allDownPollMs)
+      await abortableSleep(this.#detection.allDownPollMs, abort)
     }
   }
 

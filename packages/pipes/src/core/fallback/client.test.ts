@@ -67,9 +67,9 @@ function fallback(
 /** The active source when each batch arrived, by client: the client reports none once the stream ends. */
 const activeAtBatch = new WeakMap<FallbackClient, number | undefined>()
 
-async function collect(fb: FallbackClient, query: any = QUERY): Promise<number[]> {
+async function collect(fb: FallbackClient, query: any = QUERY, abort?: AbortSignal): Promise<number[]> {
   const out: number[] = []
-  for await (const b of fb.getStream(query)) {
+  for await (const b of fb.getStream(query, abort ? { request: { abort } } : undefined)) {
     out.push(...b.blocks.map((x: any) => x.header.number))
     activeAtBatch.set(fb, fb.activeIndex)
   }
@@ -393,6 +393,22 @@ describe('FallbackClient — supervisor', () => {
 
     await expect(collect(fb)).rejects.toThrowError(/all fallback data sources/)
   })
+
+  it('ends the stream on abort during an all-down gap, without waiting for the cooldown', async () => {
+    const down = source('down', async function* () {
+      throw new Error('down')
+    })
+    const fb = fallback([down], { cooldownMs: 60_000 })
+    const stop = new AbortController()
+
+    const started = Date.now()
+    const ended = collect(fb, QUERY, stop.signal)
+    await wait(50)
+    stop.abort()
+
+    expect(await ended).toEqual([])
+    expect(Date.now() - started).toBeLessThan(1000)
+  }, 5000)
 
   it('clears the active source and freshness gauges during an all-down gap', async () => {
     // One source that global-stalls (no other source ⇒ nothing fresher) then errors. On the error
@@ -1464,22 +1480,35 @@ describe('FallbackClient — custom strategy (code as config)', () => {
     expect((await fb.getHead())?.number).toBe(77)
   }, 5000)
 
+  it('waits for the first head without a limit when every source is slow', async () => {
+    // A cold start (DNS, TLS, a lazy import) can exceed the head-poll guard on every source; the
+    // `from: 'latest'` lookup must wait for it instead of failing the pipe at startup.
+    const slow = (n: number) =>
+      source(
+        `slow-${n}`,
+        async function* () {},
+        async () => {
+          await wait(60)
+          return cursor(n)
+        },
+      )
+    const fb = fallback([slow(10), slow(20)], { headPollTimeoutMs: 20 })
+
+    expect((await fb.getHead())?.number).toBe(20)
+  }, 5000)
+
   it('throws rather than reporting "no head" when every source failed to answer', async () => {
     // Reporting `undefined` here would resolve `from: 'latest'` to block 0 and silently backfill
     // the entire chain — "we could not ask" must not be passed off as "there is no head".
-    const hung = source(
-      'hung',
-      async function* () {},
-      () => new Promise<BlockRef | undefined>(() => {}),
-    )
-    const broken = source(
-      'broken',
-      async function* () {},
-      async () => {
-        throw new Error('head down')
-      },
-    )
-    const fb = fallback([hung, broken], { headPollTimeoutMs: 20 })
+    const broken = (name: string) =>
+      source(
+        name,
+        async function* () {},
+        async () => {
+          throw new Error('head down')
+        },
+      )
+    const fb = fallback([broken('broken-0'), broken('broken-1')], { headPollTimeoutMs: 20 })
 
     await expect(fb.getHead()).rejects.toThrowError(/no fallback source could report a chain head/)
   }, 5000)

@@ -60,11 +60,12 @@ export interface FallbackDetectionOptions {
   /** Cache an independent head poll this long, to bound the head-query rate. Default 5s. */
   headTtlMs?: number
   /**
-   * Time-box each head poll — the internal freshness polls and the aggregate {@link
-   * FallbackClient.getHead} alike. A head poll is `await`ed on the batch-critical path, so an
+   * Time-box each internal freshness poll. A head poll is `await`ed on the batch-critical path, so an
    * unbounded one lets a sick standby — TCP up but not responding — stall an otherwise-healthy active
-   * source. A poll exceeding this counts as a liveness failure and returns no head. Default 500ms;
-   * `null` disables the guard and relies on the underlying client's own request timeout.
+   * source. A poll exceeding this counts as a liveness failure and returns no head. The aggregate
+   * {@link FallbackClient.getHead} waits for the first answer without a limit, then gives the other
+   * sources this long. Default 500ms; `null` disables the guard and relies on the underlying client's
+   * own request timeout.
    */
   headPollTimeoutMs?: number | null
   /** Injectable clock (ms) for deterministic tests. Defaults to `Date.now`. */

@@ -52,3 +52,21 @@ export function delay(ms: number): { promise: Promise<void>; cancel: () => void 
 
   return { promise, cancel: () => cancel() }
 }
+
+/** Resolves after `ms`, or as soon as `signal` aborts. */
+export function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+}
