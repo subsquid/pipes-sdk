@@ -87,7 +87,7 @@ Use the ABI type generator when you need typed events for a contract that is not
 Generated files should live under \`src/contracts/\` so they can be imported in \`src/index.ts\`.
 
 \`\`\`sh
-npx @subsquid/evm-typegen@latest src/contracts \\
+npx @subsquid/evm-typegen@^4 src/contracts \\
   0x000000000004444c5dc75cB358380D2e3dE08A90 \\
   --chain-id 1
 \`\`\`

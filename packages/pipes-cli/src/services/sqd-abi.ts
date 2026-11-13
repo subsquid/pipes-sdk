@@ -123,7 +123,10 @@ class EvmAbiService extends AbiService {
     const outputDir = `${projectPath}/src/contracts/`
 
     for (const address of contractAddresses) {
-      const cmd = `npx --yes @subsquid/evm-typegen@latest ${outputDir} ${address} ${chainId ? `--chain-id ${chainId}` : ''}`
+      // Pinned to 4.x: typegen 5 emits a directory per contract against evm-abi 1.x,
+      // while the templates import `./contracts/<address>.js` and the project depends
+      // on evm-abi 0.3.x (the version @subsquid/pipes is built against).
+      const cmd = `npx --yes @subsquid/evm-typegen@^4 ${outputDir} ${address} ${chainId ? `--chain-id ${chainId}` : ''}`
 
       execSync(cmd, { stdio: 'ignore' })
     }
