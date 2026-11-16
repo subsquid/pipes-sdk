@@ -138,16 +138,6 @@ export type MockChainPortal = MockPortal & {
   fail(fault: MockPortalFault): void
 }
 
-/**
- * @deprecated Use `mockPortal({ blocks, ... })`: it answers both `/stream` and `/finalized-stream`.
- * For an exact response list, use `mockPortal(responses, { finalized: true })`.
- */
-export async function finalizedMockPortal(mockResponses: MockResponse[]) {
-  return mockPortal(mockResponses, {
-    finalized: true,
-  })
-}
-
 // The list form comes first and again last, so code written against the list-only signature keeps
 // compiling: inference inside an argument (`mockPortal(items.map(...))`) settles on the first
 // overload, while `Parameters<typeof mockPortal>` and `ReturnType` read the last one.

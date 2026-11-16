@@ -360,6 +360,15 @@ This is an API and state compatibility break:
 encoded value requires, the table DDL, the subscription flags, the IAM grants for a subscription
 that lives in a different project than the topic, and the limits that come with the design.
 
+### 16. Deprecated mock portal helpers removed
+
+Two testing helpers from the 1.0 betas are removed:
+
+- `mockEvmPortalStream({ blocks })` from `@subsquid/pipes/testing/evm`: use `mockPortal({ blocks })`
+  from `@subsquid/pipes/testing`. It answers each query from the blocks it holds.
+- `finalizedMockPortal(responses)` from `@subsquid/pipes/testing`: use
+  `mockPortal(responses, { finalized: true })`.
+
 ---
 
 ## New features

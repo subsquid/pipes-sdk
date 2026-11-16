@@ -14,7 +14,7 @@ import { ForkException } from '~/portal-client/index.js'
 import { MOCK_GENESIS_TIMESTAMP, mockBlock } from './evm/mock-block.js'
 import { withPortal } from './portal-fixture.js'
 import { blockDecoder } from './test-block-stream.js'
-import { type MockChainPortal, type MockPortal, finalizedMockPortal, mockPortal } from './test-portal.js'
+import { type MockChainPortal, type MockPortal, mockPortal } from './test-portal.js'
 
 const A = '0x00000000000000000000000000000000000000aa'
 const B = '0x00000000000000000000000000000000000000bb'
@@ -577,14 +577,5 @@ describe('mockPortal over a response list', () => {
 
     expect(statuses).toEqual([204, 200, 500])
     expect(body).toBe(JSON.stringify({ header }) + '\n')
-  })
-
-  it('answers only the finalized stream through the deprecated finalizedMockPortal', async () => {
-    portal = await finalizedMockPortal([{ statusCode: 204 }])
-
-    const hot = await post(portal, 'stream', { fromBlock: 1 })
-    const finalized = await post(portal, 'finalized-stream', { fromBlock: 1 })
-
-    expect([hot.status, finalized.status]).toEqual([404, 204])
   })
 })
