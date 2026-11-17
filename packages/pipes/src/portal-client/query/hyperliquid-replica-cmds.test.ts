@@ -67,20 +67,38 @@ const orderAction = {
 describe('Hyperliquid replica commands block header', () => {
   const schema = getBlockSchema({ block: ALL_HEADER_FIELDS })
 
-  it('decodes every header field and passes hardfork through unchanged', () => {
+  it('decodes every header field', () => {
     expect(cast(schema, { header }).header).toEqual(header)
   })
 
   it('decodes a null hardfork to null', () => {
     expect(cast(schema, { header: { ...header, hardfork: null } }).header.hardfork).toBeNull()
   })
+
+  it('rejects a hardfork without version and round', () => {
+    const hardforkOnly = getBlockSchema({ block: { hardfork: true } })
+
+    expect(() => cast(hardforkOnly, { header: { hardfork: {} } })).toThrow()
+  })
 })
 
 describe('Hyperliquid replica commands action', () => {
-  it('passes action, signature and response through unchanged', () => {
+  it('decodes the signature and passes action and response through unchanged', () => {
     const schema = getBlockSchema({ action: ALL_ACTION_FIELDS })
 
     expect(cast(schema, { header: {}, actions: [orderAction] }).actions).toEqual([orderAction])
+  })
+
+  it('rejects a signature without r, s and v', () => {
+    const schema = getBlockSchema({ action: { signature: true } })
+
+    expect(() => cast(schema, { header: {}, actions: [{ signature: {} }] })).toThrow()
+  })
+
+  it('rejects a signature whose v is not a number', () => {
+    const schema = getBlockSchema({ action: { signature: true } })
+
+    expect(() => cast(schema, { header: {}, actions: [{ signature: { r: '0x01', s: '0x02', v: '27' } }] })).toThrow()
   })
 
   it('rejects an action that is not an object', () => {

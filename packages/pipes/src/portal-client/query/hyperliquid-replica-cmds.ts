@@ -24,7 +24,7 @@ import {
   project,
 } from './common.js'
 
-/** Hard fork marker of a block. Raw JSON passthrough; may be null. */
+/** Hard fork marker of a block; may be null. */
 export type Hardfork = {
   version: number
   round: number
@@ -170,14 +170,14 @@ const BlockHeaderShape: ObjectValidatorShape<BlockHeaderFields> = {
   parentRound: NAT,
   proposer: BYTES,
   timestamp: NAT,
-  hardfork: nullable(ANY_OBJECT) as Validator<Hardfork | null, unknown>,
+  hardfork: nullable(object({ version: NAT, round: NAT })),
 }
 
 const ActionShape: ObjectValidatorShape<ActionFields> = {
   actionIndex: NAT,
   user: nullable(BYTES),
   action: ANY_OBJECT as Validator<ActionPayload, unknown>,
-  signature: ANY_OBJECT as Validator<ActionSignature, unknown>,
+  signature: object({ r: BYTES, s: BYTES, v: NAT }),
   nonce: nullable(NAT),
   vaultAddress: nullable(BYTES),
   status: oneOf({
