@@ -42,16 +42,19 @@ function ctxFor(
 
 function makeStore(persistedFinalized: { number: number; hash: string }) {
   const inserts: any[] = []
+  const row = {
+    current: JSON.stringify(block(50)),
+    finalized: JSON.stringify(persistedFinalized),
+    rollback_chain: '[]',
+    timestamp: '2026-10-28T10:00:00.000Z',
+  }
   const store = {
     client: { connectionParams: { database: 'default' } },
     query: async () => ({
-      json: async () => [
-        {
-          current: JSON.stringify(block(50)),
-          finalized: JSON.stringify(persistedFinalized),
-          timestamp: '2026-10-28T10:00:00.000Z',
-        },
-      ],
+      json: async () => [row],
+      stream: async function* () {
+        yield [{ json: () => row }]
+      },
     }),
     insert: async (args: any) => {
       inserts.push(args)
@@ -346,7 +349,7 @@ describe('ClickhouseState — row stamps', () => {
     await state.getCursor()
     await state.saveCursor(ctxFor(block(60), block(55), []))
 
-    expect(inserts[0].values[0].timestamp).toBe(stored + 1)
+    expect(inserts[0].values[0].timestamp).toBe(new Date(stored + 1).toISOString())
   })
 
   withClockBehind('stamps a run past the legacy rows it migrated', async ({ stored }) => {
@@ -358,7 +361,7 @@ describe('ClickhouseState — row stamps', () => {
     await state.saveCursor(ctxFor(block(60), block(55), []))
     const [, cursorInsert] = inserts
 
-    expect(cursorInsert.values[0].timestamp).toBe(stored + 1)
+    expect(cursorInsert.values[0].timestamp).toBe(new Date(stored + 1).toISOString())
   })
 })
 
@@ -447,7 +450,97 @@ describe('ClickhouseState — start cursor', () => {
     await state.saveCursor(ctxFor(block(9), block(2), []))
     const stamps = inserts.map((insert) => insert.values[0].timestamp)
 
-    expect(stamps).toEqual([now, now + 1, now + 2])
+    expect(stamps).toEqual([now, now + 1, now + 2].map((ms) => new Date(ms).toISOString()))
+  })
+
+  it('sends each stamp as an ISO string for the best effort input format, not as a number', async () => {
+    const { store, inserts } = makeStore(block(100))
+    const state = new ClickhouseState(store as any, {})
+    const isoStamp = expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+
+    await state.saveStartCursor({ from: 0, to: 5 })
+    await state.saveCursor(ctxFor(block(5), block(2), []))
+    await state.saveForkCursor(block(4))
+    const stamps = inserts.map((insert) => insert.values[0].timestamp)
+    const formats = inserts.map((insert) => insert.clickhouse_settings?.date_time_input_format)
+
+    expect(stamps).toEqual([isoStamp, isoStamp, isoStamp])
+    expect(formats).toEqual(['best_effort', 'best_effort', 'best_effort'])
+  })
+})
+
+describe('ClickhouseState — stamps that ClickHouse 26.8 misread', () => {
+  const rowAt = (timestamp: string) => ({
+    current: JSON.stringify(block(50)),
+    finalized: JSON.stringify(block(40)),
+    timestamp,
+  })
+
+  // A misread stamp prints as the last day the server shows: in 9999 on 26.8, in 2299 on 25.10
+  it.each(['9999-12-31T23:59:59.000Z', '2299-12-31T23:23:20.000Z'])(
+    'refuses to start from a newest row stamped %s, and writes nothing',
+    async (stamp) => {
+      const { store, inserts, removals } = keyedStore({ 'pipe-x': rowAt(stamp) })
+      const state = new ClickhouseState(store as any, {})
+      state.bindCursorKey('pipe-x')
+
+      await expect(state.getCursor()).rejects.toMatchObject({ code: 'E2012' })
+      expect(inserts).toEqual([])
+      expect(removals).toEqual([])
+    },
+  )
+
+  it('refuses misread rows of the legacy id before it migrates them', async () => {
+    const { store, inserts } = keyedStore({ stream: rowAt('9999-12-31T23:59:59.000Z') })
+    const state = new ClickhouseState(store as any, {})
+    state.bindCursorKey('pipe-x', { warn: () => {} } as any)
+
+    await expect(state.getCursor()).rejects.toThrow('holds rows of "stream"')
+    expect(inserts).toEqual([])
+  })
+
+  it('refuses to persist a fork cursor over a misread row', async () => {
+    const { store, inserts } = keyedStore({ 'pipe-x': rowAt('9999-12-31T23:59:59.000Z') })
+    const state = new ClickhouseState(store as any, {})
+    state.bindCursorKey('pipe-x')
+
+    await expect(state.saveForkCursor(block(45))).rejects.toMatchObject({ code: 'E2012' })
+    expect(inserts).toEqual([])
+  })
+
+  it('gives the statements that move the rows of its id in its table, as many as it keeps', async () => {
+    const { store } = keyedStore({ "it's": rowAt('9999-12-31T23:59:59.000Z') })
+    const state = new ClickhouseState(store as any, { id: "it's", table: 'progress', maxRows: 500 })
+
+    const refusal = await state.getCursor().catch((error: Error) => error.message)
+
+    expect(refusal).toMatchInlineSnapshot(`
+      "The sync table "default"."progress" holds rows of "it's" with timestamps that ClickHouse 26.8 and later misread.
+      An older SDK version sent each timestamp as a number of milliseconds, and the server stored it as seconds.
+      The pipe cannot resume from these rows, so it stopped.
+
+      Stop every pipe that writes rows of "it's" to this table, then run these statements once:
+
+        INSERT INTO "default"."progress" (id, current, finalized, rollback_chain, timestamp, sign)
+        SELECT id, current, finalized, rollback_chain,
+               fromUnixTimestamp64Milli(toUnixTimestamp64Milli(now64(3)) - row_number() OVER newest_first), sign
+        FROM (
+          SELECT * FROM "default"."progress"
+          WHERE id = 'it\\'s' AND toUnixTimestamp64Milli(timestamp) > 7258118400000 AND sign = 1
+          ORDER BY timestamp DESC, JSONExtractInt(current, 'number')
+          LIMIT 500
+        )
+        WINDOW newest_first AS (ORDER BY timestamp DESC, JSONExtractInt(current, 'number'));
+
+        DELETE FROM "default"."progress"
+        WHERE id = 'it\\'s' AND toUnixTimestamp64Milli(timestamp) > 7258118400000;
+
+      The first statement copies the newest 500 rows, the number that the pipe keeps, to the present time.
+      The rows keep their order. The second statement removes the misread rows.
+      Then start the pipe again: it resumes from the newest row.
+
+      See: https://docs.sqd.dev/en/sdk/pipes-sdk/errors/E2012"
+    `)
   })
 })
 

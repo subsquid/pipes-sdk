@@ -40,8 +40,8 @@ describe('Clickhouse state', () => {
   beforeEach(async () => {
     portal = undefined
     // Ensure DB is empty before each test
-    await client.query({ query: 'DROP DATABASE IF EXISTS default SYNC' })
-    await client.query({ query: 'CREATE DATABASE default' })
+    await client.command({ query: 'DROP DATABASE IF EXISTS default SYNC' })
+    await client.command({ query: 'CREATE DATABASE default' })
   })
 
   describe('progress table', () => {
@@ -416,8 +416,8 @@ describe('Clickhouse state', () => {
       // and cleanup paths used the unqualified table name and would have written to
       // the client's default DB instead of the requested one.
       const customDb = 'pipes_custom_db'
-      await client.query({ query: `DROP DATABASE IF EXISTS ${customDb} SYNC` })
-      await client.query({ query: `CREATE DATABASE ${customDb}` })
+      await client.command({ query: `DROP DATABASE IF EXISTS ${customDb} SYNC` })
+      await client.command({ query: `CREATE DATABASE ${customDb}` })
 
       try {
         portal = await mockPortal([
@@ -462,15 +462,15 @@ describe('Clickhouse state', () => {
           }),
         ).rejects.toThrow(/UNKNOWN_TABLE|doesn't exist|Unknown table/i)
       } finally {
-        await client.query({ query: `DROP DATABASE IF EXISTS ${customDb} SYNC` })
+        await client.command({ query: `DROP DATABASE IF EXISTS ${customDb} SYNC` })
       }
     })
   })
 
   describe('forks', () => {
     beforeEach(async () => {
-      await client.query({ query: 'DROP TABLE IF EXISTS test' })
-      await client.query({
+      await client.command({ query: 'DROP TABLE IF EXISTS test' })
+      await client.command({
         query: `
             CREATE TABLE IF NOT EXISTS test
             (
@@ -1168,6 +1168,225 @@ describe('clickhouseTarget cursor order', () => {
       await runPipe(chain, client, 3)
 
       expect(chain.requests[thirdRun].query.fromBlock).toBe(3)
+    },
+  )
+
+  /**
+   * Leaves the sync table as an SDK version before the ISO stamps left it on ClickHouse 26.8 and later.
+   * The rows above each block of `restartedAt` are from a restart of a build that continued the stamps
+   * from the stored row.
+   */
+  async function storeAsOlderVersion(client: ClickHouseClient, restartedAt: number[] = []) {
+    const query_params = { restartedAt }
+    const restarts = `arrayCount(block -> JSONExtractInt(current, 'number') > block, {restartedAt:Array(Int64)})`
+
+    await client.command({ query: 'CREATE TABLE sync_ms AS sync' })
+    await client.command({ query: 'INSERT INTO sync_ms SELECT * FROM sync' })
+    await client.command({ query: 'TRUNCATE TABLE sync' })
+
+    // No merges: a merge keeps only one of two rows at one stamp
+    await client.command({
+      query: `
+        ALTER TABLE sync
+        MODIFY SETTING max_bytes_to_merge_at_max_space_in_pool = 1, max_bytes_to_merge_at_min_space_in_pool = 1
+      `,
+    })
+
+    // The server stored each millisecond number as seconds
+    await client.command({
+      query: `
+        INSERT INTO sync
+        SELECT id, current, finalized, rollback_chain, fromUnixTimestamp64Milli(toUnixTimestamp64Milli(timestamp) * 1000), sign
+        FROM sync_ms
+        WHERE ${restarts} = 0
+      `,
+      query_params,
+    })
+
+    // An older version read the stamp of the newest row as the server prints it: clamped
+    const newest = await client.query({
+      query: 'SELECT timestamp FROM sync ORDER BY timestamp DESC LIMIT 1',
+      format: 'JSONEachRow',
+      clickhouse_settings: { date_time_output_format: 'iso' },
+    })
+    const [{ timestamp }] = await newest.json<{ timestamp: string }>()
+    const printed = Date.parse(timestamp)
+
+    // Each restart continued from the printed stamp, so two restarts used the same stamps
+    for (let restart = 1; restart <= restartedAt.length; restart++) {
+      await client.command({
+        query: `
+          INSERT INTO sync
+          SELECT id, current, finalized, rollback_chain,
+                 fromUnixTimestamp64Milli((${printed} + row_number() OVER (ORDER BY timestamp)) * 1000), sign
+          FROM sync_ms
+          WHERE ${restarts} = ${restart}
+        `,
+        query_params,
+      })
+    }
+
+    // A cancel row took the printed stamp of its row, so it matches no row
+    await client.command({
+      query: `
+        INSERT INTO sync
+        SELECT id, current, finalized, rollback_chain, fromUnixTimestamp64Milli(${printed}), -1
+        FROM sync_ms
+        ORDER BY timestamp
+        LIMIT 1
+      `,
+    })
+    await client.command({ query: 'DROP TABLE sync_ms' })
+  }
+
+  /** The sync rows as stored, by their stored stamp, which a misread row prints clamped. */
+  async function syncRows(client: ClickHouseClient) {
+    const res = await client.query({
+      query: `
+        SELECT id, current, finalized, rollback_chain, toUnixTimestamp64Milli(timestamp) AS stamp, sign
+        FROM sync
+        ORDER BY stamp, id, sign
+      `,
+      format: 'JSONEachRow',
+    })
+
+    return res.json()
+  }
+
+  /** The sync rows from the oldest to the newest, without their stamps. */
+  async function rowsInOrder(client: ClickHouseClient) {
+    const res = await client.query({
+      query: 'SELECT id, current, finalized, rollback_chain, sign FROM sync ORDER BY timestamp, id, sign',
+      format: 'JSONEachRow',
+    })
+
+    return res.json()
+  }
+
+  async function refusalOf(run: Promise<unknown>): Promise<Error> {
+    return run.then(
+      () => new Error('the pipe did not stop'),
+      (error: Error) => error,
+    )
+  }
+
+  /** Runs the SQL statements that an error message gives. */
+  async function runStatementsOf(client: ClickHouseClient, error: Error) {
+    const statements = error.message.match(/^ {2}(INSERT|DELETE)[^;]+;$/gm) ?? []
+
+    for (const query of statements) {
+      await client.command({ query: query.replace(/;$/, '') })
+    }
+
+    return statements.length
+  }
+
+  withClock(
+    'stops, and changes nothing, when ClickHouse 26.8 stored the stamps of an older release as seconds',
+    async ({ portal, client }) => {
+      const chain = await portal({ latest: 3 })
+
+      await runPipe(chain, client, 1)
+      await storeAsOlderVersion(client)
+      const stored = await syncRows(client)
+      const restart = runPipe(chain, client, 2)
+
+      await expect(restart).rejects.toMatchObject({ code: 'E2012' })
+      expect(await syncRows(client)).toEqual(stored)
+    },
+  )
+
+  withClock(
+    'resumes from the last commit after the statements of the error put the rows back in their order',
+    async ({ portal, client }) => {
+      const chain = await portal({ latest: 3 })
+
+      await runPipe(chain, client, 1)
+      const written = await rowsInOrder(client)
+      await storeAsOlderVersion(client)
+      const refusal = await refusalOf(runPipe(chain, client, 2))
+      const statements = await runStatementsOf(client, refusal)
+      const restored = await rowsInOrder(client)
+      await runPipe(chain, client, 2)
+      const thirdRun = chain.requests.length
+      await runPipe(chain, client, 3)
+
+      expect(statements).toBe(2)
+      expect(restored).toEqual(written)
+      expect(chain.requests[thirdRun].query.fromBlock).toBe(3)
+    },
+  )
+
+  withClock(
+    'resumes from the last commit when an older build restarted on the misread stamps',
+    async ({ portal, client }) => {
+      const chain = await portal({ latest: 3 })
+
+      await runPipe(chain, client, 1)
+      await runPipe(chain, client, 2)
+      const written = await rowsInOrder(client)
+      await storeAsOlderVersion(client, [1])
+      const refusal = await refusalOf(runPipe(chain, client, 3))
+      await runStatementsOf(client, refusal)
+      const restored = await rowsInOrder(client)
+      const resumed = chain.requests.length
+      await runPipe(chain, client, 3)
+
+      expect(restored).toEqual(written)
+      expect(chain.requests[resumed].query.fromBlock).toBe(3)
+    },
+  )
+
+  // Two restarts wrote at the same stamps, so the stamps cannot tell which row is newer
+  withClock(
+    'resumes from the lower block when two restarts of an older build left two rows at the newest stamp',
+    async ({ portal, client }) => {
+      const chain = await portal({ latest: 4 })
+
+      await runPipe(chain, client, 1)
+      await runPipe(chain, client, 2)
+      await runPipe(chain, client, 3)
+      await storeAsOlderVersion(client, [1, 2])
+      const refusal = await refusalOf(runPipe(chain, client, 4))
+      await runStatementsOf(client, refusal)
+      const resumed = chain.requests.length
+      await runPipe(chain, client, 4)
+
+      expect(chain.requests[resumed].query.fromBlock).toBe(3)
+    },
+  )
+
+  withClock('copies only the newest rows, as many as the pipe keeps', async ({ portal, client }) => {
+    const chain = await portal({ latest: 3 })
+
+    await runPipe(chain, client, 1)
+    await runPipe(chain, client, 2)
+    const written = await rowsInOrder(client)
+    const newest = written.slice(-1)
+    await storeAsOlderVersion(client, [1])
+    const state = new ClickhouseState(new ClickhouseStore(client), { id: 'cursor-order', maxRows: 1 })
+    const refusal = await refusalOf(state.getCursor())
+    await runStatementsOf(client, refusal)
+
+    expect(await rowsInOrder(client)).toEqual(newest)
+  })
+
+  withClock(
+    'copies the lower block of two rows at the newest stamp when the pipe keeps one row',
+    async ({ portal, client }) => {
+      const chain = await portal({ latest: 3 })
+
+      await runPipe(chain, client, 1)
+      await runPipe(chain, client, 2)
+      const written = await rowsInOrder(client)
+      const lowerBlock = written.slice(-1)
+      await runPipe(chain, client, 3)
+      await storeAsOlderVersion(client, [1, 2])
+      const state = new ClickhouseState(new ClickhouseStore(client), { id: 'cursor-order', maxRows: 1 })
+      const refusal = await refusalOf(state.getCursor())
+      await runStatementsOf(client, refusal)
+
+      expect(await rowsInOrder(client)).toEqual(lowerBlock)
     },
   )
 })

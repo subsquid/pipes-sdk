@@ -39,4 +39,6 @@ export const CLICKHOUSE_ERROR_CODES = {
   ROLLBACK_METADATA_UNAVAILABLE: 'E2010',
   /** Persisted cursor state cannot be interpreted safely. */
   STATE_CORRUPT: 'E2011',
+  /** The sync table holds rows of an older SDK version whose timestamps ClickHouse 26.8 and later misread. */
+  STATE_MISREAD_TIMESTAMPS: 'E2012',
 } as const

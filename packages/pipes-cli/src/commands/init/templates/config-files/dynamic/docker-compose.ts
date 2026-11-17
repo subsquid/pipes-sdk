@@ -48,7 +48,7 @@ const indexerService = `{{projectName}}:
     profiles: ["with-pipeline"]`
 
 const clickhouseService = `clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:26.8
     ports:
       - "{{port}}:{{port}}"
     environment:

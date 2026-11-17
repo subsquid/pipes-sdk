@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v3_swaps (
     block_number UInt32,
     tx_hash String,
     log_index UInt32,
-    timestamp DateTime(3),
+    timestamp DateTime,
     pool String,
     token0 String,
     token1 String,

@@ -36,6 +36,19 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # 26.8 and later read a number in a DateTime64 column as seconds, and insert asynchronously by default
+      clickhouse-26:
+        image: clickhouse/clickhouse-server:26.8-alpine
+        ports:
+          - 8124:8123
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: default
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
       postgres:
         image: postgres:18-alpine
         env:
@@ -76,6 +89,14 @@ jobs:
           TEST_CLICKHOUSE_PASSWORD: default
           TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/postgres
         run: pnpm test
+
+      - name: Run the ClickHouse tests on ClickHouse 26.8
+        working-directory: packages/pipes
+        env:
+          TEST_CLICKHOUSE_URL: http://localhost:8124
+          TEST_CLICKHOUSE_USERNAME: default
+          TEST_CLICKHOUSE_PASSWORD: default
+        run: pnpm vitest run src/targets/clickhouse conformance/clickhouse
 
       - name: Run pipes-cli tests
         working-directory: packages/pipes-cli
