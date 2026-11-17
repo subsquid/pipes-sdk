@@ -1,7 +1,7 @@
-import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~/core/index.js'
+import { QueryAwareTransformer, SetupQueryFn, Subset } from '~/core/index.js'
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 
-import { QueryBuilder, Range, RequestOptions } from '../core/query-builder.js'
+import { QueryBuilder, RequestOptions } from '../core/query-builder.js'
 import * as api from '../portal-client/query/hyperliquid-fills.js'
 
 export type HyperliquidFillsPortalData<F extends api.FieldSelection> = api.Block<F>[]
@@ -24,21 +24,6 @@ export class HyperliquidFillsQueryBuilder<F extends api.FieldSelection = {}> ext
     this.fields = mergeDeep(this.fields, fields)
 
     return this as unknown as HyperliquidFillsQueryBuilder<F & T>
-  }
-
-  private addRequest(type: keyof api.DataRequest, options: RequestOptions<any>): this {
-    this.requests.push({
-      range: parsePortalRange(options.range),
-      request: {
-        [type]: [{ ...options.request }],
-      },
-    })
-    return this
-  }
-
-  includeAllBlocks(range?: Range): this {
-    this.requests.push({ range: range ?? { from: 0 }, request: { includeAllBlocks: true } })
-    return this
   }
 
   addFillRequest(options: RequestOptions<api.FillRequest>): this {

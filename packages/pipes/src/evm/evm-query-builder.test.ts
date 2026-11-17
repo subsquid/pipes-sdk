@@ -282,3 +282,11 @@ describe('EvmQuery', () => {
     })
   })
 })
+
+describe('EvmQueryBuilder.includeAllBlocks', () => {
+  it('includeAllBlocks requests every block in the range', () => {
+    const builder = new EvmQueryBuilder().includeAllBlocks({ from: 10, to: 20 })
+
+    expect(builder.getRequests()).toEqual([{ range: { from: 10, to: 20 }, request: { includeAllBlocks: true } }])
+  })
+})

@@ -303,3 +303,11 @@ describe('QueryBuilder.mergeDataRequests key order', () => {
     expect(Object.keys(builder.mergeDataRequests(...requests))).toEqual([...families, 'includeAllBlocks'])
   })
 })
+
+describe('QueryBuilder.includeAllBlocks', () => {
+  it('includeAllBlocks starts at block 0 without a range', () => {
+    const builder = new TestQueryBuilder().includeAllBlocks()
+
+    expect(builder.getRequests()).toEqual([{ range: { from: 0 }, request: { includeAllBlocks: true } }])
+  })
+})

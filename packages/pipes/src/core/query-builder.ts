@@ -103,6 +103,23 @@ export abstract class QueryBuilder<F extends {}, R extends object = any> {
     return this
   }
 
+  /** Requests every block in `range`, including blocks that no data request matches. */
+  includeAllBlocks(range?: Range): this {
+    this.requests.push({ range: range ?? { from: 0 }, request: { includeAllBlocks: true } as R })
+
+    return this
+  }
+
+  /** Adds one filter of the `type` family, scoped to `options.range`. */
+  protected addRequest(type: keyof R, options: RequestOptions<object>): this {
+    this.requests.push({
+      range: parsePortalRange(options.range),
+      request: { [type]: [{ ...options.request }] } as R,
+    })
+
+    return this
+  }
+
   /** Merges another query builder's requests and fields into this one. */
   merge(query?: QueryBuilder<F, R>) {
     if (!query) return this

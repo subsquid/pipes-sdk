@@ -1,7 +1,7 @@
-import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~/core/index.js'
+import { QueryAwareTransformer, SetupQueryFn, Subset } from '~/core/index.js'
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 
-import { QueryBuilder, Range, RequestOptions } from '../core/query-builder.js'
+import { QueryBuilder, RequestOptions } from '../core/query-builder.js'
 import * as solana from '../portal-client/query/solana.js'
 import { SolanaPortalData } from './solana-portal-source.js'
 
@@ -30,21 +30,6 @@ export class SolanaQueryBuilder<F extends solana.FieldSelection = {}> extends Qu
     this.fields = mergeDeep(this.fields, fields)
 
     return this as unknown as SolanaQueryBuilder<F & T>
-  }
-
-  private addRequest(type: keyof solana.DataRequest, options: RequestOptions<any>): this {
-    this.requests.push({
-      range: parsePortalRange(options.range),
-      request: {
-        [type]: [{ ...options.request }],
-      },
-    })
-    return this
-  }
-
-  includeAllBlocks(range?: Range): this {
-    this.requests.push({ range: range ?? { from: 0 }, request: { includeAllBlocks: true } })
-    return this
   }
 
   addLogRequest(options: RequestOptions<solana.LogRequest>): this {

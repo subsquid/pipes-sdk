@@ -1,4 +1,4 @@
-import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~/core/index.js'
+import { QueryAwareTransformer, SetupQueryFn, Subset } from '~/core/index.js'
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 import * as evm from '~/portal-client/query/evm.js'
 
@@ -31,16 +31,6 @@ export class EvmQueryBuilder<F extends evm.FieldSelection = {}> extends QueryBui
     this.fields = mergeDeep(this.fields, fields as object)
 
     return this as unknown as EvmQueryBuilder<F & T>
-  }
-
-  private addRequest(type: keyof evm.DataRequest, options: RequestOptions<any>): this {
-    this.requests.push({
-      range: parsePortalRange(options.range),
-      request: {
-        [type]: [{ ...options.request }],
-      },
-    })
-    return this
   }
 
   addLogRequest(options: RequestOptions<evm.LogRequest>): this {
