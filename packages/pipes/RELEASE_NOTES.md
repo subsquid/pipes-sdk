@@ -702,6 +702,36 @@ recommended entry point for a single portal.
 `evmQuery().includeAllBlocks(range?)` asks the Portal for every block in the range, including blocks
 that no request matches.
 
+### 13. Hyperliquid replica commands — `@subsquid/pipes/hyperliquid`
+
+`hyperliquidReplicaCmdsPortalStream` streams HyperCore L1 commands from the `hyperliquid-replica-cmds`
+dataset: orders, cancels, modifies, transfers and other actions, each with the node's response.
+Blocks decode as `{ header, actions }`.
+
+```ts
+import { hyperliquidReplicaCmdsPortalStream, hyperliquidReplicaCmdsQuery } from '@subsquid/pipes/hyperliquid'
+
+hyperliquidReplicaCmdsPortalStream({
+  id: 'user-actions',
+  portal: 'https://portal.sqd.dev/datasets/hyperliquid-replica-cmds',
+  outputs: hyperliquidReplicaCmdsQuery()
+    .addFields({
+      block: { number: true, timestamp: true },
+      action: { actionIndex: true, user: true, action: true, status: true },
+    })
+    .addActionRequest({
+      request: { user: ['0x6978e7917dffd1f1815c858ca1528e51a3af1cb5'] },
+      range: { from: 1_223_800_000, to: 1_223_802_000 },
+    }),
+})
+```
+
+Request methods: `addActionRequest`, `addOrderActionRequest`, `addCancelActionRequest`,
+`addCancelByCloidActionRequest` and `addBatchModifyActionRequest`.
+
+The wire types are exported as `replicaCmdsApi`, and the fills types as `fillsApi`. `api` still names the
+fills types but is deprecated.
+
 ---
 
 ## Fixes
