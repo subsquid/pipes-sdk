@@ -38,11 +38,11 @@ async function writeSync({ admin, name }: Database, rows: SyncRow[]) {
       current: row.current,
       finalized: row.finalized ?? '',
       rollback_chain: row.chain ?? '[]',
-      timestamp: row.written,
+      timestamp: new Date(row.written).toISOString(),
       sign: row.sign ?? 1,
     })),
     format: 'JSONEachRow',
-    clickhouse_settings: UNFOLDED,
+    clickhouse_settings: { ...UNFOLDED, date_time_input_format: 'best_effort' },
   })
 }
 

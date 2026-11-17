@@ -22,7 +22,7 @@ const {{{decoderId}}} = evmEventDecoder({
     blockNumber: transfer.block.number,
     txHash: transfer.rawEvent.transactionHash,
     logIndex: transfer.rawEvent.logIndex,
-    timestamp: transfer.timestamp.getTime(),
+    timestamp: transfer.timestamp.getTime() / 1000,
     from: transfer.event.from,
     to: transfer.event.to,
     value: transfer.event.value,

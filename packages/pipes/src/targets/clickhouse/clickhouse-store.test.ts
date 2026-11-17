@@ -54,7 +54,7 @@ describe('Clickhouse store', () => {
   it('should work with uint128/uint256 ', async () => {
     const store = new ClickhouseStore(client)
 
-    await store.query({
+    await store.command({
       query: `
         CREATE TABLE big_numbers
         (
@@ -104,7 +104,7 @@ describe('Clickhouse store', () => {
 
   describe('rollback netting', () => {
     const createEventsTable = async (store: ClickhouseStore, table = 'events') => {
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE ${table}
           (
@@ -215,14 +215,14 @@ describe('Clickhouse store', () => {
       const store = new ClickhouseStore(client)
       await createEventsTable(store)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE totals (account String, total Int64)
           ENGINE = SummingMergeTree
           ORDER BY (account)
         `,
       })
-      await store.query({
+      await store.command({
         query: `
           CREATE MATERIALIZED VIEW totals_mv TO totals AS
           SELECT account, sum(value * sign) AS total
@@ -253,7 +253,7 @@ describe('Clickhouse store', () => {
       const store = new ClickhouseStore(client)
 
       // `_cnt` broke the original alias, `_sqd_net` forces the collision loop to rename
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE aliased
           (
@@ -288,7 +288,7 @@ describe('Clickhouse store', () => {
 
       // None of the three can round-trip through the netting query: ALIAS and MATERIALIZED
       // columns cannot be inserted back, EPHEMERAL columns cannot even be selected
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE special_columns
           (
@@ -323,7 +323,7 @@ describe('Clickhouse store', () => {
     it('works on VersionedCollapsingMergeTree', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE versioned
           (
@@ -357,9 +357,9 @@ describe('Clickhouse store', () => {
     it('works with database-qualified table names', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({ query: 'DROP DATABASE IF EXISTS rollback_test SYNC' })
-      await store.query({ query: 'CREATE DATABASE rollback_test' })
-      await store.query({
+      await store.command({ query: 'DROP DATABASE IF EXISTS rollback_test SYNC' })
+      await store.command({ query: 'CREATE DATABASE rollback_test' })
+      await store.command({
         query: `
           CREATE TABLE rollback_test.events
           (
@@ -386,13 +386,13 @@ describe('Clickhouse store', () => {
 
       expect(await selectFinal(store, 'rollback_test.events')).toHaveLength(0)
 
-      await store.query({ query: 'DROP DATABASE rollback_test SYNC' })
+      await store.command({ query: 'DROP DATABASE rollback_test SYNC' })
     })
 
     it('works with a quoted table name containing a dot', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE \`my.events\`
           (
@@ -423,7 +423,7 @@ describe('Clickhouse store', () => {
     it('round-trips Decimal columns exactly in cancel rows', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE decimals
           (
@@ -494,7 +494,7 @@ describe('Clickhouse store', () => {
     it('accepts double-quoted qualified names, as used by ClickhouseState', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE quoted (id UInt64, sign Int8 DEFAULT 1)
           ENGINE = CollapsingMergeTree(sign)
@@ -515,7 +515,7 @@ describe('Clickhouse store', () => {
       const warn = vi.fn()
       store.bindLogger({ warn } as any)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE replacing (block_number UInt32, value Int64)
           ENGINE = ReplacingMergeTree
@@ -555,7 +555,7 @@ describe('Clickhouse store', () => {
     it('rejects a collapsing table whose collapse column is not "sign"', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE no_sign (id UInt64, flag Int8)
           ENGINE = CollapsingMergeTree(flag)
@@ -571,7 +571,7 @@ describe('Clickhouse store', () => {
     it('rejects a table with a stray "sign" column that the engine does not collapse on', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE stray_sign (id UInt64, flag Int8, sign Int8 DEFAULT 1)
           ENGINE = CollapsingMergeTree(flag)
@@ -587,7 +587,7 @@ describe('Clickhouse store', () => {
     it('removeAllRowsByQuery performs no engine check — the caller owns the semantics', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE replacing_by_query (id UInt64, sign Int8 DEFAULT 1)
           ENGINE = ReplacingMergeTree
@@ -614,14 +614,14 @@ describe('Clickhouse store', () => {
     it('rejects a Distributed table, naming the underlying local table', async () => {
       const store = new ClickhouseStore(client)
 
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE dist_local (id UInt64, sign Int8 DEFAULT 1)
           ENGINE = CollapsingMergeTree(sign)
           ORDER BY (id)
         `,
       })
-      await store.query({
+      await store.command({
         query: `CREATE TABLE dist AS dist_local ENGINE = Distributed('default', '${TEST_DB}', 'dist_local')`,
       })
 
@@ -648,7 +648,7 @@ describe('Clickhouse store', () => {
 
     const createUnorderedTable = async (store: ClickhouseStore, table: string) => {
       // ORDER BY does not start with block_number — primary-key pruning does not apply
-      await store.query({
+      await store.command({
         query: `
           CREATE TABLE ${table}
           (

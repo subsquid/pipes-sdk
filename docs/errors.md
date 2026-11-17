@@ -354,6 +354,19 @@ The target cannot interpret a stored cursor. Recovery stops before changing data
 Restore a valid checkpoint together with its corresponding data, or use a fresh
 state and destination for a deliberate reindex.
 
+### E2012 · Sync timestamps misread by ClickHouse 26.8+
+
+The sync table holds cursor rows with timestamps far in the future. `@subsquid/pipes` versions up to
+`1.0.0-beta.11` sent each timestamp as a number of milliseconds, and ClickHouse 26.8 and later read
+such a number as seconds. A pipe cannot resume from these rows, so it stops at its start and changes
+nothing.
+
+**Fix** — stop every pipe that uses the id the message names, then run the two statements the message
+gives. The first copies the newest rows of that id, as many as `maxRows` keeps, to the present time
+and keeps their order. The second removes the misread rows. Start the pipe again: it resumes from the
+newest row. When several pipe ids share the table, each pipe reports its own id and gives its own
+statements.
+
 ## Postgres (Drizzle) target
 
 ### E2101 · Drizzle client missing

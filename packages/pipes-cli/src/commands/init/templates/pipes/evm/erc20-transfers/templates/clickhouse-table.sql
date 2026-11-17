@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS erc20_transfers (
     block_number UInt32,
     tx_hash String,
     log_index UInt16,
-    timestamp DateTime(3),
+    timestamp DateTime,
     from String,
     to String,
     value UInt256,

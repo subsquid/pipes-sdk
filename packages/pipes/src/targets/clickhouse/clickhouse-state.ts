@@ -30,6 +30,49 @@ CREATE TABLE IF NOT EXISTS ${table}
   ORDER BY (timestamp, id)
 `
 
+// ClickHouse 26.8 and later read a number sent to a DateTime64 column as seconds, older servers as
+// ticks of its precision. An ISO string reads the same on all of them.
+const STAMP_INSERT_SETTINGS = { date_time_input_format: 'best_effort' } as const
+
+// SDK releases before the ISO stamps sent milliseconds, which ClickHouse 26.8 and later stored as
+// seconds, after the year 50000. Such a stamp prints as the last day the server can show, in 2299 or 9999.
+const MISREAD_STAMP_FLOOR_MS = Date.UTC(2200, 0, 1)
+
+function misreadStampsError(table: string, id: string, maxRows: number): ClickhouseTargetError {
+  const idLiteral = `'${id.replace(/[\\']/g, '\\$&')}'`
+  const misreadRows = `id = ${idLiteral} AND toUnixTimestamp64Milli(timestamp) > ${MISREAD_STAMP_FLOOR_MS}`
+
+  // An older SDK that restarted on these rows continued from the stamp that they print, so the rows keep
+  // only their order. Of two rows at one stamp the lower block is the newer: a resume from it repeats work.
+  const newestFirst = "ORDER BY timestamp DESC, JSONExtractInt(current, 'number')"
+
+  return new ClickhouseTargetError(CLICKHOUSE_ERROR_CODES.STATE_MISREAD_TIMESTAMPS, [
+    `The sync table ${table} holds rows of "${id}" with timestamps that ClickHouse 26.8 and later misread.`,
+    'An older SDK version sent each timestamp as a number of milliseconds, and the server stored it as seconds.',
+    'The pipe cannot resume from these rows, so it stopped.',
+    '',
+    `Stop every pipe that writes rows of "${id}" to this table, then run these statements once:`,
+    '',
+    `  INSERT INTO ${table} (id, current, finalized, rollback_chain, timestamp, sign)`,
+    '  SELECT id, current, finalized, rollback_chain,',
+    '         fromUnixTimestamp64Milli(toUnixTimestamp64Milli(now64(3)) - row_number() OVER newest_first), sign',
+    '  FROM (',
+    `    SELECT * FROM ${table}`,
+    `    WHERE ${misreadRows} AND sign = 1`,
+    `    ${newestFirst}`,
+    `    LIMIT ${maxRows}`,
+    '  )',
+    `  WINDOW newest_first AS (${newestFirst});`,
+    '',
+    `  DELETE FROM ${table}`,
+    `  WHERE ${misreadRows};`,
+    '',
+    `The first statement copies the newest ${maxRows} rows, the number that the pipe keeps, to the present time.`,
+    'The rows keep their order. The second statement removes the misread rows.',
+    'Then start the pipe again: it resumes from the newest row.',
+  ])
+}
+
 type SyncRow = {
   current: string
   finalized: string
@@ -201,6 +244,7 @@ export class ClickhouseState {
           },
         ],
         format: 'JSONEachRow',
+        clickhouse_settings: STAMP_INSERT_SETTINGS,
       })
     })
 
@@ -233,6 +277,7 @@ export class ClickhouseState {
         },
       ],
       format: 'JSONEachRow',
+      clickhouse_settings: STAMP_INSERT_SETTINGS,
     })
 
     this.#saves++
@@ -343,16 +388,16 @@ export class ClickhouseState {
         },
       ],
       format: 'JSONEachRow',
-      clickhouse_settings: { date_time_input_format: 'best_effort' },
+      clickhouse_settings: STAMP_INSERT_SETTINGS,
     })
   }
 
   // The newest row is the cursor, so two rows in one millisecond would leave it undecided; the start
   // cursor and the first batch's cursor can be that close
-  #nextTimestamp(): number {
+  #nextTimestamp(): string {
     this.#lastTimestamp = Math.max(Date.now(), this.#lastTimestamp + 1)
 
-    return this.#lastTimestamp
+    return new Date(this.#lastTimestamp).toISOString()
   }
 
   // The stamps go on from the newest stored row, so a clock set back across a restart cannot order
@@ -447,11 +492,7 @@ export class ClickhouseState {
           return values
         }),
         format: 'JSONEachRow',
-        clickhouse_settings: {
-          date_time_input_format: 'best_effort',
-          insert_deduplicate: 0,
-          optimize_on_insert: 0,
-        },
+        clickhouse_settings: { ...STAMP_INSERT_SETTINGS, insert_deduplicate: 0, optimize_on_insert: 0 },
       })
     }
   }
@@ -465,6 +506,12 @@ export class ClickhouseState {
       clickhouse_settings: { date_time_output_format: 'iso' },
     })
     const [row] = await res.json<SyncRow>()
+
+    // New rows order below a misread one, so it would stay the cursor
+    const misread = row !== undefined && Date.parse(row.timestamp) > MISREAD_STAMP_FLOOR_MS
+    if (misread) {
+      throw misreadStampsError(this.#qualifiedName, id, this.options.maxRows)
+    }
 
     return row
   }

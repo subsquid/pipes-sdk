@@ -177,6 +177,8 @@ async function main() {
         block_number: t.block.number,
         tx_hash: t.rawEvent.transactionHash,
         log_index: t.rawEvent.logIndex,
+        // Whole seconds: ClickHouse reads a number in a DateTime column as seconds on every version
+        timestamp: t.timestamp.getTime() / 1000,
         token: t.contract,
         from: t.event.from,
         to: t.event.to,
@@ -197,7 +199,7 @@ async function main() {
                 block_number  UInt64,
                 tx_hash       String,
                 log_index     UInt16,
-                timestamp     DateTime64(3) CODEC (DoubleDelta, ZSTD),
+                timestamp     DateTime CODEC (DoubleDelta, ZSTD),
                 token         String,
                 from          String,
                 to            String,

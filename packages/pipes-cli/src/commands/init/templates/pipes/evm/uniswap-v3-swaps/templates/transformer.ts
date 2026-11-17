@@ -26,7 +26,7 @@ const uniswapV3Swaps = evmEventDecoder({
     blockNumber: s.block.number,
     txHash: s.rawEvent.transactionHash,
     logIndex: s.rawEvent.logIndex,
-    timestamp: s.timestamp.getTime(),
+    timestamp: s.timestamp.getTime() / 1000,
     pool: s.contract,
     token0: s.factory?.event.token0 ?? '',
     token1: s.factory?.event.token1 ?? '',

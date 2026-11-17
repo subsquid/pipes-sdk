@@ -198,7 +198,7 @@ describeIntegration('InitHandler', () => {
           profiles: ["with-pipeline"]
 
         clickhouse:
-          image: clickhouse/clickhouse-server:latest
+          image: clickhouse/clickhouse-server:26.8
           ports:
             - "8123:8123"
           environment:
