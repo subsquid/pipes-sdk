@@ -54,7 +54,9 @@ export type GetBlock<Q extends Query> = Q extends evm.Query
           ? tron.Block<Q['fields']>
           : Q extends hyperliquidReplicaCmds.Query
             ? hyperliquidReplicaCmds.Block<Q['fields']>
-            : hyperliquidFills.Block<Q['fields']>
+            : Q extends hyperliquidFills.Query
+              ? hyperliquidFills.Block<Q['fields']>
+              : never
 
 const BLOCK_SCHEMAS = new WeakMap<Query, Validator<any, any>>()
 

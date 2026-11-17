@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import { BlockValidationError } from '~/core/errors.js'
 
 import { getBlockSchema } from './evm.js'
-import { castBlocks } from './index.js'
+import type * as hyperliquidFills from './hyperliquid-fills.js'
+import type * as hyperliquidReplicaCmds from './hyperliquid-replica-cmds.js'
+import { type GetBlock, type Query, castBlocks } from './index.js'
 
 const schema = getBlockSchema({ block: { number: true, timestamp: true } })
 
@@ -27,5 +29,24 @@ describe('castBlocks', () => {
     const cast = () => castBlocks(schema, [{ header: { timestamp: 1000 } }])
 
     expect(cast).toThrow('A block without a number does not match the schema of the selected fields')
+  })
+})
+
+describe('GetBlock', () => {
+  type F = { block: { number: true } }
+
+  it('maps each Hyperliquid query to its own block', () => {
+    expectTypeOf<GetBlock<hyperliquidFills.Query<F>>>().toEqualTypeOf<hyperliquidFills.Block<F>>()
+    expectTypeOf<GetBlock<hyperliquidReplicaCmds.Query<F>>>().toEqualTypeOf<hyperliquidReplicaCmds.Block<F>>()
+  })
+
+  it('maps every query type to a block', () => {
+    type Unmapped<Q extends Query = Query> = Q extends Query
+      ? [GetBlock<Q>] extends [never]
+        ? Q['type']
+        : never
+      : never
+
+    expectTypeOf<Unmapped>().toBeNever()
   })
 })
