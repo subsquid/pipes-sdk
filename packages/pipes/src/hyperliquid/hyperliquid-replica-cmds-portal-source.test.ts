@@ -4,7 +4,10 @@ import { BlockValidationError } from '~/core/errors.js'
 import { readAll } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
-import { hyperliquidReplicaCmdsPortalStream } from './hyperliquid-replica-cmds-portal-source.js'
+import {
+  HyperliquidReplicaCmdsOutputs,
+  hyperliquidReplicaCmdsPortalStream,
+} from './hyperliquid-replica-cmds-portal-source.js'
 import { hyperliquidReplicaCmdsQuery } from './hyperliquid-replica-cmds-query-builder.js'
 
 const ZERO_HASH = `0x${'0'.repeat(64)}`
@@ -62,6 +65,10 @@ const allActionFields = {
   response: true,
 } as const
 
+function streamOf<Out extends HyperliquidReplicaCmdsOutputs>(portal: { url: string }, outputs: Out) {
+  return hyperliquidReplicaCmdsPortalStream({ id: 'test', logger: 'silent', portal: portal.url, outputs })
+}
+
 describe('hyperliquidReplicaCmdsPortalStream', () => {
   withPortal('decodes the selected action and header fields', async ({ portal: open }) => {
     const portal = await open({
@@ -71,14 +78,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
       ],
     })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ block: { number: true, hash: true, round: true }, action: allActionFields })
         .addActionRequest({ range: { from: 1, to: 2 }, request: {} }),
-    })
+    )
 
     const blocks = await readAll(stream)
 
@@ -91,14 +96,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
   withPortal('decodes a null vaultAddress and a string response', async ({ portal: open }) => {
     const portal = await open({ blocks: [{ header: header(1), actions: [failedAction] }] })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ action: { vaultAddress: true, status: true, response: true } })
         .addActionRequest({ range: { from: 1, to: 1 }, request: {} }),
-    })
+    )
 
     const [block] = await readAll(stream)
 
@@ -115,14 +118,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
     }
     const portal = await open({ blocks: [{ header: header(1), actions: [rejectedNoop] }] })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ action: { actionIndex: true, user: true, action: true, status: true, response: true } })
         .addActionRequest({ range: { from: 1, to: 1 }, request: {} }),
-    })
+    )
 
     const [block] = await readAll(stream)
 
@@ -132,14 +133,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
   withPortal('leaves out fields that were not selected', async ({ portal: open }) => {
     const portal = await open({ blocks: [{ header: header(1), actions: [orderAction] }] })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ block: { round: true }, action: { actionIndex: true, user: true } })
         .addActionRequest({ range: { from: 1, to: 1 }, request: {} }),
-    })
+    )
 
     const [block] = await readAll(stream)
 
@@ -151,14 +150,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
   withPortal('decodes a block without actions as an empty list', async ({ portal: open }) => {
     const portal = await open({ blocks: [{ header: header(1) }] })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ action: { actionIndex: true } })
         .addActionRequest({ range: { from: 1, to: 1 }, request: {} }),
-    })
+    )
 
     const [block] = await readAll(stream)
 
@@ -168,14 +165,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
   withPortal('fails on a status the schema does not allow', async ({ portal: open }) => {
     const portal = await open({ blocks: [{ header: header(1), actions: [{ ...orderAction, status: 'pending' }] }] })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ action: { status: true } })
         .addActionRequest({ range: { from: 1, to: 1 }, request: {} }),
-    })
+    )
 
     await expect(readAll(stream)).rejects.toThrow(BlockValidationError)
   })
@@ -183,14 +178,12 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
   withPortal('sends the replica commands query type and the requested family', async ({ portal: open }) => {
     const portal = await open({ blocks: [{ header: header(1), actions: [orderAction] }] })
 
-    const stream = hyperliquidReplicaCmdsPortalStream({
-      id: 'test',
-      logger: 'silent',
-      portal: portal.url,
-      outputs: hyperliquidReplicaCmdsQuery()
+    const stream = streamOf(
+      portal,
+      hyperliquidReplicaCmdsQuery()
         .addFields({ action: { actionIndex: true } })
         .addOrderActionRequest({ range: { from: 1, to: 1 }, request: { containsAsset: [223], status: 'ok' } }),
-    })
+    )
 
     await readAll(stream)
 
