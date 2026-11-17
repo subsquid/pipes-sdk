@@ -85,51 +85,33 @@ export type FieldSelection = {
   action?: ActionFieldSelection
 }
 
-export type ActionRequest = {
-  /** Values of `action.type`, such as `order` or `cancelByCloid`. */
-  actionType?: string[]
+type ActionFilter = {
   user?: Hex[]
   vaultAddress?: Hex[]
   status?: ActionStatus
 }
 
-export type OrderActionRequest = {
+type AssetFilter = ActionFilter & {
   /** Asset ids, not coin names. */
   containsAsset?: number[]
+}
+
+type CloidFilter = AssetFilter & {
   /** Client order ids. */
   containsCloid?: Hex[]
-  user?: Hex[]
-  vaultAddress?: Hex[]
-  status?: ActionStatus
 }
 
-export type CancelActionRequest = {
-  /** Asset ids, not coin names. */
-  containsAsset?: number[]
-  user?: Hex[]
-  vaultAddress?: Hex[]
-  status?: ActionStatus
-}
+export type ActionRequest = Simplify<
+  ActionFilter & {
+    /** Values of `action.type`, such as `order` or `cancelByCloid`. */
+    actionType?: string[]
+  }
+>
 
-export type CancelByCloidActionRequest = {
-  /** Asset ids, not coin names. */
-  containsAsset?: number[]
-  /** Client order ids. */
-  containsCloid?: Hex[]
-  user?: Hex[]
-  vaultAddress?: Hex[]
-  status?: ActionStatus
-}
-
-export type BatchModifyActionRequest = {
-  /** Asset ids, not coin names. */
-  containsAsset?: number[]
-  /** Client order ids. */
-  containsCloid?: Hex[]
-  user?: Hex[]
-  vaultAddress?: Hex[]
-  status?: ActionStatus
-}
+export type OrderActionRequest = Simplify<CloidFilter>
+export type CancelActionRequest = Simplify<AssetFilter>
+export type CancelByCloidActionRequest = Simplify<CloidFilter>
+export type BatchModifyActionRequest = Simplify<CloidFilter>
 
 export type DataRequest = {
   includeAllBlocks?: boolean

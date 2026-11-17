@@ -1,7 +1,16 @@
 import { cast } from '@subsquid/util-internal-validation'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 
-import { getBlockSchema } from './hyperliquid-replica-cmds.js'
+import type { Hex } from './common.js'
+import {
+  type ActionRequest,
+  type ActionStatus,
+  type BatchModifyActionRequest,
+  type CancelActionRequest,
+  type CancelByCloidActionRequest,
+  type OrderActionRequest,
+  getBlockSchema,
+} from './hyperliquid-replica-cmds.js'
 
 const ALL_HEADER_FIELDS = {
   number: true,
@@ -105,5 +114,29 @@ describe('Hyperliquid replica commands action', () => {
     const schema = getBlockSchema({ action: { action: true } })
 
     expect(() => cast(schema, { header: {}, actions: [{ action: 'order' }] })).toThrow()
+  })
+})
+
+describe('Hyperliquid replica commands request types', () => {
+  type AssetShape = { containsAsset?: number[]; user?: Hex[]; vaultAddress?: Hex[]; status?: ActionStatus }
+  type CloidShape = {
+    containsAsset?: number[]
+    containsCloid?: Hex[]
+    user?: Hex[]
+    vaultAddress?: Hex[]
+    status?: ActionStatus
+  }
+
+  it('match the filters the Portal accepts for each family', () => {
+    expectTypeOf<ActionRequest>().toEqualTypeOf<{
+      actionType?: string[]
+      user?: Hex[]
+      vaultAddress?: Hex[]
+      status?: ActionStatus
+    }>()
+    expectTypeOf<CancelActionRequest>().toEqualTypeOf<AssetShape>()
+    expectTypeOf<OrderActionRequest>().toEqualTypeOf<CloidShape>()
+    expectTypeOf<CancelByCloidActionRequest>().toEqualTypeOf<CloidShape>()
+    expectTypeOf<BatchModifyActionRequest>().toEqualTypeOf<CloidShape>()
   })
 })
