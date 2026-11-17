@@ -1,7 +1,7 @@
 import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~/core/index.js'
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 
-import { QueryBuilder, Range, RequestOptions, concatQueryLists } from '../core/query-builder.js'
+import { QueryBuilder, Range, RequestOptions } from '../core/query-builder.js'
 import * as api from '../portal-client/query/tron.js'
 
 export type TronPortalData<F extends api.FieldSelection> = api.Block<F>[]
@@ -14,6 +14,15 @@ type TronTransformerOut<F extends api.FieldSelection> = QueryAwareTransformer<
 
 // biome-ignore lint/complexity/noBannedTypes: <it is a default generic constraint>
 export class TronQueryBuilder<F extends api.FieldSelection = {}> extends QueryBuilder<F, api.DataRequest> {
+  protected override readonly requestOrder: readonly (keyof api.DataRequest)[] = [
+    'transactions',
+    'transferTransactions',
+    'transferAssetTransactions',
+    'triggerSmartContractTransactions',
+    'logs',
+    'internalTransactions',
+  ]
+
   getType() {
     return 'tron'
   }
@@ -61,25 +70,6 @@ export class TronQueryBuilder<F extends api.FieldSelection = {}> extends QueryBu
 
   addInternalTransactionRequest(options: RequestOptions<api.InternalTransactionRequest>): this {
     return this.addRequest('internalTransactions', options)
-  }
-
-  mergeDataRequests(...requests: api.DataRequest[]): api.DataRequest {
-    let res: api.DataRequest = {}
-    for (let req of requests) {
-      res.transactions = concatQueryLists(res.transactions, req.transactions)
-      res.transferTransactions = concatQueryLists(res.transferTransactions, req.transferTransactions)
-      res.transferAssetTransactions = concatQueryLists(res.transferAssetTransactions, req.transferAssetTransactions)
-      res.triggerSmartContractTransactions = concatQueryLists(
-        res.triggerSmartContractTransactions,
-        req.triggerSmartContractTransactions,
-      )
-      res.logs = concatQueryLists(res.logs, req.logs)
-      res.internalTransactions = concatQueryLists(res.internalTransactions, req.internalTransactions)
-      if (res.includeAllBlocks || req.includeAllBlocks) {
-        res.includeAllBlocks = true
-      }
-    }
-    return res
   }
 
   override build(opts?: { setupQuery?: SetupQueryFn<TronQueryBuilder<F>> }): TronTransformerOut<F> {

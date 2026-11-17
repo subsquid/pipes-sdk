@@ -44,14 +44,48 @@ export type QueryTransformerOpts<In, Out, Query extends QueryBuilder<any>> = Tra
   setupQuery?: SetupQueryFn<Query>
 }
 
-export abstract class QueryBuilder<F extends {}, R = any> {
+export abstract class QueryBuilder<F extends {}, R extends object = any> {
   protected fields: F = {} as F
   protected requests: RangeRequest<R, NaturalRange>[] = []
 
   abstract getType(): string
-  abstract mergeDataRequests(...requests: R[]): R
   abstract addFields(fields: F): QueryBuilder<F, R>
   abstract build(opts?: { setupQuery?: SetupQueryFn<any> }): QueryAwareTransformer<any, any, any>
+
+  /**
+   * The request families in the order the Portal query lists them. The query's JSON is the
+   * portal-cache key, so a merged request keeps this order whatever order requests were added in.
+   * A family missing here is still merged; it only comes after the listed ones.
+   */
+  protected readonly requestOrder: readonly string[] = []
+
+  /**
+   * Merges the data requests of overlapping ranges: each list is appended under its key, whatever
+   * the key, and a flag such as `includeAllBlocks` is set when any request sets it. Keys come in
+   * `requestOrder`, then any other family, then the flags.
+   */
+  mergeDataRequests(...requests: R[]): R {
+    const lists = new Map<string, unknown[]>()
+    const flags = new Set<string>()
+
+    for (const request of requests) {
+      for (const [key, value] of Object.entries(request)) {
+        if (Array.isArray(value) && value.length > 0) {
+          lists.set(key, [...(lists.get(key) ?? []), ...value])
+        } else if (value === true) {
+          flags.add(key)
+        }
+      }
+    }
+
+    const listed = this.requestOrder.filter((family) => lists.has(family))
+    const others = [...lists.keys()].filter((family) => !this.requestOrder.includes(family))
+
+    return Object.fromEntries([
+      ...[...listed, ...others].map((family) => [family, lists.get(family)]),
+      ...[...flags].map((flag) => [flag, true]),
+    ]) as R
+  }
 
   /** Returns the registered range requests. */
   getRequests() {
@@ -132,7 +166,7 @@ export abstract class QueryBuilder<F extends {}, R = any> {
       }
     }
 
-    const ranges = mergeRangeRequests(resolvedRequests, this.mergeDataRequests)
+    const ranges = mergeRangeRequests(resolvedRequests, (a, b) => this.mergeDataRequests(a, b))
     const bound = resumeFrom === undefined ? undefined : { from: resumeFrom }
 
     if (!ranges.length) {
@@ -484,14 +518,6 @@ export function rangeDifference(a: Range, b: Range): Range[] {
  */
 export function rangeEnd(range: Range): number {
   return range.to ?? Number.POSITIVE_INFINITY
-}
-
-/**
- * Concatenates two optional arrays of query items. Returns `undefined` when both are empty/absent.
- */
-export function concatQueryLists<T extends object>(a?: T[], b?: T[]): T[] | undefined {
-  let result = [...(a || []), ...(b || [])]
-  return result.length ? result : undefined
 }
 
 /**

@@ -2,7 +2,7 @@ import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 import * as evm from '~/portal-client/query/evm.js'
 
-import { QueryBuilder, RequestOptions, concatQueryLists } from '../core/query-builder.js'
+import { QueryBuilder, RequestOptions } from '../core/query-builder.js'
 
 export type { Subset } from '~/core/index.js'
 
@@ -16,6 +16,13 @@ type EvmTransformerOut<F extends evm.FieldSelection> = QueryAwareTransformer<
 
 // biome-ignore lint/complexity/noBannedTypes: <it is a default generic constraint>
 export class EvmQueryBuilder<F extends evm.FieldSelection = {}> extends QueryBuilder<F, evm.DataRequest> {
+  protected override readonly requestOrder: readonly (keyof evm.DataRequest)[] = [
+    'transactions',
+    'logs',
+    'traces',
+    'stateDiffs',
+  ]
+
   getType() {
     return 'evm'
   }
@@ -50,20 +57,6 @@ export class EvmQueryBuilder<F extends evm.FieldSelection = {}> extends QueryBui
 
   addStateDiffRequest(options: RequestOptions<evm.StateDiffRequest>): this {
     return this.addRequest('stateDiffs', options)
-  }
-
-  mergeDataRequests(...requests: evm.DataRequest[]): evm.DataRequest {
-    let res: evm.DataRequest = {}
-    for (let req of requests) {
-      res.transactions = concatQueryLists(res.transactions, req.transactions)
-      res.logs = concatQueryLists(res.logs, req.logs)
-      res.traces = concatQueryLists(res.traces, req.traces)
-      res.stateDiffs = concatQueryLists(res.stateDiffs, req.stateDiffs)
-      if (res.includeAllBlocks || req.includeAllBlocks) {
-        res.includeAllBlocks = true
-      }
-    }
-    return res
   }
 
   override build(opts?: { setupQuery?: SetupQueryFn<EvmQueryBuilder<F>> }): EvmTransformerOut<F> {

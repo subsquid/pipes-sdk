@@ -1,7 +1,7 @@
 import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~/core/index.js'
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 
-import { QueryBuilder, Range, RequestOptions, concatQueryLists } from '../core/query-builder.js'
+import { QueryBuilder, Range, RequestOptions } from '../core/query-builder.js'
 import * as solana from '../portal-client/query/solana.js'
 import { SolanaPortalData } from './solana-portal-source.js'
 
@@ -13,6 +13,15 @@ type SolanaTransformerOut<F extends solana.FieldSelection> = QueryAwareTransform
 
 // biome-ignore lint/complexity/noBannedTypes: <it is a default generic constraint>
 export class SolanaQueryBuilder<F extends solana.FieldSelection = {}> extends QueryBuilder<F, solana.DataRequest> {
+  protected override readonly requestOrder: readonly (keyof solana.DataRequest)[] = [
+    'transactions',
+    'logs',
+    'balances',
+    'tokenBalances',
+    'rewards',
+    'instructions',
+  ]
+
   getType() {
     return 'solana'
   }
@@ -60,22 +69,6 @@ export class SolanaQueryBuilder<F extends solana.FieldSelection = {}> extends Qu
 
   addInstructionRequest(options: RequestOptions<solana.InstructionRequest>): this {
     return this.addRequest('instructions', options)
-  }
-
-  mergeDataRequests(...requests: solana.DataRequest[]): solana.DataRequest {
-    let res: solana.DataRequest = {}
-    for (let req of requests) {
-      res.transactions = concatQueryLists(res.transactions, req.transactions)
-      res.logs = concatQueryLists(res.logs, req.logs)
-      res.balances = concatQueryLists(res.balances, req.balances)
-      res.tokenBalances = concatQueryLists(res.tokenBalances, req.tokenBalances)
-      res.rewards = concatQueryLists(res.rewards, req.rewards)
-      res.instructions = concatQueryLists(res.instructions, req.instructions)
-      if (res.includeAllBlocks || req.includeAllBlocks) {
-        res.includeAllBlocks = true
-      }
-    }
-    return res
   }
 
   override build(opts?: { setupQuery?: SetupQueryFn<SolanaQueryBuilder<F>> }): SolanaTransformerOut<F> {

@@ -1,7 +1,7 @@
 import { QueryAwareTransformer, SetupQueryFn, Subset, parsePortalRange } from '~/core/index.js'
 import { mergeDeep } from '~/internal/object/merge-deep.js'
 
-import { QueryBuilder, Range, RequestOptions, concatQueryLists } from '../core/query-builder.js'
+import { QueryBuilder, Range, RequestOptions } from '../core/query-builder.js'
 import * as api from '../portal-client/query/hyperliquid-fills.js'
 
 export type HyperliquidFillsPortalData<F extends api.FieldSelection> = api.Block<F>[]
@@ -14,6 +14,8 @@ type HyperliquidFillsTransformerOut<F extends api.FieldSelection> = QueryAwareTr
 
 // biome-ignore lint/complexity/noBannedTypes: <it is a default generic constraint>
 export class HyperliquidFillsQueryBuilder<F extends api.FieldSelection = {}> extends QueryBuilder<F, api.DataRequest> {
+  protected override readonly requestOrder: readonly (keyof api.DataRequest)[] = ['fills']
+
   getType() {
     return 'hyperliquidFills'
   }
@@ -41,17 +43,6 @@ export class HyperliquidFillsQueryBuilder<F extends api.FieldSelection = {}> ext
 
   addFillRequest(options: RequestOptions<api.FillRequest>): this {
     return this.addRequest('fills', options)
-  }
-
-  mergeDataRequests(...requests: api.DataRequest[]): api.DataRequest {
-    let res: api.DataRequest = {}
-    for (let req of requests) {
-      res.fills = concatQueryLists(res.fills, req.fills)
-      if (res.includeAllBlocks || req.includeAllBlocks) {
-        res.includeAllBlocks = true
-      }
-    }
-    return res
   }
 
   override build(opts?: {
