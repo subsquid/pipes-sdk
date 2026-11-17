@@ -105,6 +105,30 @@ describe('hyperliquidReplicaCmdsPortalStream', () => {
     expect(block.actions).toEqual([{ vaultAddress: null, status: 'err', response: 'Invalid leverage value' }])
   })
 
+  withPortal('decodes a null user on a rejected command', async ({ portal: open }) => {
+    const rejectedNoop = {
+      actionIndex: 0,
+      user: null,
+      action: { type: 'noop' },
+      status: 'err',
+      response: 'User or API Wallet 0x0000000000000000000000000000000000000001 does not exist.',
+    }
+    const portal = await open({ blocks: [{ header: header(1), actions: [rejectedNoop] }] })
+
+    const stream = hyperliquidReplicaCmdsPortalStream({
+      id: 'test',
+      logger: 'silent',
+      portal: portal.url,
+      outputs: hyperliquidReplicaCmdsQuery()
+        .addFields({ action: { actionIndex: true, user: true, action: true, status: true, response: true } })
+        .addActionRequest({ range: { from: 1, to: 1 }, request: {} }),
+    })
+
+    const [block] = await readAll(stream)
+
+    expect(block.actions).toEqual([rejectedNoop])
+  })
+
   withPortal('leaves out fields that were not selected', async ({ portal: open }) => {
     const portal = await open({ blocks: [{ header: header(1), actions: [orderAction] }] })
 

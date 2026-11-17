@@ -61,7 +61,8 @@ export type BlockHeaderFields = {
 
 export type ActionFields = {
   actionIndex: number
-  user: Hex
+  /** Null on some rejected commands. */
+  user: Hex | null
   action: ActionPayload
   signature: ActionSignature
   nonce: number | null
@@ -174,7 +175,7 @@ const BlockHeaderShape: ObjectValidatorShape<BlockHeaderFields> = {
 
 const ActionShape: ObjectValidatorShape<ActionFields> = {
   actionIndex: NAT,
-  user: BYTES,
+  user: nullable(BYTES),
   action: ANY_OBJECT as Validator<ActionPayload, unknown>,
   signature: ANY_OBJECT as Validator<ActionSignature, unknown>,
   nonce: nullable(NAT),
