@@ -24,7 +24,7 @@ import {
   project,
 } from './common.js'
 
-/** Hard fork marker of a block. Raw JSON passthrough; null on most blocks. */
+/** Hard fork marker of a block. Raw JSON passthrough; may be null. */
 export type Hardfork = {
   version: number
   round: number

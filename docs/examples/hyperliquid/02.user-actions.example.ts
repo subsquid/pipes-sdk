@@ -1,7 +1,7 @@
 import { hyperliquidReplicaCmdsPortalStream, hyperliquidReplicaCmdsQuery } from '@subsquid/pipes/hyperliquid'
 
 /**
- * Basic example demonstrating how to fetch the HyperCore commands a specific user sent.
+ * Fetches the HyperCore commands one user sent.
  *
  * The dataset holds about a thousand commands per block, so the example filters by user
  * and reads a bounded range.

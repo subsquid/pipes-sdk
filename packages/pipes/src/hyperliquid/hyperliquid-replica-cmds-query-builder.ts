@@ -36,11 +36,13 @@ export class HyperliquidReplicaCmdsQueryBuilder<F extends api.FieldSelection = {
         [type]: [{ ...options.request }],
       },
     })
+
     return this
   }
 
   includeAllBlocks(range?: Range): this {
     this.requests.push({ range: range ?? { from: 0 }, request: { includeAllBlocks: true } })
+
     return this
   }
 
@@ -66,16 +68,19 @@ export class HyperliquidReplicaCmdsQueryBuilder<F extends api.FieldSelection = {
 
   mergeDataRequests(...requests: api.DataRequest[]): api.DataRequest {
     let res: api.DataRequest = {}
+
     for (let req of requests) {
       res.actions = concatQueryLists(res.actions, req.actions)
       res.orderActions = concatQueryLists(res.orderActions, req.orderActions)
       res.cancelActions = concatQueryLists(res.cancelActions, req.cancelActions)
       res.cancelByCloidActions = concatQueryLists(res.cancelByCloidActions, req.cancelByCloidActions)
       res.batchModifyActions = concatQueryLists(res.batchModifyActions, req.batchModifyActions)
+
       if (res.includeAllBlocks || req.includeAllBlocks) {
         res.includeAllBlocks = true
       }
     }
+
     return res
   }
 

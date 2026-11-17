@@ -60,6 +60,22 @@ describe('HyperliquidReplicaCmdsQueryBuilder', () => {
     })
   })
 
+  describe('includeAllBlocks', () => {
+    it('requests every block in the given range', async () => {
+      const builder = new HyperliquidReplicaCmdsQueryBuilder().includeAllBlocks(range)
+
+      expect(await bounded(builder)).toEqual([{ range, request: { includeAllBlocks: true } }])
+    })
+
+    it('starts at block 0 without a range', async () => {
+      const builder = new HyperliquidReplicaCmdsQueryBuilder().includeAllBlocks()
+      const [first] = await bounded(builder)
+
+      expect(first.range.from).toBe(0)
+      expect(first.request).toEqual({ includeAllBlocks: true })
+    })
+  })
+
   describe('mergeDataRequests', () => {
     const first: api.DataRequest = {
       actions: [{ actionType: ['order'] }],

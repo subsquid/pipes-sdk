@@ -118,7 +118,7 @@ an accepted deviation, ADR-15)*.
 `id text, current_number numeric, current_hash text, "current_timestamp" timestamptz,
 finalized jsonb ('{}' when absent), rollback_chain jsonb, PRIMARY KEY (id,
 current_number)`. `"current_timestamp"` holds wall-clock time: the portal unit is detected
-(seconds on evm/solana/bitcoin, milliseconds on tron/substrate/hyperliquid fills), an
+(seconds on evm/solana/bitcoin, milliseconds on tron/substrate/hyperliquid fills and replica commands), an
 untrustworthy value (absent, out of range, a unit no client Date can hold) stores NULL
 rather than failing the batch, and the resumed cursor timestamp is normalized epoch
 seconds — which recovers the true instant from rows stored before this normalization.
