@@ -729,7 +729,8 @@ hyperliquidReplicaCmdsPortalStream({
 Request methods: `addActionRequest`, `addOrderActionRequest`, `addCancelActionRequest`,
 `addCancelByCloidActionRequest` and `addBatchModifyActionRequest`.
 
-The wire types are exported as `replicaCmdsApi`. `api` stays the fills types.
+The wire types are exported as `replicaCmdsApi`, and the fills types as `fillsApi`. `api` still names the
+fills types but is deprecated.
 
 ---
 
