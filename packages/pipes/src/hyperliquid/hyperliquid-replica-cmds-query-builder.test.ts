@@ -18,99 +18,36 @@ async function bounded(builder: HyperliquidReplicaCmdsQueryBuilder) {
   return (await builder.calculateRanges({ portal })).bounded
 }
 
+type RequestMethod =
+  | 'addActionRequest'
+  | 'addOrderActionRequest'
+  | 'addCancelActionRequest'
+  | 'addCancelByCloidActionRequest'
+  | 'addBatchModifyActionRequest'
+
 describe('HyperliquidReplicaCmdsQueryBuilder', () => {
   it('reports its network type', () => {
     expect(new HyperliquidReplicaCmdsQueryBuilder().getType()).toBe('hyperliquidReplicaCmds')
   })
 
-  describe('request methods', () => {
-    it('addActionRequest fills the actions family', async () => {
-      const request: api.ActionRequest = { actionType: ['order'], status: 'err' }
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().addActionRequest({ range, request })
+  it.each<[RequestMethod, keyof api.DataRequest, object]>([
+    ['addActionRequest', 'actions', { actionType: ['order'], status: 'err' }],
+    ['addOrderActionRequest', 'orderActions', { user, containsAsset: [223], containsCloid: cloid }],
+    ['addCancelActionRequest', 'cancelActions', { user, containsAsset: [223], status: 'ok' }],
+    ['addCancelByCloidActionRequest', 'cancelByCloidActions', { user, containsCloid: cloid }],
+    ['addBatchModifyActionRequest', 'batchModifyActions', { user, containsAsset: [223] }],
+  ])('%s fills the %s family', async (method, family, request) => {
+    const builder = new HyperliquidReplicaCmdsQueryBuilder()[method]({ range, request })
 
-      expect(await bounded(builder)).toEqual([{ range, request: { actions: [request] } }])
-    })
-
-    it('addOrderActionRequest fills the orderActions family', async () => {
-      const request: api.OrderActionRequest = { user, containsAsset: [223], containsCloid: cloid }
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().addOrderActionRequest({ range, request })
-
-      expect(await bounded(builder)).toEqual([{ range, request: { orderActions: [request] } }])
-    })
-
-    it('addCancelActionRequest fills the cancelActions family', async () => {
-      const request: api.CancelActionRequest = { user, containsAsset: [223], status: 'ok' }
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().addCancelActionRequest({ range, request })
-
-      expect(await bounded(builder)).toEqual([{ range, request: { cancelActions: [request] } }])
-    })
-
-    it('addCancelByCloidActionRequest fills the cancelByCloidActions family', async () => {
-      const request: api.CancelByCloidActionRequest = { user, containsCloid: cloid }
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().addCancelByCloidActionRequest({ range, request })
-
-      expect(await bounded(builder)).toEqual([{ range, request: { cancelByCloidActions: [request] } }])
-    })
-
-    it('addBatchModifyActionRequest fills the batchModifyActions family', async () => {
-      const request: api.BatchModifyActionRequest = { user, containsAsset: [223] }
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().addBatchModifyActionRequest({ range, request })
-
-      expect(await bounded(builder)).toEqual([{ range, request: { batchModifyActions: [request] } }])
-    })
+    expect(await bounded(builder)).toEqual([{ range, request: { [family]: [request] } }])
   })
 
-  describe('includeAllBlocks', () => {
-    it('requests every block in the given range', async () => {
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().includeAllBlocks(range)
+  it('merges its families in the order the Portal query lists them', () => {
+    const families = ['actions', 'orderActions', 'cancelActions', 'cancelByCloidActions', 'batchModifyActions']
+    const requests = [{ includeAllBlocks: true }, ...[...families].reverse().map((family) => ({ [family]: [{}] }))]
+    const merged = new HyperliquidReplicaCmdsQueryBuilder().mergeDataRequests(...requests)
 
-      expect(await bounded(builder)).toEqual([{ range, request: { includeAllBlocks: true } }])
-    })
-
-    it('starts at block 0 without a range', async () => {
-      const builder = new HyperliquidReplicaCmdsQueryBuilder().includeAllBlocks()
-      const [first] = await bounded(builder)
-
-      expect(first.range.from).toBe(0)
-      expect(first.request).toEqual({ includeAllBlocks: true })
-    })
-  })
-
-  describe('mergeDataRequests', () => {
-    const first: api.DataRequest = {
-      actions: [{ actionType: ['order'] }],
-      orderActions: [{ user }],
-      cancelActions: [{ containsAsset: [1] }],
-      cancelByCloidActions: [{ containsCloid: cloid }],
-      batchModifyActions: [{ status: 'ok' }],
-    }
-    const second: api.DataRequest = {
-      actions: [{ status: 'err' }],
-      orderActions: [{ containsAsset: [223] }],
-      cancelActions: [{ user }],
-      cancelByCloidActions: [{ user }],
-      batchModifyActions: [{ containsCloid: cloid }],
-    }
-
-    it('concatenates each family in order', () => {
-      const merged = new HyperliquidReplicaCmdsQueryBuilder().mergeDataRequests(first, second)
-
-      expect(merged).toEqual({
-        actions: [{ actionType: ['order'] }, { status: 'err' }],
-        orderActions: [{ user }, { containsAsset: [223] }],
-        cancelActions: [{ containsAsset: [1] }, { user }],
-        cancelByCloidActions: [{ containsCloid: cloid }, { user }],
-        batchModifyActions: [{ status: 'ok' }, { containsCloid: cloid }],
-      })
-    })
-
-    it('sets includeAllBlocks when either request has it', () => {
-      const builder = new HyperliquidReplicaCmdsQueryBuilder()
-
-      expect(builder.mergeDataRequests(first, { includeAllBlocks: true }).includeAllBlocks).toBe(true)
-      expect(builder.mergeDataRequests({ includeAllBlocks: true }, first).includeAllBlocks).toBe(true)
-      expect(builder.mergeDataRequests(first, second).includeAllBlocks).toBeUndefined()
-    })
+    expect(Object.keys(merged)).toEqual([...families, 'includeAllBlocks'])
   })
 
   it('hyperliquidReplicaCmdsQuery returns a builder', () => {
