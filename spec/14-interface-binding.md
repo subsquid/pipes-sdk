@@ -55,7 +55,7 @@ local schedule P-RETRY-SCHEDULE-MS).
 `traces`, `stateDiffs`, `includeAllBlocks`; solana — `instructions` (programId,
 discriminators d1/d2/d4/d8 — one width per instruction request, an ABI is single-width
 (ADR-17); the wire has no d0 — account slots a0–a9), `transactions`, `logs`, `balances`,
-`tokenBalances`, `rewards`; bitcoin/tron/hyperliquidFills — their reference sets.
+`tokenBalances`, `rewards`; bitcoin/tron/hyperliquidFills/hyperliquidReplicaCmds — their reference sets.
 A conforming implementation reproduces these request JSON shapes byte-compatibly.
 
 **IB-9 — Block payload schemas.** Per network: the entity shapes (header, transaction,
@@ -64,7 +64,8 @@ as arbitrary-precision integers, e.g. nonce). The selection tree projects these 
 selected keys present, unselected absent, absent collections decode as `[]`.
 
 **IB-10 — Network tags (closed set).** `evm` · `solana` · `substrate` · `bitcoin` ·
-`tron` · `hyperliquidFills` (exact casing; the last is deliberately camel-case).
+`tron` · `hyperliquidFills` · `hyperliquidReplicaCmds` (exact casing; the last two are
+deliberately camel-case).
 
 **IB-11 — Finalized-only route selection.** A target may declare that it accepts only
 finalized-stream delivery (the TypeScript reference binding names the capability
