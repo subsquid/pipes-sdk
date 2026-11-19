@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { PgDialect, integer, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
+import { PgDialect, bigserial, integer, pgTable, primaryKey, serial, smallserial, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 
 import { createColumnNameResolver } from './consts.js'
@@ -23,12 +23,14 @@ describe('buildSnapshotPlan', () => {
             "generated": false,
             "identityAlways": false,
             "name": "item_id",
+            "notNull": true,
             "sqlType": "integer",
           },
           {
             "generated": false,
             "identityAlways": false,
             "name": "item_value",
+            "notNull": true,
             "sqlType": "integer",
           },
         ],
@@ -55,12 +57,14 @@ describe('buildSnapshotPlan', () => {
             "generated": false,
             "identityAlways": false,
             "name": "item_id",
+            "notNull": true,
             "sqlType": "integer",
           },
           {
             "generated": false,
             "identityAlways": false,
             "name": "item_value",
+            "notNull": true,
             "sqlType": "integer",
           },
         ],
@@ -101,6 +105,19 @@ describe('buildSnapshotPlan', () => {
       expect((e as PostgresTargetError).code).toBe(POSTGRES_ERROR_CODES.MISSING_PRIMARY_KEY)
     }
   })
+
+  // A serial type adds a sequence default, and ADD COLUMN would fill old snapshots from it.
+  it('stores a serial column as its integer type', () => {
+    const counters = pgTable('counters', {
+      id: smallserial('id').primaryKey(),
+      seq: serial('seq'),
+      total: bigserial('total', { mode: 'number' }),
+    })
+
+    const types = buildSnapshotPlan(counters, resolver()).columns.map((c) => c.sqlType)
+
+    expect(types).toEqual(['smallint', 'integer', 'bigint'])
+  })
 })
 
 describe('generateTriggerSQL', () => {
@@ -127,6 +144,79 @@ describe('generateTriggerSQL', () => {
     expect(generateTriggerSQL(buildSnapshotPlan(items, resolver()))).toMatchInlineSnapshot(`
       "
       -- ===== SNAPSHOT SETUP FOR items__snapshots =====
+
+      DO $sqd$
+      DECLARE
+        snapshot regclass := to_regclass('"items__snapshots"');
+        expected_key text[] := ARRAY['___sqd__block_number', 'item_id']::text[];
+        snapshot_columns text[] := ARRAY['item_id', 'item_value']::text[];
+        add_columns text[] := ARRAY['ADD COLUMN IF NOT EXISTS "item_id" integer', 'ADD COLUMN IF NOT EXISTS "item_value" integer']::text[];
+        required_columns text[] := ARRAY['item_id', 'item_value']::text[];
+        key_columns text[];
+        missing_columns text[];
+        missing_required text[];
+        missing_add text[];
+        key_matches boolean;
+        has_rows boolean;
+      BEGIN
+        IF snapshot IS NULL THEN
+          RETURN;
+        END IF;
+
+        SELECT array_agg(a.attname::text) INTO key_columns
+        FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+        WHERE c.conrelid = snapshot AND c.contype = 'p';
+
+        SELECT array_agg(c.name), array_agg(c.add_column) INTO missing_columns, missing_add
+        FROM unnest(snapshot_columns, add_columns) AS c(name, add_column)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM pg_attribute a WHERE a.attrelid = snapshot AND a.attname = c.name AND NOT a.attisdropped
+        );
+
+        SELECT array_agg(r.name) INTO missing_required
+        FROM unnest(required_columns) AS r(name)
+        WHERE r.name = ANY (missing_columns);
+
+        -- ON CONFLICT accepts the key columns in any order.
+        key_matches := cardinality(key_columns) = cardinality(expected_key)
+          AND key_columns @> expected_key AND key_columns <@ expected_key;
+
+        IF key_matches AND missing_columns IS NULL THEN
+          RETURN;
+        END IF;
+
+        -- DROP TRIGGER later needs this lock on the tracked table too.
+        EXECUTE format('LOCK TABLE %I IN ACCESS EXCLUSIVE MODE', 'items');
+        EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', snapshot);
+
+        IF key_matches THEN
+          IF missing_required IS NOT NULL THEN
+            EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I <> %L)', snapshot, '___sqd__operation', 'INSERT')
+              INTO has_rows;
+
+            IF has_rows THEN
+              RAISE EXCEPTION 'Snapshot table % holds undo data for unfinalized blocks, but has no values for the new NOT NULL columns %. Add these columns as nullable, and set NOT NULL when these blocks are final.',
+                snapshot, missing_required;
+            END IF;
+          END IF;
+
+          EXECUTE format('ALTER TABLE %s %s', snapshot, array_to_string(missing_add, ', '));
+
+          RETURN;
+        END IF;
+
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
+
+        IF has_rows THEN
+          RAISE EXCEPTION 'Snapshot table % has primary key %, but the tracked table needs %. It holds undo data for unfinalized blocks, so it is not rebuilt.',
+            snapshot, key_columns, expected_key;
+        END IF;
+
+        EXECUTE format('DROP TABLE %s', snapshot);
+      END
+      $sqd$;
+
       CREATE TABLE IF NOT EXISTS "items__snapshots" (
         "item_id" integer,
         "item_value" integer,
@@ -134,6 +224,7 @@ describe('generateTriggerSQL', () => {
         "___sqd__block_number" BIGINT NOT NULL,
         PRIMARY KEY ("___sqd__block_number","item_id")
       );
+
 
       CREATE OR REPLACE FUNCTION maybe_snapshot_items() RETURNS trigger AS $$
       DECLARE

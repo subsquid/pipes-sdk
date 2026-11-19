@@ -229,7 +229,8 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
 
     expect(killed.transaction.slice(0, 2)).toEqual(['begin', 'lock'])
     expect(ddl.length).toBeGreaterThan(0)
-    expect(ddl.filter((label) => label === 'create')).toEqual(ddl)
+    // Each trigger set-up script starts with the DO block that checks the snapshot table.
+    expect(ddl.filter((label) => label === 'do')).toEqual(ddl)
     expect(batches).toEqual([])
     expect(store.state).toBeUndefined()
 
