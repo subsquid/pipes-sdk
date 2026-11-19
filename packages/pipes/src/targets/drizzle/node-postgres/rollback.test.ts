@@ -149,9 +149,13 @@ describe('generateTriggerSQL', () => {
       DECLARE
         snapshot regclass := to_regclass('"items__snapshots"');
         expected_key text[] := ARRAY['___sqd__block_number', 'item_id']::text[];
+        snapshot_columns text[] := ARRAY['item_id', 'item_value']::text[];
+        add_columns text[] := ARRAY['ADD COLUMN IF NOT EXISTS "item_id" integer', 'ADD COLUMN IF NOT EXISTS "item_value" integer']::text[];
         required_columns text[] := ARRAY['item_id', 'item_value']::text[];
         key_columns text[];
         missing_columns text[];
+        missing_required text[];
+        missing_add text[];
         key_matches boolean;
         has_rows boolean;
       BEGIN
@@ -164,11 +168,15 @@ describe('generateTriggerSQL', () => {
         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
         WHERE c.conrelid = snapshot AND c.contype = 'p';
 
-        SELECT array_agg(r.name) INTO missing_columns
-        FROM unnest(required_columns) AS r(name)
+        SELECT array_agg(c.name), array_agg(c.add_column) INTO missing_columns, missing_add
+        FROM unnest(snapshot_columns, add_columns) AS c(name, add_column)
         WHERE NOT EXISTS (
-          SELECT 1 FROM pg_attribute a WHERE a.attrelid = snapshot AND a.attname = r.name AND NOT a.attisdropped
+          SELECT 1 FROM pg_attribute a WHERE a.attrelid = snapshot AND a.attname = c.name AND NOT a.attisdropped
         );
+
+        SELECT array_agg(r.name) INTO missing_required
+        FROM unnest(required_columns) AS r(name)
+        WHERE r.name = ANY (missing_columns);
 
         -- ON CONFLICT accepts the key columns in any order.
         key_matches := cardinality(key_columns) = cardinality(expected_key)
@@ -178,16 +186,22 @@ describe('generateTriggerSQL', () => {
           RETURN;
         END IF;
 
+        -- DROP TRIGGER later needs this lock on the tracked table too.
+        EXECUTE format('LOCK TABLE %I IN ACCESS EXCLUSIVE MODE', 'items');
         EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', snapshot);
 
         IF key_matches THEN
-          EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I <> %L)', snapshot, '___sqd__operation', 'INSERT')
-            INTO has_rows;
+          IF missing_required IS NOT NULL THEN
+            EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I <> %L)', snapshot, '___sqd__operation', 'INSERT')
+              INTO has_rows;
 
-          IF has_rows THEN
-            RAISE EXCEPTION 'Snapshot table % holds undo data for unfinalized blocks, but has no values for the new NOT NULL columns %. Add these columns as nullable, and set NOT NULL when these blocks are final.',
-              snapshot, missing_columns;
+            IF has_rows THEN
+              RAISE EXCEPTION 'Snapshot table % holds undo data for unfinalized blocks, but has no values for the new NOT NULL columns %. Add these columns as nullable, and set NOT NULL when these blocks are final.',
+                snapshot, missing_required;
+            END IF;
           END IF;
+
+          EXECUTE format('ALTER TABLE %s %s', snapshot, array_to_string(missing_add, ', '));
 
           RETURN;
         END IF;
@@ -211,9 +225,6 @@ describe('generateTriggerSQL', () => {
         PRIMARY KEY ("___sqd__block_number","item_id")
       );
 
-      ALTER TABLE "items__snapshots"
-        ADD COLUMN IF NOT EXISTS "item_id" integer,
-        ADD COLUMN IF NOT EXISTS "item_value" integer;
 
       CREATE OR REPLACE FUNCTION maybe_snapshot_items() RETURNS trigger AS $$
       DECLARE

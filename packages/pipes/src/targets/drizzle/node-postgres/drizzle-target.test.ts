@@ -1570,6 +1570,14 @@ describe('Drizzle target', () => {
       return res.rows[0]
     }
 
+    function startTarget(url: string, tables: Parameters<typeof drizzleTarget>[0]['tables']) {
+      return evmPortalStream({
+        id: 'test',
+        portal: url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(drizzleTarget({ db, tables, onData: async () => {} }))
+    }
+
     /** Block 1 inserts the item at the finalized head, and block 2 updates it above that head. */
     async function writeBeforeFork(url: string, tables: (typeof itemsBefore)[]) {
       await evmPortalStream({
@@ -1787,6 +1795,49 @@ describe('Drizzle target', () => {
       await snapshotWriter.query('COMMIT')
 
       await refused
+    })
+
+    // A lock on the snapshot table waits for the writer, and the test times out.
+    test('takes no lock on the snapshot table on a restart with no schema change', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await startTarget(chain.url, [itemsBefore])
+
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 99)`)
+
+      await startTarget(chain.url, [itemsBefore])
+    })
+
+    test('locks the tracked table before the snapshot table, as a writer does', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await startTarget(chain.url, [itemsBefore])
+      await execute(`ALTER TABLE items ADD COLUMN b integer`)
+
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`UPDATE items SET a = a`)
+
+      const setup = startTarget(chain.url, [itemsAfter])
+      await vi.waitFor(async () => expect(await lockWaitsOn('items')).toBeGreaterThan(0))
+
+      // If the setup holds the snapshot table, this write deadlocks, and the short timeout makes the writer the victim.
+      await snapshotWriter.query(`SET LOCAL deadlock_timeout = '10ms'`)
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 99)`)
+      await snapshotWriter.query('COMMIT')
+
+      await setup
+
+      const columns = await execute(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'items__snapshots' AND column_name = 'b'`,
+      )
+      expect(columns.rowCount).toBe(1)
     })
 
     // The key check must ignore INCLUDE columns: ON CONFLICT accepts such a key.
