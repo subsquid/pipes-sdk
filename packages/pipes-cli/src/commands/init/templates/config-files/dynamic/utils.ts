@@ -87,7 +87,7 @@ export function enrichEvents<T extends EventResponse<Instructions>>(
     result[key] = (value as DecodedInstruction<{ data: object; accounts: object }>[]).map((v) => ({
       ...v.instruction.data,
       ...v.instruction.accounts,
-      blockNumber: v.blockNumber,
+      blockNumber: v.block.number,
       programId: v.rawInstruction.programId,
       transactionIndex: v.transaction.transactionIndex,
       instructionAddress: v.rawInstruction.instructionAddress.join('.'),
