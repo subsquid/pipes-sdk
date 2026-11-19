@@ -16,6 +16,13 @@ export const SNAPSHOT_OPERATION_COLUMN = '___sqd__operation'
 const quote = (name: string) => `"${name}"`
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`
 
+// A serial column gets a default from a new sequence, and ADD COLUMN fills the old snapshots from it.
+const SERIAL_STORAGE_TYPES: Record<string, string> = {
+  smallserial: 'smallint',
+  serial: 'integer',
+  bigserial: 'bigint',
+}
+
 /**
  * Everything the trigger and the rollback statements need about a table, in real Postgres column
  * names. Resolving names once here keeps every generated statement in database space, so nothing
@@ -30,6 +37,7 @@ export type SnapshotPlan = {
 
 export type SnapshotColumn = {
   name: string
+  /** The type of the snapshot column: a serial type becomes its integer type. */
   sqlType: string
   /** Postgres derives the value and rejects any explicit write, so undo must leave it alone. */
   generated: boolean
@@ -71,7 +79,7 @@ export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column)
     snapshotName: `${name}__snapshots`,
     columns: Object.values(columns).map((col) => ({
       name: resolveColumnName(col),
-      sqlType: col.getSQLType(),
+      sqlType: SERIAL_STORAGE_TYPES[col.getSQLType()] ?? col.getSQLType(),
       // Mirrors Drizzle's own insert filter: a 'byDefault' generated column is writable.
       generated: col.generated !== undefined && col.generated.type !== 'byDefault',
       identityAlways: col.generatedIdentity?.type === 'always',
@@ -85,8 +93,11 @@ export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column)
  * not sufficient:
  * - A new tracked column gets a nullable snapshot column. A restore from an older snapshot writes
  *   `NULL` into it, so a new `NOT NULL` column is not supported while such snapshots exist.
- * - A table with a different primary key is rebuilt only when it is empty. If it holds undo data,
- *   the setup stops, because a rebuild deletes that data.
+ * - A table with a different set of key columns is rebuilt only when it is empty. If it holds undo
+ *   data, the setup stops, because a rebuild deletes that data.
+ *
+ * Run it under read committed: the emptiness check must see the rows that writers committed before
+ * the lock.
  */
 function generateSnapshotTableSQL({ snapshotName, columns, primaryKeys }: SnapshotPlan) {
   const snapshotKeyColumns = [SNAPSHOT_BLOCK_COLUMN, ...primaryKeys]
@@ -100,6 +111,7 @@ function generateSnapshotTableSQL({ snapshotName, columns, primaryKeys }: Snapsh
 DO $sqd$
 DECLARE
   snapshot regclass := to_regclass(${literal(quote(snapshotName))});
+  expected_key text[] := ${expectedKey};
   key_columns text[];
   has_rows boolean;
 BEGIN
@@ -113,15 +125,17 @@ BEGIN
   JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
   WHERE i.indrelid = snapshot AND i.indisprimary;
 
-  IF key_columns IS NOT DISTINCT FROM ${expectedKey} THEN
+  -- ON CONFLICT accepts the key columns in any order.
+  IF cardinality(key_columns) = cardinality(expected_key) AND key_columns @> expected_key AND key_columns <@ expected_key THEN
     RETURN;
   END IF;
 
+  EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', snapshot);
   EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
 
   IF has_rows THEN
     RAISE EXCEPTION 'Snapshot table % has primary key %, but the tracked table needs %. It holds undo data for unfinalized blocks, so it is not rebuilt.',
-      snapshot, key_columns, ${expectedKey};
+      snapshot, key_columns, expected_key;
   END IF;
 
   EXECUTE format('DROP TABLE %s', snapshot);

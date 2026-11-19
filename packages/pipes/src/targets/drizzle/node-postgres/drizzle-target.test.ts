@@ -1,7 +1,7 @@
 import { eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { integer, jsonb, numeric, pgTable, timestamp, varchar } from 'drizzle-orm/pg-core'
-import { Pool, QueryResultRow } from 'pg'
+import { integer, jsonb, numeric, pgTable, primaryKey, serial, timestamp, varchar } from 'drizzle-orm/pg-core'
+import { Pool, PoolClient, QueryResultRow } from 'pg'
 import { MockInstance, afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { defaultLogger } from '~/core/logger.js'
@@ -1518,6 +1518,27 @@ describe('Drizzle target', () => {
 
     type Item = typeof itemsAfter.$inferSelect
 
+    // Before column names were resolved, the snapshot table used the Drizzle property keys. The
+    // trigger then failed on every write, so such a table is always empty.
+    const legacySnapshotTable = `
+      CREATE TABLE items__snapshots (
+        "itemId" integer,
+        a integer,
+        "___sqd__operation" TEXT NOT NULL,
+        "___sqd__block_number" BIGINT NOT NULL,
+        PRIMARY KEY ("___sqd__block_number", "itemId")
+      );
+    `
+
+    const test = withPortal.extend<{ snapshotWriter: PoolClient }>({
+      snapshotWriter: async ({}, use) => {
+        const client = await pool.connect()
+        await use(client)
+        await client.query('ROLLBACK')
+        client.release()
+      },
+    })
+
     beforeEach(async () => {
       await execute(`
         DROP SCHEMA IF EXISTS "public" CASCADE;
@@ -1528,6 +1549,15 @@ describe('Drizzle target', () => {
         );
       `)
     })
+
+    async function lockWaitsOn(table: string): Promise<number> {
+      const res = await execute<{ waits: number }>(
+        `SELECT count(*)::int AS waits FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = $1 AND NOT l.granted`,
+        [table],
+      )
+
+      return res.rows[0].waits
+    }
 
     async function readItem(): Promise<Item | undefined> {
       const res = await execute<Item>(`SELECT item_id AS "itemId", a, b FROM items WHERE item_id = 1`)
@@ -1597,18 +1627,8 @@ describe('Drizzle target', () => {
       expect(await readItem()).toEqual({ itemId: 1, a: 30, b: 3 })
     })
 
-    // Before column names were resolved, the snapshot table used the Drizzle property keys. The
-    // trigger then failed on every write, so such a table is always empty.
     withPortal('rebuilds an empty snapshot table with a different primary key', async ({ portal: serve }) => {
-      await execute(`
-        CREATE TABLE items__snapshots (
-          "itemId" integer,
-          a integer,
-          "___sqd__operation" TEXT NOT NULL,
-          "___sqd__block_number" BIGINT NOT NULL,
-          PRIMARY KEY ("___sqd__block_number", "itemId")
-        );
-      `)
+      await execute(legacySnapshotTable)
 
       const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
 
@@ -1639,16 +1659,8 @@ describe('Drizzle target', () => {
     })
 
     withPortal('refuses to rebuild a snapshot table that holds undo data', async ({ portal: serve }) => {
-      await execute(`
-        CREATE TABLE items__snapshots (
-          "itemId" integer,
-          a integer,
-          "___sqd__operation" TEXT NOT NULL,
-          "___sqd__block_number" BIGINT NOT NULL,
-          PRIMARY KEY ("___sqd__block_number", "itemId")
-        );
-        INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2);
-      `)
+      await execute(legacySnapshotTable)
+      await execute(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2)`)
 
       const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
 
@@ -1658,6 +1670,108 @@ describe('Drizzle target', () => {
 
       const snapshots = await execute(`SELECT * FROM items__snapshots`)
       expect(snapshots.rowCount).toBe(1)
+    })
+
+    test('refuses a rebuild when a writer commits undo data while the setup waits', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      await execute(legacySnapshotTable)
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2)`)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+      const refused = expect(writeBeforeFork(chain.url, [itemsBefore])).rejects.toThrow(
+        'It holds undo data for unfinalized blocks, so it is not rebuilt.',
+      )
+
+      // The setup waits for the writer's lock, and the writer commits only then.
+      await vi.waitFor(async () => expect(await lockWaitsOn('items__snapshots')).toBeGreaterThan(0))
+      await snapshotWriter.query('COMMIT')
+
+      await refused
+
+      const snapshots = await execute(`SELECT * FROM items__snapshots`)
+      expect(snapshots.rowCount).toBe(1)
+    })
+
+    withPortal(
+      'fills old snapshots with NULL, not a sequence value, for a new serial column',
+      async ({ portal: serve }) => {
+        const itemsWithSerial = pgTable('items', {
+          itemId: integer('item_id').primaryKey(),
+          a: integer('a').notNull(),
+          seq: serial('seq'),
+        })
+
+        const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+        await writeBeforeFork(chain.url, [itemsBefore])
+        await execute(`ALTER TABLE items ADD COLUMN seq serial`)
+
+        await evmPortalStream({
+          id: 'test',
+          portal: chain.url,
+          outputs: blockDecoder({ from: 0, to: 2 }),
+        }).pipeTo(drizzleTarget({ db, tables: [itemsWithSerial], onData: async () => {} }))
+
+        const snapshots = await execute(`SELECT DISTINCT seq FROM items__snapshots`)
+        expect(snapshots.rows).toEqual([{ seq: null }])
+      },
+    )
+
+    withPortal('keeps the undo log when the key columns change order', async ({ portal: serve }) => {
+      const pairs = pgTable(
+        'pairs',
+        {
+          x: integer('x').notNull(),
+          y: integer('y').notNull(),
+          v: integer('v'),
+        },
+        (t) => [primaryKey({ columns: [t.x, t.y] })],
+      )
+
+      await execute(`
+        CREATE TABLE pairs (x integer, y integer, v integer, PRIMARY KEY (x, y));
+        CREATE TABLE pairs__snapshots (
+          x integer,
+          y integer,
+          v integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", y, x)
+        );
+        INSERT INTO pairs__snapshots VALUES (1, 2, 3, 'UPDATE', 5);
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      // The write at block 2 runs the trigger, whose ON CONFLICT names the key in the new order.
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [pairs],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 2) {
+                await tx.insert(pairs).values({ x: 7, y: 8, v: 9 })
+              }
+            }
+          },
+        }),
+      )
+
+      const snapshots = await execute(
+        `SELECT x, y, "___sqd__block_number" AS block FROM pairs__snapshots ORDER BY block`,
+      )
+      expect(snapshots.rows).toEqual([
+        { x: 7, y: 8, block: '2' },
+        { x: 1, y: 2, block: '5' },
+      ])
     })
   })
 

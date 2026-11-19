@@ -94,6 +94,9 @@ export function drizzleTarget<T>({
 
       const triggers = sortedTables.map((table) => tracker.add(table)).filter(nonNullable)
 
+      // A snapshot table rebuild must see the rows that writers committed after this transaction began.
+      const triggerSetupConfig: PgTransactionConfig = { ...config, isolationLevel: 'read committed' }
+
       logger.debug(`Configuring PG triggers for ${triggers.length} tables...`)
       if (triggers.length) {
         await doWithRetry(
@@ -104,7 +107,7 @@ export function drizzleTarget<T>({
               // Execute all trigger creation statements
               await Promise.all(triggers.map(async (trigger) => tx.execute(trigger)))
               // Lock is released automatically at the end of the transaction
-            }, config),
+            }, triggerSetupConfig),
           {
             title: 'postgres triggers configuration',
             retries: 3,

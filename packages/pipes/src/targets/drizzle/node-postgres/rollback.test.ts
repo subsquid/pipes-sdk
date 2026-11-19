@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { PgDialect, integer, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
+import { PgDialect, bigserial, integer, pgTable, primaryKey, serial, smallserial, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 
 import { createColumnNameResolver } from './consts.js'
@@ -101,6 +101,19 @@ describe('buildSnapshotPlan', () => {
       expect((e as PostgresTargetError).code).toBe(POSTGRES_ERROR_CODES.MISSING_PRIMARY_KEY)
     }
   })
+
+  // A serial type adds a sequence default, and ADD COLUMN would fill old snapshots from it.
+  it('stores a serial column as its integer type', () => {
+    const counters = pgTable('counters', {
+      id: smallserial('id').primaryKey(),
+      seq: serial('seq'),
+      total: bigserial('total', { mode: 'number' }),
+    })
+
+    const types = buildSnapshotPlan(counters, resolver()).columns.map((c) => c.sqlType)
+
+    expect(types).toEqual(['smallint', 'integer', 'bigint'])
+  })
 })
 
 describe('generateTriggerSQL', () => {
@@ -131,6 +144,7 @@ describe('generateTriggerSQL', () => {
       DO $sqd$
       DECLARE
         snapshot regclass := to_regclass('"items__snapshots"');
+        expected_key text[] := ARRAY['___sqd__block_number', 'item_id']::text[];
         key_columns text[];
         has_rows boolean;
       BEGIN
@@ -144,15 +158,17 @@ describe('generateTriggerSQL', () => {
         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
         WHERE i.indrelid = snapshot AND i.indisprimary;
 
-        IF key_columns IS NOT DISTINCT FROM ARRAY['___sqd__block_number', 'item_id']::text[] THEN
+        -- ON CONFLICT accepts the key columns in any order.
+        IF cardinality(key_columns) = cardinality(expected_key) AND key_columns @> expected_key AND key_columns <@ expected_key THEN
           RETURN;
         END IF;
 
+        EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', snapshot);
         EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
 
         IF has_rows THEN
           RAISE EXCEPTION 'Snapshot table % has primary key %, but the tracked table needs %. It holds undo data for unfinalized blocks, so it is not rebuilt.',
-            snapshot, key_columns, ARRAY['___sqd__block_number', 'item_id']::text[];
+            snapshot, key_columns, expected_key;
         END IF;
 
         EXECUTE format('DROP TABLE %s', snapshot);
