@@ -43,6 +43,7 @@ export type SnapshotColumn = {
   generated: boolean
   /** `GENERATED ALWAYS AS IDENTITY`: insertable only via OVERRIDING SYSTEM VALUE, never updatable. */
   identityAlways: boolean
+  notNull: boolean
 }
 
 export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column) => string): SnapshotPlan {
@@ -83,6 +84,7 @@ export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column)
       // Mirrors Drizzle's own insert filter: a 'byDefault' generated column is writable.
       generated: col.generated !== undefined && col.generated.type !== 'byDefault',
       identityAlways: col.generatedIdentity?.type === 'always',
+      notNull: col.notNull,
     })),
     primaryKeys: primaryCols.map(resolveColumnName),
   }
@@ -92,17 +94,22 @@ export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column)
  * A snapshot table outlives the schema it was made for, so `CREATE TABLE IF NOT EXISTS` alone is
  * not sufficient:
  * - A new tracked column gets a nullable snapshot column. A restore from an older snapshot writes
- *   `NULL` into it, so a new `NOT NULL` column is not supported while such snapshots exist.
+ *   `NULL` into it.
+ * - Thus the setup stops when a new column is `NOT NULL` and the table holds before-images. A row
+ *   recorded as 'INSERT' is deleted on a rollback, so it needs no value.
  * - A table with a different set of key columns is rebuilt only when it is empty. If it holds undo
  *   data, the setup stops, because a rebuild deletes that data.
  *
- * Run it under read committed: the emptiness check must see the rows that writers committed before
+ * Run it under read committed: the row checks must see the rows that writers committed before
  * the lock.
  */
 function generateSnapshotTableSQL({ snapshotName, columns, primaryKeys }: SnapshotPlan) {
   const snapshotKeyColumns = [SNAPSHOT_BLOCK_COLUMN, ...primaryKeys]
   const snapshotKey = snapshotKeyColumns.map(quote).join(',')
-  const expectedKey = `ARRAY[${snapshotKeyColumns.map(literal).join(', ')}]::text[]`
+  const textArray = (values: string[]) => `ARRAY[${values.map(literal).join(', ')}]::text[]`
+
+  // A restore leaves a generated column out, so it needs no snapshot value.
+  const requiredColumns = columns.filter((col) => col.notNull && !col.generated).map((col) => col.name)
 
   const colsDDL = columns.map((col) => `${quote(col.name)} ${col.sqlType}`).join(',\n  ')
   const addColumns = columns.map((col) => `ADD COLUMN IF NOT EXISTS ${quote(col.name)} ${col.sqlType}`).join(',\n  ')
@@ -111,26 +118,50 @@ function generateSnapshotTableSQL({ snapshotName, columns, primaryKeys }: Snapsh
 DO $sqd$
 DECLARE
   snapshot regclass := to_regclass(${literal(quote(snapshotName))});
-  expected_key text[] := ${expectedKey};
+  expected_key text[] := ${textArray(snapshotKeyColumns)};
+  required_columns text[] := ${textArray(requiredColumns)};
   key_columns text[];
+  missing_columns text[];
+  key_matches boolean;
   has_rows boolean;
 BEGIN
   IF snapshot IS NULL THEN
     RETURN;
   END IF;
 
-  SELECT array_agg(a.attname::text ORDER BY k.ord) INTO key_columns
-  FROM pg_index i
-  CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
-  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-  WHERE i.indrelid = snapshot AND i.indisprimary;
+  SELECT array_agg(a.attname::text) INTO key_columns
+  FROM pg_constraint c
+  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+  WHERE c.conrelid = snapshot AND c.contype = 'p';
+
+  SELECT array_agg(r.name) INTO missing_columns
+  FROM unnest(required_columns) AS r(name)
+  WHERE NOT EXISTS (
+    SELECT 1 FROM pg_attribute a WHERE a.attrelid = snapshot AND a.attname = r.name AND NOT a.attisdropped
+  );
 
   -- ON CONFLICT accepts the key columns in any order.
-  IF cardinality(key_columns) = cardinality(expected_key) AND key_columns @> expected_key AND key_columns <@ expected_key THEN
+  key_matches := cardinality(key_columns) = cardinality(expected_key)
+    AND key_columns @> expected_key AND key_columns <@ expected_key;
+
+  IF key_matches AND missing_columns IS NULL THEN
     RETURN;
   END IF;
 
   EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', snapshot);
+
+  IF key_matches THEN
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I <> %L)', snapshot, ${literal(SNAPSHOT_OPERATION_COLUMN)}, 'INSERT')
+      INTO has_rows;
+
+    IF has_rows THEN
+      RAISE EXCEPTION 'Snapshot table % holds undo data for unfinalized blocks, but has no values for the new NOT NULL columns %. Add these columns as nullable, and set NOT NULL when these blocks are final.',
+        snapshot, missing_columns;
+    END IF;
+
+    RETURN;
+  END IF;
+
   EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
 
   IF has_rows THEN

@@ -1530,6 +1530,11 @@ describe('Drizzle target', () => {
       );
     `
 
+    // Drizzle puts the query text, which holds the RAISE format string, into its own message.
+    const refusal = (text: string) => ({ cause: { message: expect.stringContaining(text) } })
+    const keyRefusal = refusal('It holds undo data for unfinalized blocks, so it is not rebuilt.')
+    const notNullRefusal = (columns: string) => refusal(`but has no values for the new NOT NULL columns ${columns}.`)
+
     const test = withPortal.extend<{ snapshotWriter: PoolClient }>({
       snapshotWriter: async ({}, use) => {
         const client = await pool.connect()
@@ -1664,9 +1669,7 @@ describe('Drizzle target', () => {
 
       const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
 
-      await expect(writeBeforeFork(chain.url, [itemsBefore])).rejects.toThrow(
-        'It holds undo data for unfinalized blocks, so it is not rebuilt.',
-      )
+      await expect(writeBeforeFork(chain.url, [itemsBefore])).rejects.toMatchObject(keyRefusal)
 
       const snapshots = await execute(`SELECT * FROM items__snapshots`)
       expect(snapshots.rowCount).toBe(1)
@@ -1681,9 +1684,7 @@ describe('Drizzle target', () => {
       await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2)`)
 
       const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
-      const refused = expect(writeBeforeFork(chain.url, [itemsBefore])).rejects.toThrow(
-        'It holds undo data for unfinalized blocks, so it is not rebuilt.',
-      )
+      const refused = expect(writeBeforeFork(chain.url, [itemsBefore])).rejects.toMatchObject(keyRefusal)
 
       // The setup waits for the writer's lock, and the writer commits only then.
       await vi.waitFor(async () => expect(await lockWaitsOn('items__snapshots')).toBeGreaterThan(0))
@@ -1695,30 +1696,125 @@ describe('Drizzle target', () => {
       expect(snapshots.rowCount).toBe(1)
     })
 
-    withPortal(
-      'fills old snapshots with NULL, not a sequence value, for a new serial column',
-      async ({ portal: serve }) => {
-        const itemsWithSerial = pgTable('items', {
-          itemId: integer('item_id').primaryKey(),
-          a: integer('a').notNull(),
-          seq: serial('seq'),
-        })
+    withPortal('refuses a new serial column while the table holds before-images', async ({ portal: serve }) => {
+      const itemsWithSerial = pgTable('items', {
+        itemId: integer('item_id').primaryKey(),
+        a: integer('a').notNull(),
+        seq: serial('seq'),
+      })
 
-        const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
 
-        await writeBeforeFork(chain.url, [itemsBefore])
-        await execute(`ALTER TABLE items ADD COLUMN seq serial`)
+      await writeBeforeFork(chain.url, [itemsBefore])
+      await execute(`ALTER TABLE items ADD COLUMN seq serial`)
 
-        await evmPortalStream({
+      const run = evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(drizzleTarget({ db, tables: [itemsWithSerial], onData: async () => {} }))
+
+      await expect(run).rejects.toMatchObject({
+        cause: {
+          message:
+            'Snapshot table items__snapshots holds undo data for unfinalized blocks, but has no values for the new NOT NULL columns {seq}. Add these columns as nullable, and set NOT NULL when these blocks are final.',
+        },
+      })
+    })
+
+    withPortal('adds a NOT NULL column when the table holds only inserted keys', async ({ portal: serve }) => {
+      const itemsWithRequired = pgTable('items', {
+        itemId: integer('item_id').primaryKey(),
+        a: integer('a').notNull(),
+        b: integer('b').notNull().default(0),
+      })
+
+      await execute(`
+        CREATE TABLE items__snapshots (
+          item_id integer,
+          a integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", item_id)
+        );
+        INSERT INTO items__snapshots VALUES (1, 10, 'INSERT', 5);
+        ALTER TABLE items ADD COLUMN b integer NOT NULL DEFAULT 0;
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(drizzleTarget({ db, tables: [itemsWithRequired], onData: async () => {} }))
+
+      const snapshots = await execute(`SELECT item_id, b FROM items__snapshots`)
+      expect(snapshots.rows).toEqual([{ item_id: 1, b: null }])
+    })
+
+    test('refuses a NOT NULL column when a writer commits a before-image while the setup waits', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const itemsWithRequired = pgTable('items', {
+        itemId: integer('item_id').primaryKey(),
+        a: integer('a').notNull(),
+        b: integer('b').notNull().default(0),
+      })
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(drizzleTarget({ db, tables: [itemsBefore], onData: async () => {} }))
+
+      await execute(`ALTER TABLE items ADD COLUMN b integer NOT NULL DEFAULT 0`)
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 5)`)
+
+      const refused = expect(
+        evmPortalStream({
           id: 'test',
           portal: chain.url,
           outputs: blockDecoder({ from: 0, to: 2 }),
-        }).pipeTo(drizzleTarget({ db, tables: [itemsWithSerial], onData: async () => {} }))
+        }).pipeTo(drizzleTarget({ db, tables: [itemsWithRequired], onData: async () => {} })),
+      ).rejects.toMatchObject(notNullRefusal('{b}'))
 
-        const snapshots = await execute(`SELECT DISTINCT seq FROM items__snapshots`)
-        expect(snapshots.rows).toEqual([{ seq: null }])
-      },
-    )
+      await vi.waitFor(async () => expect(await lockWaitsOn('items__snapshots')).toBeGreaterThan(0))
+      await snapshotWriter.query('COMMIT')
+
+      await refused
+    })
+
+    // The key check must ignore INCLUDE columns: ON CONFLICT accepts such a key.
+    withPortal('keeps a snapshot table whose primary key has INCLUDE columns', async ({ portal: serve }) => {
+      await execute(`
+        CREATE TABLE items__snapshots (
+          item_id integer,
+          a integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", item_id) INCLUDE (a)
+        );
+        INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 5);
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url, [itemsBefore])
+
+      const snapshots = await execute(
+        `SELECT item_id, a, "___sqd__block_number" AS block FROM items__snapshots ORDER BY block`,
+      )
+      expect(snapshots.rows).toEqual([
+        { item_id: 1, a: 10, block: '1' },
+        { item_id: 1, a: 10, block: '2' },
+        { item_id: 1, a: 10, block: '5' },
+      ])
+    })
 
     withPortal('keeps the undo log when the key columns change order', async ({ portal: serve }) => {
       const pairs = pgTable(

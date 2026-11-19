@@ -23,12 +23,14 @@ describe('buildSnapshotPlan', () => {
             "generated": false,
             "identityAlways": false,
             "name": "item_id",
+            "notNull": true,
             "sqlType": "integer",
           },
           {
             "generated": false,
             "identityAlways": false,
             "name": "item_value",
+            "notNull": true,
             "sqlType": "integer",
           },
         ],
@@ -55,12 +57,14 @@ describe('buildSnapshotPlan', () => {
             "generated": false,
             "identityAlways": false,
             "name": "item_id",
+            "notNull": true,
             "sqlType": "integer",
           },
           {
             "generated": false,
             "identityAlways": false,
             "name": "item_value",
+            "notNull": true,
             "sqlType": "integer",
           },
         ],
@@ -145,25 +149,49 @@ describe('generateTriggerSQL', () => {
       DECLARE
         snapshot regclass := to_regclass('"items__snapshots"');
         expected_key text[] := ARRAY['___sqd__block_number', 'item_id']::text[];
+        required_columns text[] := ARRAY['item_id', 'item_value']::text[];
         key_columns text[];
+        missing_columns text[];
+        key_matches boolean;
         has_rows boolean;
       BEGIN
         IF snapshot IS NULL THEN
           RETURN;
         END IF;
 
-        SELECT array_agg(a.attname::text ORDER BY k.ord) INTO key_columns
-        FROM pg_index i
-        CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
-        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-        WHERE i.indrelid = snapshot AND i.indisprimary;
+        SELECT array_agg(a.attname::text) INTO key_columns
+        FROM pg_constraint c
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+        WHERE c.conrelid = snapshot AND c.contype = 'p';
+
+        SELECT array_agg(r.name) INTO missing_columns
+        FROM unnest(required_columns) AS r(name)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM pg_attribute a WHERE a.attrelid = snapshot AND a.attname = r.name AND NOT a.attisdropped
+        );
 
         -- ON CONFLICT accepts the key columns in any order.
-        IF cardinality(key_columns) = cardinality(expected_key) AND key_columns @> expected_key AND key_columns <@ expected_key THEN
+        key_matches := cardinality(key_columns) = cardinality(expected_key)
+          AND key_columns @> expected_key AND key_columns <@ expected_key;
+
+        IF key_matches AND missing_columns IS NULL THEN
           RETURN;
         END IF;
 
         EXECUTE format('LOCK TABLE %s IN ACCESS EXCLUSIVE MODE', snapshot);
+
+        IF key_matches THEN
+          EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE %I <> %L)', snapshot, '___sqd__operation', 'INSERT')
+            INTO has_rows;
+
+          IF has_rows THEN
+            RAISE EXCEPTION 'Snapshot table % holds undo data for unfinalized blocks, but has no values for the new NOT NULL columns %. Add these columns as nullable, and set NOT NULL when these blocks are final.',
+              snapshot, missing_columns;
+          END IF;
+
+          RETURN;
+        END IF;
+
         EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
 
         IF has_rows THEN
