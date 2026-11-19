@@ -51,6 +51,43 @@ const RETRY_OPTIONS = {
  */
 const APPEND_STALL_WARNING_MS = 15_000
 
+/**
+ * How long a single AppendRows attempt may stay in flight before it is abandoned and retried.
+ *
+ * A healthy append of a full chunk returns in seconds, and even a slow one in well under a
+ * minute. This is generous on purpose, so that a slow but live stream is never torn down
+ * mid-flight, yet short enough that one dropped stream heals, retry included, inside a
+ * five-minute freshness target with time to spare.
+ */
+const APPEND_DEADLINE_MS = 3 * 60_000
+
+/** gRPC DEADLINE_EXCEEDED: retried by `isTransientError`, counted as transient in metrics. */
+const GRPC_DEADLINE_EXCEEDED = 4
+
+/** An AppendRows attempt outlived `APPEND_DEADLINE_MS` and was abandoned. */
+class AppendDeadlineExceededError extends Error {
+  readonly code = GRPC_DEADLINE_EXCEEDED
+
+  constructor(table: string, offset: number, deadlineMs: number) {
+    super(
+      `appendRows(${table}, offset=${offset}) did not return within ${formatDuration(deadlineMs)}; ` +
+        'reopening the stream connection',
+    )
+    this.name = 'AppendDeadlineExceededError'
+  }
+}
+
+/**
+ * An append still in flight when `closeStreams()` tore its stream down. Not transient on
+ * purpose: the retry loop must stop rather than write through a connection nothing tracks.
+ */
+class StreamClosedError extends Error {
+  constructor(table: string) {
+    super(`write stream for ${table} was closed while an append to it was still running`)
+    this.name = 'StreamClosedError'
+  }
+}
+
 export type BigQueryStoreOptions = {
   projectId: string
   /** Tracked tables registered up-front; defines the allowlist (B4 fix). */
@@ -105,16 +142,62 @@ export type CommitTableStats = {
 }
 
 /** Per-table long-lived Committed stream state, cached across batches. */
-type StreamState = {
-  streamId: string
-  connection: Awaited<ReturnType<managedwriter.WriterClient['createStreamConnection']>>
+type StreamState = StreamTarget & {
+  connection: StreamConnection
   writer: ProtoWriterLike
   /**
    * Cumulative offset across the lifetime of this stream — Committed streams use the
    * offset for exactly-once semantics: a retry of the same offset is server-deduped.
    */
   nextOffset: number
+  /**
+   * Set once an append outlived its deadline and `connection` and `writer` were closed: the
+   * next attempt opens a fresh connection to the same stream before it sends anything.
+   */
+  stale: boolean
+  /** Set by `closeStreams()`: no attempt may send through, or reopen, this stream again. */
+  closed: boolean
 }
+
+/**
+ * Fails every write still queued on a connection, then closes it and its proto Writer.
+ *
+ * Closing alone settles nothing: a write in flight on the closed connection keeps its attempt,
+ * and that attempt's deadline timer, alive until the deadline fires. Aborting rejects it at once
+ * with an error that is not retried. Each step is best-effort: callers run on teardown and error
+ * paths, where one failed close must not mask the control flow it is part of.
+ */
+function closeConnection({ writer, connection }: { writer: ProtoWriterLike; connection: StreamConnection }): void {
+  try {
+    for (const pending of connection.getPendingWrites()) {
+      pending.abort()
+    }
+  } catch {
+    // best-effort: the connection is dropped either way
+  }
+  try {
+    writer.close()
+  } catch {
+    // best-effort
+  }
+  try {
+    connection.close()
+  } catch {
+    // best-effort
+  }
+}
+
+/** A Committed stream and everything a connection to it is opened with. */
+type StreamTarget = {
+  /** Path-style table FQN the stream writes to. */
+  table: string
+  streamId: string
+  protoDescriptor: ProtoDescriptor
+  writerOptions: { missingValueInterpretations?: MissingValueInterpretations }
+}
+
+type StreamConnection = Awaited<ReturnType<managedwriter.WriterClient['createStreamConnection']>>
+type ProtoDescriptor = Parameters<ProtoWriterFactory>[0]['protoDescriptor']
 
 /** The DML job itself finished with an error; `errors` carries its `errorResult` for `isTransientError`. */
 class DmlJobFailedError extends Error {
@@ -384,10 +467,7 @@ export class BigQueryWriter {
     for (const chunk of chunkBuffersByByteSize(encodedRows)) {
       const chunkOffset = stream.nextOffset // capture for the retry closure
       const response = await doWithRetry(
-        () =>
-          this.#whileAppending(tableFqnPath, chunkOffset, () =>
-            stream.writer.appendRows({ serializedRows: chunk }, chunkOffset).getResult(),
-          ),
+        () => this.#whileAppending(tableFqnPath, chunkOffset, () => this.#appendOnce(stream, chunk, chunkOffset)),
         {
           ...RETRY_OPTIONS,
           title: `appendRows(${tableFqnPath}, offset=${chunkOffset})`,
@@ -441,6 +521,77 @@ export class BigQueryWriter {
   }
 
   /**
+   * One AppendRows attempt, bounded by `APPEND_DEADLINE_MS`.
+   *
+   * `getResult()` has no deadline of its own, so a bidi stream that is dropped rather than
+   * failed would hold the pipeline forever. Retrying on the same connection would not help:
+   * the client matches each response to the oldest write still queued on the connection, so
+   * the abandoned write would swallow the retry's response and the retry would hang in turn.
+   * An expired attempt therefore takes its connection down with it, and the retry opens a fresh
+   * one to the same stream and resends the same offset. An offset that did land before the
+   * stream dropped comes back ALREADY_EXISTS on the response, which counts as written.
+   */
+  async #appendOnce(stream: StreamState, chunk: Uint8Array[], offset: number) {
+    // A batch whose sibling table failed is torn down while this table's append may still be
+    // retrying in the background; nothing it sends after that is tracked or wanted.
+    if (stream.closed) {
+      throw new StreamClosedError(stream.table)
+    }
+    if (stream.stale) {
+      await this.#reopenConnection(stream)
+
+      // The teardown can also land after the reopen returned and before this resumed. Checked
+      // here, with no await left before the send, so that no window remains.
+      if (stream.closed) {
+        throw new StreamClosedError(stream.table)
+      }
+    }
+
+    const result = stream.writer.appendRows({ serializedRows: chunk }, offset).getResult()
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new AppendDeadlineExceededError(stream.table, offset, APPEND_DEADLINE_MS)),
+        APPEND_DEADLINE_MS,
+      )
+    })
+
+    try {
+      return await Promise.race([result, deadline])
+    } catch (error) {
+      if (error instanceof AppendDeadlineExceededError) {
+        this.#abandonConnection(stream)
+      }
+
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** Drops the stream's connection and marks the stream stale, so the next attempt reconnects. */
+  #abandonConnection(stream: StreamState): void {
+    closeConnection(stream)
+
+    stream.stale = true
+  }
+
+  async #reopenConnection(stream: StreamState): Promise<void> {
+    const { connection, writer } = await this.#openConnection(stream)
+
+    // `closeStreams()` may have run while the connection was opening.
+    if (stream.closed) {
+      closeConnection({ connection, writer })
+      throw new StreamClosedError(stream.table)
+    }
+
+    stream.connection = connection
+    stream.writer = writer
+    stream.stale = false
+  }
+
+  /**
    * Returns the cached Committed-stream state for `tableFqnPath`, opening one on first
    * call. The writer + underlying gRPC connection are kept alive for the rest of the
    * process lifetime and torn down by `close()`.
@@ -466,6 +617,22 @@ export class BigQueryWriter {
         }),
       { ...RETRY_OPTIONS, title: `createWriteStream(${tableFqnPath})`, logger: this.#logger },
     )
+    const target: StreamTarget = { table: tableFqnPath, streamId, protoDescriptor, writerOptions }
+    const { connection, writer } = await this.#openConnection(target)
+
+    const state: StreamState = { ...target, connection, writer, nextOffset: 0, stale: false, closed: false }
+    this.#streams.set(tableFqnPath, state)
+
+    return state
+  }
+
+  /** Opens a connection and its proto Writer to an existing Committed stream. */
+  async #openConnection({
+    table: tableFqnPath,
+    streamId,
+    protoDescriptor,
+    writerOptions,
+  }: StreamTarget): Promise<{ connection: StreamConnection; writer: ProtoWriterLike }> {
     const connection = await this.#writer.createStreamConnection({ streamId })
     // The `@google-cloud/bigquery-storage` client delivers a transport error twice: once as a
     // rejected `getResult()` promise (which `doWithRetry` handles), and once as an 'error'
@@ -494,10 +661,7 @@ export class BigQueryWriter {
       missingValueInterpretations: writerOptions.missingValueInterpretations,
     })
 
-    const state: StreamState = { streamId, connection, writer, nextOffset: 0 }
-    this.#streams.set(tableFqnPath, state)
-
-    return state
+    return { connection, writer }
   }
 
   /**
@@ -566,20 +730,12 @@ export class BigQueryWriter {
    * the WriterClient open: a caller may own it. The next write opens new streams.
    */
   closeStreams(): void {
-    // Each close is best-effort — a Writer.close() / connection.close() throw must NOT propagate
-    // because we're often called from a finally block during normal shutdown and a single
-    // failed close shouldn't mask the original control flow.
+    // `closeConnection` is best-effort, because we're often called from a finally block during
+    // normal shutdown. It also fails the appends still in flight, so a hung one stops here and
+    // leaves no deadline timer holding the process open after the write has ended.
     for (const state of this.#streams.values()) {
-      try {
-        state.writer.close()
-      } catch {
-        // best-effort
-      }
-      try {
-        state.connection.close()
-      } catch {
-        // best-effort
-      }
+      state.closed = true
+      closeConnection(state)
     }
     this.#streams.clear()
   }
