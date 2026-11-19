@@ -14,6 +14,7 @@ export const SNAPSHOT_BLOCK_COLUMN = '___sqd__block_number'
 export const SNAPSHOT_OPERATION_COLUMN = '___sqd__operation'
 
 const quote = (name: string) => `"${name}"`
+const literal = (value: string) => `'${value.replaceAll("'", "''")}'`
 
 /**
  * Everything the trigger and the rollback statements need about a table, in real Postgres column
@@ -79,9 +80,68 @@ export function buildSnapshotPlan(table: Table, resolveColumnName: (col: Column)
   }
 }
 
-export function generateTriggerSQL({ name, snapshotName, columns, primaryKeys }: SnapshotPlan) {
+/**
+ * A snapshot table outlives the schema it was made for, so `CREATE TABLE IF NOT EXISTS` alone is
+ * not sufficient:
+ * - A new tracked column gets a nullable snapshot column. A restore from an older snapshot writes
+ *   `NULL` into it, so a new `NOT NULL` column is not supported while such snapshots exist.
+ * - A table with a different primary key is rebuilt only when it is empty. If it holds undo data,
+ *   the setup stops, because a rebuild deletes that data.
+ */
+function generateSnapshotTableSQL({ snapshotName, columns, primaryKeys }: SnapshotPlan) {
+  const snapshotKeyColumns = [SNAPSHOT_BLOCK_COLUMN, ...primaryKeys]
+  const snapshotKey = snapshotKeyColumns.map(quote).join(',')
+  const expectedKey = `ARRAY[${snapshotKeyColumns.map(literal).join(', ')}]::text[]`
+
   const colsDDL = columns.map((col) => `${quote(col.name)} ${col.sqlType}`).join(',\n  ')
-  const snapshotKey = [SNAPSHOT_BLOCK_COLUMN, ...primaryKeys].map(quote).join(',')
+  const addColumns = columns.map((col) => `ADD COLUMN IF NOT EXISTS ${quote(col.name)} ${col.sqlType}`).join(',\n  ')
+
+  return `
+DO $sqd$
+DECLARE
+  snapshot regclass := to_regclass(${literal(quote(snapshotName))});
+  key_columns text[];
+  has_rows boolean;
+BEGIN
+  IF snapshot IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT array_agg(a.attname::text ORDER BY k.ord) INTO key_columns
+  FROM pg_index i
+  CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+  WHERE i.indrelid = snapshot AND i.indisprimary;
+
+  IF key_columns IS NOT DISTINCT FROM ${expectedKey} THEN
+    RETURN;
+  END IF;
+
+  EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
+
+  IF has_rows THEN
+    RAISE EXCEPTION 'Snapshot table % has primary key %, but the tracked table needs %. It holds undo data for unfinalized blocks, so it is not rebuilt.',
+      snapshot, key_columns, ${expectedKey};
+  END IF;
+
+  EXECUTE format('DROP TABLE %s', snapshot);
+END
+$sqd$;
+
+CREATE TABLE IF NOT EXISTS "${snapshotName}" (
+  ${colsDDL},
+  "${SNAPSHOT_OPERATION_COLUMN}" TEXT NOT NULL,
+  "${SNAPSHOT_BLOCK_COLUMN}" BIGINT NOT NULL,
+  PRIMARY KEY (${snapshotKey})
+);
+
+ALTER TABLE "${snapshotName}"
+  ${addColumns};`
+}
+
+export function generateTriggerSQL(plan: SnapshotPlan) {
+  const { name, snapshotName, columns } = plan
+  const snapshotKey = [SNAPSHOT_BLOCK_COLUMN, ...plan.primaryKeys].map(quote).join(',')
 
   const colNames = columns.map((c) => quote(c.name)).join(', ')
   const oldCols = columns.map((c) => `OLD.${quote(c.name)}`).join(', ')
@@ -89,12 +149,7 @@ export function generateTriggerSQL({ name, snapshotName, columns, primaryKeys }:
 
   return `
 -- ===== SNAPSHOT SETUP FOR ${snapshotName} =====
-CREATE TABLE IF NOT EXISTS "${snapshotName}" (
-  ${colsDDL},
-  "${SNAPSHOT_OPERATION_COLUMN}" TEXT NOT NULL,
-  "${SNAPSHOT_BLOCK_COLUMN}" BIGINT NOT NULL,
-  PRIMARY KEY (${snapshotKey})
-);
+${generateSnapshotTableSQL(plan)}
 
 CREATE OR REPLACE FUNCTION maybe_snapshot_${name}() RETURNS trigger AS $$
 DECLARE

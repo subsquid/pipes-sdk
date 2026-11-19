@@ -1503,6 +1503,164 @@ describe('Drizzle target', () => {
     })
   })
 
+  // The snapshot table outlives the tracked schema it was made for.
+  describe('snapshot table after a tracked schema change', () => {
+    const itemsBefore = pgTable('items', {
+      itemId: integer('item_id').primaryKey(),
+      a: integer('a').notNull(),
+    })
+
+    const itemsAfter = pgTable('items', {
+      itemId: integer('item_id').primaryKey(),
+      a: integer('a').notNull(),
+      b: integer('b'),
+    })
+
+    type Item = typeof itemsAfter.$inferSelect
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE items (
+          item_id integer PRIMARY KEY,
+          a integer NOT NULL
+        );
+      `)
+    })
+
+    async function readItem(): Promise<Item | undefined> {
+      const res = await execute<Item>(`SELECT item_id AS "itemId", a, b FROM items WHERE item_id = 1`)
+
+      return res.rows[0]
+    }
+
+    /** Block 1 inserts the item at the finalized head, and block 2 updates it above that head. */
+    async function writeBeforeFork(url: string, tables: (typeof itemsBefore)[]) {
+      await evmPortalStream({
+        id: 'test',
+        portal: url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables,
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(itemsBefore).values({ itemId: 1, a: 10 })
+              } else if (b.number === 2) {
+                await tx.update(itemsBefore).set({ a: 20 }).where(eq(itemsBefore.itemId, 1))
+              }
+            }
+          },
+        }),
+      )
+    }
+
+    withPortal('keeps the undo log working after a column is added', async ({ portal: serve }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url, [itemsBefore])
+
+      await execute(`ALTER TABLE items ADD COLUMN b integer`)
+      chain.fork(1)
+      chain.setHead({ latest: 3 })
+
+      let rolledBack: Item | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [itemsAfter],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              await tx
+                .update(itemsAfter)
+                .set({ a: b.number * 10, b: b.number })
+                .where(eq(itemsAfter.itemId, 1))
+            }
+          },
+          onAfterRollback: async ({ tx, cursor }) => {
+            const [row] = await tx.select().from(itemsAfter).where(eq(itemsAfter.itemId, 1))
+            rolledBack = row
+          },
+        }),
+      )
+
+      // The before-image predates column "b", so the restore writes NULL into it.
+      expect(rolledBack).toEqual({ itemId: 1, a: 10, b: null })
+      expect(await readItem()).toEqual({ itemId: 1, a: 30, b: 3 })
+    })
+
+    // Before column names were resolved, the snapshot table used the Drizzle property keys. The
+    // trigger then failed on every write, so such a table is always empty.
+    withPortal('rebuilds an empty snapshot table with a different primary key', async ({ portal: serve }) => {
+      await execute(`
+        CREATE TABLE items__snapshots (
+          "itemId" integer,
+          a integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", "itemId")
+        );
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url, [itemsBefore])
+
+      chain.fork(1)
+      chain.setHead({ latest: 3 })
+
+      let rolledBack: typeof itemsBefore.$inferSelect | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [itemsBefore],
+          onData: async () => {},
+          onAfterRollback: async ({ tx }) => {
+            const [row] = await tx.select().from(itemsBefore).where(eq(itemsBefore.itemId, 1))
+            rolledBack = row
+          },
+        }),
+      )
+
+      expect(rolledBack).toEqual({ itemId: 1, a: 10 })
+    })
+
+    withPortal('refuses to rebuild a snapshot table that holds undo data', async ({ portal: serve }) => {
+      await execute(`
+        CREATE TABLE items__snapshots (
+          "itemId" integer,
+          a integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", "itemId")
+        );
+        INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2);
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await expect(writeBeforeFork(chain.url, [itemsBefore])).rejects.toThrow(
+        'It holds undo data for unfinalized blocks, so it is not rebuilt.',
+      )
+
+      const snapshots = await execute(`SELECT * FROM items__snapshots`)
+      expect(snapshots.rowCount).toBe(1)
+    })
+  })
+
   describe('class-T batch transaction retry', () => {
     const rows = pgTable('retried', { id: integer().primaryKey() })
 

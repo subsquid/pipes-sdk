@@ -127,6 +127,38 @@ describe('generateTriggerSQL', () => {
     expect(generateTriggerSQL(buildSnapshotPlan(items, resolver()))).toMatchInlineSnapshot(`
       "
       -- ===== SNAPSHOT SETUP FOR items__snapshots =====
+
+      DO $sqd$
+      DECLARE
+        snapshot regclass := to_regclass('"items__snapshots"');
+        key_columns text[];
+        has_rows boolean;
+      BEGIN
+        IF snapshot IS NULL THEN
+          RETURN;
+        END IF;
+
+        SELECT array_agg(a.attname::text ORDER BY k.ord) INTO key_columns
+        FROM pg_index i
+        CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+        WHERE i.indrelid = snapshot AND i.indisprimary;
+
+        IF key_columns IS NOT DISTINCT FROM ARRAY['___sqd__block_number', 'item_id']::text[] THEN
+          RETURN;
+        END IF;
+
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', snapshot) INTO has_rows;
+
+        IF has_rows THEN
+          RAISE EXCEPTION 'Snapshot table % has primary key %, but the tracked table needs %. It holds undo data for unfinalized blocks, so it is not rebuilt.',
+            snapshot, key_columns, ARRAY['___sqd__block_number', 'item_id']::text[];
+        END IF;
+
+        EXECUTE format('DROP TABLE %s', snapshot);
+      END
+      $sqd$;
+
       CREATE TABLE IF NOT EXISTS "items__snapshots" (
         "item_id" integer,
         "item_value" integer,
@@ -134,6 +166,10 @@ describe('generateTriggerSQL', () => {
         "___sqd__block_number" BIGINT NOT NULL,
         PRIMARY KEY ("___sqd__block_number","item_id")
       );
+
+      ALTER TABLE "items__snapshots"
+        ADD COLUMN IF NOT EXISTS "item_id" integer,
+        ADD COLUMN IF NOT EXISTS "item_value" integer;
 
       CREATE OR REPLACE FUNCTION maybe_snapshot_items() RETURNS trigger AS $$
       DECLARE
