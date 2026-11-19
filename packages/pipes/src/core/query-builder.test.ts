@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
+import { BitcoinQueryBuilder } from '~/bitcoin/bitcoin-query-builder.js'
+import { EvmQueryBuilder } from '~/evm/evm-query-builder.js'
+import { HyperliquidFillsQueryBuilder } from '~/hyperliquid/hyperliquid-fills-query-builder.js'
+import { SolanaQueryBuilder } from '~/solana/solana-query-builder.js'
+import { TronQueryBuilder } from '~/tron/tron-query-builder.js'
+
 import {
+  QueryBuilder,
   type RangeRequest,
   applyRangeBound,
   mergeRangeRequests,
@@ -211,5 +218,96 @@ describe('applyRangeBound', () => {
     const result = applyRangeBound([rr(0, 100, ['a'])], { from: 0, to: 0 })
 
     expect(result).toEqual([rr(0, 0, ['a'])])
+  })
+})
+
+// ── QueryBuilder ──
+
+type TestRequest = { [family: string]: unknown[] | boolean | undefined }
+
+class TestQueryBuilder extends QueryBuilder<Record<string, never>, TestRequest> {
+  protected override readonly requestOrder = ['transactions', 'logs']
+
+  getType() {
+    return 'test'
+  }
+
+  addFields() {
+    return this
+  }
+
+  build(): never {
+    throw new Error('not used')
+  }
+}
+
+describe('QueryBuilder.mergeDataRequests', () => {
+  const builder = new TestQueryBuilder()
+  const merge = (...requests: TestRequest[]) => builder.mergeDataRequests(...requests)
+
+  it('concatenates every list in request order, whatever its key', () => {
+    expect(merge({ logs: [1] }, { logs: [2], someNewFamily: [3] })).toStrictEqual({ logs: [1, 2], someNewFamily: [3] })
+  })
+
+  it('leaves out lists that are empty in every request', () => {
+    expect(merge({ logs: [] }, { traces: [1] })).toStrictEqual({ traces: [1] })
+  })
+
+  it('sets includeAllBlocks when any request sets it', () => {
+    expect(merge({ includeAllBlocks: false }, { includeAllBlocks: true })).toStrictEqual({ includeAllBlocks: true })
+  })
+
+  it('leaves out includeAllBlocks when no request sets it', () => {
+    expect(merge({ includeAllBlocks: false }, { logs: [1] })).toStrictEqual({ logs: [1] })
+  })
+})
+
+describe('QueryBuilder.mergeDataRequests key order', () => {
+  it('writes the listed families in request order, then other families, then flags', () => {
+    const builder = new TestQueryBuilder()
+    const merged = builder.mergeDataRequests(
+      { includeAllBlocks: true, someNewFamily: [3] },
+      { logs: [1] },
+      { transactions: [2] },
+    )
+
+    expect(Object.keys(merged)).toEqual(['transactions', 'logs', 'someNewFamily', 'includeAllBlocks'])
+  })
+
+  // The query's JSON is the portal-cache key, so a merged request must list its families the way
+  // the per-chain merges always did, whatever order the requests were added in.
+  it.each<[string, QueryBuilder<any>, string[]]>([
+    ['evm', new EvmQueryBuilder(), ['transactions', 'logs', 'traces', 'stateDiffs']],
+    [
+      'solana',
+      new SolanaQueryBuilder(),
+      ['transactions', 'logs', 'balances', 'tokenBalances', 'rewards', 'instructions'],
+    ],
+    ['bitcoin', new BitcoinQueryBuilder(), ['transactions', 'inputs', 'outputs']],
+    [
+      'tron',
+      new TronQueryBuilder(),
+      [
+        'transactions',
+        'transferTransactions',
+        'transferAssetTransactions',
+        'triggerSmartContractTransactions',
+        'logs',
+        'internalTransactions',
+      ],
+    ],
+    ['hyperliquid fills', new HyperliquidFillsQueryBuilder(), ['fills']],
+  ])('%s lists its families in their wire order', (_, builder, families) => {
+    const requests = [{ includeAllBlocks: true }, ...[...families].reverse().map((family) => ({ [family]: [{}] }))]
+
+    expect(Object.keys(builder.mergeDataRequests(...requests))).toEqual([...families, 'includeAllBlocks'])
+  })
+})
+
+describe('QueryBuilder.includeAllBlocks', () => {
+  it('includeAllBlocks starts at block 0 without a range', () => {
+    const builder = new TestQueryBuilder().includeAllBlocks()
+
+    expect(builder.getRequests()).toEqual([{ range: { from: 0 }, request: { includeAllBlocks: true } }])
   })
 })

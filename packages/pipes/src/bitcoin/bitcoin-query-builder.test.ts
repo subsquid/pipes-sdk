@@ -87,25 +87,6 @@ describe('BitcoinQueryBuilder', () => {
     })
   })
 
-  describe('mergeDataRequests', () => {
-    it('concatenates transaction/input/output lists and propagates includeAllBlocks', () => {
-      const builder = new BitcoinQueryBuilder()
-
-      const merged = builder.mergeDataRequests(
-        { transactions: [{ inputs: true }], includeAllBlocks: false },
-        { inputs: [{ prevoutGenerated: true }], includeAllBlocks: true },
-        { outputs: [{ scriptPubKeyType: ['pubkey'] }] },
-      )
-
-      expect(merged).toEqual({
-        transactions: [{ inputs: true }],
-        inputs: [{ prevoutGenerated: true }],
-        outputs: [{ scriptPubKeyType: ['pubkey'] }],
-        includeAllBlocks: true,
-      })
-    })
-  })
-
   describe('includeAllBlocks', () => {
     it('adds an includeAllBlocks request', () => {
       const builder = new BitcoinQueryBuilder().includeAllBlocks({ from: 10, to: 20 })

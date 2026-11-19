@@ -697,6 +697,11 @@ recommended entry point for a single portal.
 `PortalClient` implements, because a pipe's source may be an RPC or fallback client. Narrow with
 `instanceof PortalClient` where portal-specific options are needed.
 
+### 12. `includeAllBlocks()` on the EVM query builder
+
+`evmQuery().includeAllBlocks(range?)` asks the Portal for every block in the range, including blocks
+that no request matches.
+
 ---
 
 ## Fixes
