@@ -10,6 +10,10 @@ describe('parsePortalRange', () => {
     expect(parsePortalRange({ from: '2024-01-01' })).toEqual({ from: new Date('2024-01-01T00:00:00Z'), to: undefined })
   })
 
+  it('reads a relative end from block 0', () => {
+    expect(parsePortalRange({ from: 0, to: '+500' })).toEqual({ from: 0, to: 500 })
+  })
+
   it('keeps an end of block 0 as a bound', () => {
     expect(parsePortalRange({ from: 0, to: 0 })).toEqual({ from: 0, to: 0 })
   })
@@ -24,6 +28,10 @@ describe('parsePortalRange', () => {
     ['an unparseable end', { from: 1, to: 'latest' }],
     ['an impossible date', { from: '2024-13-45' }],
     ['an invalid Date object', { from: new Date('garbage') }],
+    // A relative end needs a numeric start; before, '+500' was silently read as absolute block 500.
+    ['a relative end after a date start', { from: '2024-01-01', to: '+500' }],
+    ['a relative end after a Date start', { from: new Date('2024-01-01T00:00:00Z'), to: '+500' }],
+    ['a relative end after latest', { from: 'latest', to: '+500' }],
   ])('refuses %s with a coded range error', (_, range) => {
     expect(() => parsePortalRange(range)).toThrow(BlockRangeConfigurationError)
   })

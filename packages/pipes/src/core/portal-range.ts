@@ -31,7 +31,15 @@ function numberFromString(block: string) {
 function parseBlock(block: string | number, offset?: number) {
   if (typeof block === 'number') return parseFormattedBlock(block)
 
-  if (block.startsWith('+') && offset) {
+  if (block.startsWith('+')) {
+    // Without a numeric start there is nothing to add to, and falling through would read
+    // '+500' as the absolute block 500.
+    if (offset === undefined) {
+      throw new BlockRangeConfigurationError(
+        `Can't resolve the relative end "${block}": a "+N" end needs a block number as 'from'.`,
+      )
+    }
+
     return offset + parseFormattedBlock(block.substring(1))
   }
 
