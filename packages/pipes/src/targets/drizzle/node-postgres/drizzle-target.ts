@@ -5,14 +5,13 @@ import { PgTransaction } from 'drizzle-orm/pg-core'
 import type { PgTransactionConfig } from 'drizzle-orm/pg-core/session'
 
 import { BlockCursor, HookContext, createTarget } from '~/core/index.js'
-import { nonNullable } from '~/internal/array.js'
 import { doWithRetry } from '~/internal/function.js'
 
 import { DrizzleTracker } from './drizzle-tracker.js'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
 import { PostgresState, StateOptions } from './postgres-state.js'
 import { isTransientPgError } from './retry.js'
-import { orderTablesForDelete } from './rollback.js'
+import { asSetupRefusal, orderTablesForDelete } from './rollback.js'
 
 export type Transaction = PgTransaction<NodePgQueryResultHKT, any, any>
 
@@ -92,30 +91,39 @@ export function drizzleTarget<T>({
 
       await onStart?.({ db })
 
-      const triggers = sortedTables.map((table) => tracker.add(table)).filter(nonNullable)
+      for (const table of sortedTables) {
+        tracker.add(table)
+      }
+
+      const setup = tracker.setupSQL(cursor?.finalized?.number)
 
       // A snapshot table rebuild must see the rows that writers committed after this transaction began.
       const triggerSetupConfig: PgTransactionConfig = { ...config, isolationLevel: 'read committed' }
 
-      logger.debug(`Configuring PG triggers for ${triggers.length} tables...`)
-      if (triggers.length) {
-        await doWithRetry(
-          () =>
-            db.transaction(async (tx) => {
-              // Acquire an advisory lock to prevent concurrent trigger modifications
-              await tx.execute(`SELECT pg_advisory_xact_lock(hashtext('sqd_drizzle_triggers')::bigint);`)
-              // Execute all trigger creation statements
-              await Promise.all(triggers.map(async (trigger) => tx.execute(trigger)))
-              // Lock is released automatically at the end of the transaction
-            }, triggerSetupConfig),
-          {
-            title: 'postgres triggers configuration',
-            retries: 3,
-            delayMs: 100,
-            shouldRetry: isTransientPgError,
-            logger,
-          },
-        )
+      const configureTriggers = async () => {
+        try {
+          await db.transaction(async (tx) => {
+            // One set-up at a time: the lock stays until the transaction ends.
+            await tx.execute(`SELECT pg_advisory_xact_lock(hashtext('sqd_drizzle_triggers')::bigint);`)
+
+            for (const statement of setup) {
+              await tx.execute(statement)
+            }
+          }, triggerSetupConfig)
+        } catch (error) {
+          throw asSetupRefusal(error) ?? error
+        }
+      }
+
+      logger.debug(`Configuring PG triggers for ${sortedTables.length} tables...`)
+      if (setup.length) {
+        await doWithRetry(configureTriggers, {
+          title: 'postgres triggers configuration',
+          retries: 3,
+          delayMs: 100,
+          shouldRetry: isTransientPgError,
+          logger,
+        })
       }
       logger.debug(`PG triggers configured`)
 

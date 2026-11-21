@@ -29,6 +29,7 @@ describe('labelOf', () => {
     ['update sync SET id = $1', 'update sync'],
     ['SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS got_lock;', 'lock'],
     ["SELECT pg_advisory_xact_lock(hashtext('sqd_drizzle_triggers')::bigint);", 'lock'],
+    ['LOCK TABLE "transfers" IN ACCESS EXCLUSIVE MODE;', 'lock'],
     ['\n-- ===== SNAPSHOT SETUP =====\nCREATE TABLE IF NOT EXISTS "t__snapshots" ()', 'create'],
     ['\n   SET LOCAL sqd.snapshot_enabled = false;', 'set'],
     ['SELECT * FROM "public"."sync"', 'select'],

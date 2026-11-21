@@ -225,9 +225,10 @@ describe('Postgres (class T) · S1 backfill · killed at each commit step (CT-2)
     const model = scenario.oracle()
 
     const { store, batches, killed } = await crashAt({ scenario, simulator, database, model, point: POINTS.recovery })
-    const ddl = killed.transaction.slice(2)
+    const ddl = killed.transaction.slice(3)
 
-    expect(killed.transaction.slice(0, 2)).toEqual(['begin', 'lock'])
+    // The set-up takes its advisory lock, then the lock on the tracked tables.
+    expect(killed.transaction.slice(0, 3)).toEqual(['begin', 'lock', 'lock'])
     expect(ddl.length).toBeGreaterThan(0)
     // Each trigger set-up script starts with the DO block that checks the snapshot table.
     expect(ddl.filter((label) => label === 'do')).toEqual(ddl)

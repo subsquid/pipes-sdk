@@ -422,6 +422,41 @@ The target cannot interpret a stored cursor. Recovery stops before changing data
 Restore a valid checkpoint together with its corresponding data, or use a fresh
 state and destination for a deliberate reindex.
 
+### E2109 · Snapshot table has a different primary key
+
+The `<table>__snapshots` table of a tracked table has a different set of primary key columns than the
+tracked table needs, and it holds undo data for unfinalized blocks. The target rebuilds such a table
+only when it holds no undo data, because a rebuild deletes that data. The pipe stops at its start and
+changes nothing.
+
+**Fix** — restore the previous primary key of the tracked table. As an alternative, delete all rows of
+the snapshot table and start the pipe again. After the delete, a fork cannot undo the writes of the
+unfinalized blocks.
+
+### E2110 · Before-image has no value for a NOT NULL column
+
+A before-image in the `<table>__snapshots` table holds `NULL` in a column that is `NOT NULL` in the
+tracked table, so a rollback cannot restore that row. This occurs when a column gets `NOT NULL`
+while the undo data of unfinalized blocks has no value for it: a new `NOT NULL` column on a table with
+a deleted row, or `NOT NULL` set on a column that held `NULL`. The pipe stops at its start and changes
+nothing.
+
+**Fix** — remove `NOT NULL` from the columns that the message names, in the database and in the
+Drizzle schema, and start the pipe. Set `NOT NULL` again when the block that the message names is
+final.
+
+### E2111 · Column change is ambiguous
+
+The tracked table has a new column, and the `<table>__snapshots` table holds undo data in a column
+that the tracked table no longer has. The target cannot tell a renamed column from a removed column
+and a new column, and each needs a different change of the snapshot table. The pipe stops at its start
+and changes nothing.
+
+**Fix** — if you renamed the column, rename it in the snapshot table too:
+`ALTER TABLE "<table>__snapshots" RENAME COLUMN "<old>" TO "<new>"`. If you removed the column, drop
+it from the snapshot table: `ALTER TABLE "<table>__snapshots" DROP COLUMN "<old>"`. Then start the pipe
+again.
+
 ## BigQuery target
 
 ### E2201 · Cannot determine GCP project id
