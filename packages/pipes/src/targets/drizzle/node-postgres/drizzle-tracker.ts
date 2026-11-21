@@ -11,7 +11,9 @@ import {
   buildSnapshotPlan,
   generateForkDeleteSQL,
   generateForkRestoreSQL,
+  generateTrackedLockSQL,
   generateTriggerSQL,
+  snapshotTable,
 } from './rollback.js'
 
 /** @internal */
@@ -29,16 +31,25 @@ export class DrizzleTracker {
       return
     }
 
-    const plan = buildSnapshotPlan(table, this.#resolveColumnName)
+    this.#plans.set(table, buildSnapshotPlan(table, this.#resolveColumnName))
+  }
 
-    this.#plans.set(table, plan)
+  /**
+   * The statements of the trigger set-up, in the order to run them. Build them on each start: the
+   * checks in them read the stored schema, and they depend on the finalized block of that start.
+   */
+  setupSQL(finalizedBlock: number | undefined): string[] {
+    const plans = [...this.#plans.values()]
+    if (!plans.length) {
+      return []
+    }
 
-    return generateTriggerSQL(plan)
+    return [generateTrackedLockSQL(plans), ...plans.map((plan) => generateTriggerSQL(plan, finalizedBlock))]
   }
 
   async cleanup(tx: Transaction, blockNumber: number) {
     const statements = [...this.#plans.values()].map(
-      (plan) => `DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" <= ${blockNumber};`,
+      (plan) => `DELETE FROM ${snapshotTable(plan)} WHERE "${SNAPSHOT_BLOCK_COLUMN}" <= ${blockNumber};`,
     )
     if (!statements.length) return
 
@@ -57,7 +68,7 @@ export class DrizzleTracker {
       .map((plan) => generateForkRestoreSQL(plan, cursor.number))
     // Drop the consumed snapshots; those at or below the cursor stay for a later deeper rollback.
     const dropSnapshots = plans.map(
-      (plan) => `DELETE FROM "${plan.snapshotName}" WHERE "${SNAPSHOT_BLOCK_COLUMN}" > ${cursor.number};`,
+      (plan) => `DELETE FROM ${snapshotTable(plan)} WHERE "${SNAPSHOT_BLOCK_COLUMN}" > ${cursor.number};`,
     )
 
     // No bind parameters, so the driver sends the whole script in one round trip.

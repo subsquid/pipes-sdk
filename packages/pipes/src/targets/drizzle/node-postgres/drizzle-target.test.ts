@@ -1,12 +1,24 @@
 import { eq, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { integer, jsonb, numeric, pgTable, timestamp, varchar } from 'drizzle-orm/pg-core'
-import { Pool, QueryResultRow } from 'pg'
+import {
+  type AnyPgColumn,
+  type PgTableWithColumns,
+  integer,
+  jsonb,
+  numeric,
+  pgSchema,
+  pgTable,
+  primaryKey,
+  serial,
+  timestamp,
+  varchar,
+} from 'drizzle-orm/pg-core'
+import { Pool, PoolClient, QueryResultRow } from 'pg'
 import { MockInstance, afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { defaultLogger } from '~/core/logger.js'
 import { evmPortalStream } from '~/evm/index.js'
-import { MockPortal, MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
+import { MockChainPortal, MockPortal, MockResponse, blockDecoder, mockPortal } from '~/testing/index.js'
 import { withPortal } from '~/testing/portal-fixture.js'
 
 import { drizzleTarget } from './index.js'
@@ -1500,6 +1512,693 @@ describe('Drizzle target', () => {
 
       expect(restored?.id).toEqual(1)
       expect(restored?.amount).toEqual(10)
+    })
+  })
+
+  // The snapshot table stays when the tracked schema changes.
+  describe('snapshot table after a tracked schema change', () => {
+    const itemsBefore = pgTable('items', {
+      itemId: integer('item_id').primaryKey(),
+      a: integer('a').notNull(),
+    })
+
+    const itemsAfter = pgTable('items', {
+      itemId: integer('item_id').primaryKey(),
+      a: integer('a').notNull(),
+      b: integer('b'),
+    })
+
+    const itemsWithRequired = pgTable('items', {
+      itemId: integer('item_id').primaryKey(),
+      a: integer('a').notNull(),
+      b: integer('b').notNull().default(0),
+    })
+
+    type Item = typeof itemsAfter.$inferSelect
+    type ItemsTable = PgTableWithColumns<any> & { itemId: AnyPgColumn }
+
+    // An older SDK version named the snapshot columns by the Drizzle property keys. Its trigger
+    // then failed on each write, so such a table is always empty.
+    const legacySnapshotTable = `
+      CREATE TABLE items__snapshots (
+        "itemId" integer,
+        a integer,
+        "___sqd__operation" TEXT NOT NULL,
+        "___sqd__block_number" BIGINT NOT NULL,
+        PRIMARY KEY ("___sqd__block_number", "itemId")
+      );
+    `
+
+    const keyRefusal = { code: 'E2109' }
+    const missingValueRefusal = { code: 'E2110' }
+
+    const test = withPortal.extend<{ snapshotWriter: PoolClient; appSchema: string }>({
+      snapshotWriter: async ({}, use) => {
+        const client = await pool.connect()
+        await use(client)
+        await client.query('ROLLBACK')
+        client.release()
+      },
+      // "public" keeps a table with the same name, so a bare name resolves to the wrong table.
+      appSchema: async ({}, use) => {
+        await execute(`
+          DROP SCHEMA IF EXISTS "app" CASCADE;
+          CREATE SCHEMA "app";
+          CREATE TABLE "app".items (
+            item_id integer PRIMARY KEY,
+            a integer NOT NULL
+          );
+        `)
+        await use('app')
+        await execute(`DROP SCHEMA "app" CASCADE`)
+      },
+    })
+
+    beforeEach(async () => {
+      await execute(`
+        DROP SCHEMA IF EXISTS "public" CASCADE;
+        CREATE SCHEMA IF NOT EXISTS "public";
+        CREATE TABLE items (
+          item_id integer PRIMARY KEY,
+          a integer NOT NULL
+        );
+      `)
+    })
+
+    async function lockWaitsOn(table: string): Promise<number> {
+      const res = await execute<{ waits: number }>(
+        `SELECT count(*)::int AS waits FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = $1 AND NOT l.granted`,
+        [table],
+      )
+
+      return res.rows[0].waits
+    }
+
+    async function readItem(): Promise<Item | undefined> {
+      const res = await execute<Item>(`SELECT item_id AS "itemId", a, b FROM items WHERE item_id = 1`)
+
+      return res.rows[0]
+    }
+
+    async function snapshotColumns(): Promise<string[]> {
+      const res = await execute<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'items__snapshots' ORDER BY ordinal_position`,
+      )
+
+      return res.rows.map((row) => row.column_name)
+    }
+
+    function startTarget(url: string, tables: Parameters<typeof drizzleTarget>[0]['tables'], to = 2) {
+      return evmPortalStream({
+        id: 'test',
+        portal: url,
+        outputs: blockDecoder({ from: 0, to }),
+      }).pipeTo(drizzleTarget({ db, tables, onData: async () => {} }))
+    }
+
+    /** Block 1 inserts the item at the finalized head, and block 2 changes it above that head. */
+    async function writeBeforeFork(
+      url: string,
+      table: ItemsTable = itemsBefore,
+      change: 'update' | 'delete' = 'update',
+    ) {
+      await evmPortalStream({
+        id: 'test',
+        portal: url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [table],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 1) {
+                await tx.insert(table).values({ itemId: 1, a: 10 })
+              } else if (b.number === 2 && change === 'update') {
+                await tx.update(table).set({ a: 20 }).where(eq(table.itemId, 1))
+              } else if (b.number === 2) {
+                await tx.delete(table).where(eq(table.itemId, 1))
+              }
+            }
+          },
+        }),
+      )
+    }
+
+    /** Forks block 2 off, runs the target to block 3, and returns the item as the rollback left it. */
+    async function itemAfterRollback(chain: MockChainPortal, table: ItemsTable) {
+      chain.fork(1)
+      chain.setHead({ latest: 3 })
+
+      let rolledBack: Record<string, unknown> | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [table],
+          onData: async () => {},
+          onAfterRollback: async ({ tx }) => {
+            const [row] = await tx.select().from(table).where(eq(table.itemId, 1))
+            rolledBack = row
+          },
+        }),
+      )
+
+      return rolledBack
+    }
+
+    withPortal('keeps the undo log working after a column is added', async ({ portal: serve }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url)
+
+      await execute(`ALTER TABLE items ADD COLUMN b integer`)
+      chain.fork(1)
+      chain.setHead({ latest: 3 })
+
+      let rolledBack: Item | undefined
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 3 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [itemsAfter],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              await tx
+                .update(itemsAfter)
+                .set({ a: b.number * 10, b: b.number })
+                .where(eq(itemsAfter.itemId, 1))
+            }
+          },
+          onAfterRollback: async ({ tx, cursor }) => {
+            const [row] = await tx.select().from(itemsAfter).where(eq(itemsAfter.itemId, 1))
+            rolledBack = row
+          },
+        }),
+      )
+
+      // The before-image predates column "b", so the restore writes NULL into it.
+      expect(rolledBack).toEqual({ itemId: 1, a: 10, b: null })
+      expect(await readItem()).toEqual({ itemId: 1, a: 30, b: 3 })
+    })
+
+    withPortal('restores the value that the migration gave a new column', async ({ portal: serve }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url)
+      await execute(`ALTER TABLE items ADD COLUMN b integer DEFAULT 7`)
+
+      expect(await itemAfterRollback(chain, itemsAfter)).toEqual({ itemId: 1, a: 10, b: 7 })
+    })
+
+    withPortal('rebuilds an empty snapshot table with a different primary key', async ({ portal: serve }) => {
+      await execute(legacySnapshotTable)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url)
+
+      expect(await itemAfterRollback(chain, itemsBefore)).toEqual({ itemId: 1, a: 10 })
+    })
+
+    withPortal('refuses to rebuild a snapshot table that holds undo data', async ({ portal: serve }) => {
+      await execute(legacySnapshotTable)
+      await execute(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2)`)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await expect(writeBeforeFork(chain.url)).rejects.toThrowErrorMatchingInlineSnapshot(`
+        [TargetConfiguration: Snapshot table items__snapshots has the primary key {itemId,___sqd__block_number}, but the tracked table needs {___sqd__block_number,item_id}. The snapshot table holds undo data for unfinalized blocks, and a rebuild deletes this data. Restore the previous primary key of the tracked table. As an alternative, delete all rows of the snapshot table: a fork then cannot undo the writes of these blocks.
+
+        See: https://docs.sqd.dev/en/sdk/pipes-sdk/errors/E2109]
+      `)
+
+      const snapshots = await execute(`SELECT * FROM items__snapshots`)
+      expect(snapshots.rowCount).toBe(1)
+    })
+
+    withPortal('counts only the undo data above the finalized block', async ({ portal: serve }) => {
+      const chain = await serve({ latest: 2, finalized: 2, blocksPerResponse: 1 })
+
+      await startTarget(chain.url, [itemsBefore])
+      await execute(`DROP TABLE items__snapshots`)
+      await execute(legacySnapshotTable)
+      await execute(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 3)`)
+
+      await expect(startTarget(chain.url, [itemsBefore])).rejects.toMatchObject(keyRefusal)
+
+      // No fork goes below the finalized block 2, so this row is not undo data.
+      await execute(`UPDATE items__snapshots SET "___sqd__block_number" = 2`)
+      await startTarget(chain.url, [itemsBefore])
+
+      expect(await snapshotColumns()).toEqual(['item_id', 'a', '___sqd__operation', '___sqd__block_number'])
+    })
+
+    // The target keeps its tracker between runs, so each run must build the set-up script again.
+    withPortal('repeats the refusal when the same target runs again', async ({ portal: serve }) => {
+      await execute(legacySnapshotTable)
+      await execute(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2)`)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+      const target = drizzleTarget({ db, tables: [itemsBefore], onData: async () => {} })
+      const run = () =>
+        evmPortalStream({
+          id: 'test',
+          portal: chain.url,
+          outputs: blockDecoder({ from: 0, to: 2 }),
+        }).pipeTo(target)
+
+      await expect(run()).rejects.toMatchObject(keyRefusal)
+      await expect(run()).rejects.toMatchObject(keyRefusal)
+    })
+
+    test('refuses a rebuild when a writer commits undo data while the setup waits', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      await execute(legacySnapshotTable)
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 2)`)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+      const refused = expect(writeBeforeFork(chain.url)).rejects.toMatchObject(keyRefusal)
+
+      // The setup waits for the writer's lock, and the writer commits only then.
+      await vi.waitFor(async () => expect(await lockWaitsOn('items__snapshots')).toBeGreaterThan(0))
+      await snapshotWriter.query('COMMIT')
+
+      await refused
+
+      const snapshots = await execute(`SELECT * FROM items__snapshots`)
+      expect(snapshots.rowCount).toBe(1)
+    })
+
+    withPortal('gives a new serial column the value of the tracked row', async ({ portal: serve }) => {
+      const itemsWithSerial = pgTable('items', {
+        itemId: integer('item_id').primaryKey(),
+        a: integer('a').notNull(),
+        seq: serial('seq'),
+      })
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url)
+      await execute(`ALTER TABLE items ADD COLUMN seq serial`)
+      await startTarget(chain.url, [itemsWithSerial])
+
+      const snapshots = await execute(
+        `SELECT "___sqd__operation" AS operation, seq FROM items__snapshots ORDER BY "___sqd__block_number"`,
+      )
+
+      // A rollback deletes the row of the 'INSERT' snapshot, so that snapshot gets no value.
+      expect(snapshots.rows).toEqual([
+        { operation: 'INSERT', seq: null },
+        { operation: 'UPDATE', seq: 1 },
+      ])
+    })
+
+    withPortal('refuses a new NOT NULL column when a deleted row has no value for it', async ({ portal: serve }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url, itemsBefore, 'delete')
+      await execute(`ALTER TABLE items ADD COLUMN b integer NOT NULL DEFAULT 0`)
+
+      await expect(startTarget(chain.url, [itemsWithRequired])).rejects.toThrowErrorMatchingInlineSnapshot(`
+        [TargetConfiguration: Snapshot table items__snapshots holds before-images with no value for the NOT NULL columns {b}, up to block 2. A rollback cannot restore these rows. Remove NOT NULL from these columns, and set it again when block 2 is final.
+
+        See: https://docs.sqd.dev/en/sdk/pipes-sdk/errors/E2110]
+      `)
+    })
+
+    // This is the path that the E2110 message gives: add the column as nullable, set NOT NULL later.
+    withPortal(
+      'refuses NOT NULL on a column until the before-images without a value are final',
+      async ({ portal: serve }) => {
+        const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+        await writeBeforeFork(chain.url)
+        await execute(`ALTER TABLE items ADD COLUMN b integer`)
+        await startTarget(chain.url, [itemsAfter])
+
+        await execute(`UPDATE items SET b = 0; ALTER TABLE items ALTER COLUMN b SET NOT NULL;`)
+
+        await expect(startTarget(chain.url, [itemsWithRequired])).rejects.toMatchObject(missingValueRefusal)
+
+        await execute(`ALTER TABLE items ALTER COLUMN b DROP NOT NULL`)
+        chain.setHead({ latest: 3, finalized: 3 })
+        await startTarget(chain.url, [itemsAfter], 3)
+
+        await execute(`ALTER TABLE items ALTER COLUMN b SET NOT NULL`)
+        await startTarget(chain.url, [itemsWithRequired], 3)
+      },
+    )
+
+    // The database accepts NULL in this column, so a rollback can restore the row.
+    withPortal(
+      'accepts a before-image without a value when only the Drizzle schema has NOT NULL',
+      async ({ portal: serve }) => {
+        const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+        await writeBeforeFork(chain.url)
+        await execute(`ALTER TABLE items ADD COLUMN b integer`)
+
+        await startTarget(chain.url, [itemsWithRequired])
+      },
+    )
+
+    withPortal('refuses a new column that can be a renamed column', async ({ portal: serve }) => {
+      const itemsRenamed = pgTable('items', {
+        itemId: integer('item_id').primaryKey(),
+        amount: integer('amount').notNull(),
+      })
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url)
+      await execute(`ALTER TABLE items RENAME COLUMN a TO amount`)
+
+      await expect(startTarget(chain.url, [itemsRenamed])).rejects.toThrowErrorMatchingInlineSnapshot(`
+        [TargetConfiguration: Snapshot table items__snapshots holds undo data in the columns {a}, which the tracked table no longer has, and the tracked table has the new columns {amount}. The target cannot tell a renamed column from a removed column. If you renamed a column, rename it in the snapshot table too. If you removed a column, drop it from the snapshot table.
+
+        See: https://docs.sqd.dev/en/sdk/pipes-sdk/errors/E2111]
+      `)
+
+      await execute(`ALTER TABLE items__snapshots RENAME COLUMN a TO amount`)
+
+      expect(await itemAfterRollback(chain, itemsRenamed)).toEqual({ itemId: 1, amount: 10 })
+    })
+
+    withPortal('adds a column when a removed column holds no undo data', async ({ portal: serve }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await startTarget(chain.url, [itemsBefore])
+      await execute(`
+        ALTER TABLE items__snapshots ADD COLUMN removed integer;
+        INSERT INTO items__snapshots (item_id, a, removed, "___sqd__operation", "___sqd__block_number")
+        VALUES (1, 10, 5, 'UPDATE', 1), (1, 20, NULL, 'UPDATE', 2);
+        ALTER TABLE items ADD COLUMN b integer;
+      `)
+
+      await startTarget(chain.url, [itemsAfter])
+
+      expect(await snapshotColumns()).toContain('b')
+    })
+
+    withPortal(
+      'does not take a column that the tracked table keeps for a renamed column',
+      async ({ portal: serve }) => {
+        const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+        await startTarget(chain.url, [itemsBefore])
+        await execute(`
+        ALTER TABLE items ADD COLUMN kept integer, ADD COLUMN b integer;
+        ALTER TABLE items__snapshots ADD COLUMN kept integer;
+        INSERT INTO items__snapshots (item_id, a, kept, "___sqd__operation", "___sqd__block_number")
+        VALUES (1, 10, 5, 'UPDATE', 2);
+      `)
+
+        await startTarget(chain.url, [itemsAfter])
+
+        expect(await snapshotColumns()).toContain('b')
+      },
+    )
+
+    // Postgres cuts a name at 63 bytes, so the catalog holds a shorter name than the schema gives.
+    withPortal('restarts a table that has names longer than 63 bytes', async ({ portal: serve }) => {
+      const longKey = `k${'x'.repeat(69)}`
+      const longValue = `v${'x'.repeat(69)}`
+      const wide = pgTable('wide', {
+        id: integer(longKey).primaryKey(),
+        value: integer(longValue).notNull(),
+      })
+
+      await execute(`CREATE TABLE wide ("${longKey}" integer PRIMARY KEY, "${longValue}" integer NOT NULL)`)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+      const run = () =>
+        evmPortalStream({
+          id: 'test',
+          portal: chain.url,
+          outputs: blockDecoder({ from: 0, to: 2 }),
+        }).pipeTo(
+          drizzleTarget({
+            db,
+            tables: [wide],
+            onData: async ({ tx, data }) => {
+              for (const b of data) {
+                if (b.number === 1) {
+                  await tx.insert(wide).values({ id: 1, value: 10 })
+                } else if (b.number === 2) {
+                  await tx.update(wide).set({ value: 20 }).where(eq(wide.id, 1))
+                }
+              }
+            },
+          }),
+        )
+
+      await run()
+      await run()
+
+      const snapshots = await execute(`SELECT * FROM wide__snapshots`)
+      expect(snapshots.rowCount).toBe(2)
+    })
+
+    test('keeps each name of a pgSchema table in that schema', async ({ portal: serve, appSchema }) => {
+      const appItems = pgSchema(appSchema).table('items', {
+        itemId: integer('item_id').primaryKey(),
+        a: integer('a').notNull(),
+      })
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url, appItems)
+
+      expect(await itemAfterRollback(chain, appItems)).toEqual({ itemId: 1, a: 10 })
+
+      const inPublic = await execute(`
+        SELECT
+          to_regclass('public.items__snapshots') AS snapshot_table,
+          (SELECT count(*)::int FROM pg_trigger WHERE tgrelid = 'public.items'::regclass AND NOT tgisinternal) AS triggers,
+          (SELECT count(*)::int FROM public.items) AS rows
+      `)
+      expect(inPublic.rows).toEqual([{ snapshot_table: null, triggers: 0, rows: 0 }])
+    })
+
+    withPortal('adds a NOT NULL column when the table holds only inserted keys', async ({ portal: serve }) => {
+      await execute(`
+        CREATE TABLE items__snapshots (
+          item_id integer,
+          a integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", item_id)
+        );
+        INSERT INTO items__snapshots VALUES (1, 10, 'INSERT', 5);
+        ALTER TABLE items ADD COLUMN b integer NOT NULL DEFAULT 0;
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(drizzleTarget({ db, tables: [itemsWithRequired], onData: async () => {} }))
+
+      const snapshots = await execute(`SELECT item_id, b FROM items__snapshots`)
+      expect(snapshots.rows).toEqual([{ item_id: 1, b: null }])
+    })
+
+    test('refuses a NOT NULL column when a writer commits a before-image while the setup waits', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(drizzleTarget({ db, tables: [itemsBefore], onData: async () => {} }))
+
+      await execute(`ALTER TABLE items ADD COLUMN b integer NOT NULL DEFAULT 0`)
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 5)`)
+
+      const refused = expect(
+        evmPortalStream({
+          id: 'test',
+          portal: chain.url,
+          outputs: blockDecoder({ from: 0, to: 2 }),
+        }).pipeTo(drizzleTarget({ db, tables: [itemsWithRequired], onData: async () => {} })),
+      ).rejects.toMatchObject(missingValueRefusal)
+
+      await vi.waitFor(async () => expect(await lockWaitsOn('items__snapshots')).toBeGreaterThan(0))
+      await snapshotWriter.query('COMMIT')
+
+      await refused
+    })
+
+    // A lock on the snapshot table waits for the writer, and the test times out.
+    test('takes no lock on the snapshot table on a restart with no schema change', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await startTarget(chain.url, [itemsBefore])
+
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 99)`)
+
+      await startTarget(chain.url, [itemsBefore])
+    })
+
+    test('locks the tracked table before the snapshot table, as a writer does', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await startTarget(chain.url, [itemsBefore])
+      await execute(`ALTER TABLE items ADD COLUMN b integer`)
+
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`UPDATE items SET a = a`)
+
+      const setup = startTarget(chain.url, [itemsAfter])
+      await vi.waitFor(async () => expect(await lockWaitsOn('items')).toBeGreaterThan(0))
+
+      // If the setup holds the snapshot table, this write deadlocks, and the short timeout makes the writer the victim.
+      await snapshotWriter.query(`SET LOCAL deadlock_timeout = '10ms'`)
+      await snapshotWriter.query(`INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 99)`)
+      await snapshotWriter.query('COMMIT')
+
+      await setup
+
+      const columns = await execute(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'items__snapshots' AND column_name = 'b'`,
+      )
+      expect(columns.rowCount).toBe(1)
+    })
+
+    test('takes no snapshot lock while it waits for a second tracked table', async ({
+      portal: serve,
+      snapshotWriter,
+    }) => {
+      const other = pgTable('other', { id: integer('id').primaryKey() })
+
+      await execute(`CREATE TABLE other (id integer PRIMARY KEY)`)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      // The target sets up the tables in the reverse order, so "items" comes before "other".
+      await startTarget(chain.url, [other, itemsBefore])
+      await execute(`ALTER TABLE items ADD COLUMN b integer`)
+
+      await snapshotWriter.query('BEGIN')
+      await snapshotWriter.query(`UPDATE other SET id = id`)
+
+      const setup = startTarget(chain.url, [other, itemsAfter])
+      await vi.waitFor(async () => expect(await lockWaitsOn('other')).toBeGreaterThan(0))
+
+      // The batch cleanup deletes from each snapshot table. If the set-up holds one, the writer is the deadlock victim.
+      await snapshotWriter.query(`SET LOCAL deadlock_timeout = '10ms'`)
+      await snapshotWriter.query(`DELETE FROM items__snapshots`)
+      await snapshotWriter.query('COMMIT')
+
+      await setup
+
+      expect(await snapshotColumns()).toContain('b')
+    })
+
+    // The key check must ignore INCLUDE columns: ON CONFLICT accepts such a key.
+    withPortal('keeps a snapshot table whose primary key has INCLUDE columns', async ({ portal: serve }) => {
+      await execute(`
+        CREATE TABLE items__snapshots (
+          item_id integer,
+          a integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", item_id) INCLUDE (a)
+        );
+        INSERT INTO items__snapshots VALUES (1, 10, 'UPDATE', 5);
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      await writeBeforeFork(chain.url)
+
+      const snapshots = await execute(
+        `SELECT item_id, a, "___sqd__block_number" AS block FROM items__snapshots ORDER BY block`,
+      )
+      expect(snapshots.rows).toEqual([
+        { item_id: 1, a: 10, block: '1' },
+        { item_id: 1, a: 10, block: '2' },
+        { item_id: 1, a: 10, block: '5' },
+      ])
+    })
+
+    withPortal('keeps the undo log when the key columns change order', async ({ portal: serve }) => {
+      const pairs = pgTable(
+        'pairs',
+        {
+          x: integer('x').notNull(),
+          y: integer('y').notNull(),
+          v: integer('v'),
+        },
+        (t) => [primaryKey({ columns: [t.x, t.y] })],
+      )
+
+      await execute(`
+        CREATE TABLE pairs (x integer, y integer, v integer, PRIMARY KEY (x, y));
+        CREATE TABLE pairs__snapshots (
+          x integer,
+          y integer,
+          v integer,
+          "___sqd__operation" TEXT NOT NULL,
+          "___sqd__block_number" BIGINT NOT NULL,
+          PRIMARY KEY ("___sqd__block_number", y, x)
+        );
+        INSERT INTO pairs__snapshots VALUES (1, 2, 3, 'UPDATE', 5);
+      `)
+
+      const chain = await serve({ latest: 2, finalized: 1, blocksPerResponse: 1 })
+
+      // The write at block 2 runs the trigger, whose ON CONFLICT names the key in the new order.
+      await evmPortalStream({
+        id: 'test',
+        portal: chain.url,
+        outputs: blockDecoder({ from: 0, to: 2 }),
+      }).pipeTo(
+        drizzleTarget({
+          db,
+          tables: [pairs],
+          onData: async ({ tx, data }) => {
+            for (const b of data) {
+              if (b.number === 2) {
+                await tx.insert(pairs).values({ x: 7, y: 8, v: 9 })
+              }
+            }
+          },
+        }),
+      )
+
+      const snapshots = await execute(
+        `SELECT x, y, "___sqd__block_number" AS block FROM pairs__snapshots ORDER BY block`,
+      )
+      expect(snapshots.rows).toEqual([
+        { x: 7, y: 8, block: '2' },
+        { x: 1, y: 2, block: '5' },
+      ])
     })
   })
 

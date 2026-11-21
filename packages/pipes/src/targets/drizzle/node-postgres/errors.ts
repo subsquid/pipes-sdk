@@ -10,8 +10,8 @@ import { PipeError, SdkErrorName } from '~/core/errors.js'
  * BigQuery, E23xx Parquet, E24xx PubSub).
  */
 export class PostgresTargetError extends PipeError {
-  constructor(code: string, message: string | string[]) {
-    super(code, SdkErrorName.TargetConfiguration, message)
+  constructor(code: string, message: string | string[], options?: ErrorOptions) {
+    super(code, SdkErrorName.TargetConfiguration, message, options)
   }
 }
 
@@ -33,4 +33,10 @@ export const POSTGRES_ERROR_CODES = {
   COLUMN_NAME_UNRESOLVED: 'E2107',
   /** Persisted cursor state cannot be interpreted safely. */
   STATE_CORRUPT: 'E2108',
+  /** The snapshot table has a different primary key and holds undo data, so the target cannot rebuild it. */
+  SNAPSHOT_KEY_MISMATCH: 'E2109',
+  /** A before-image has no value for a `NOT NULL` column, so a rollback cannot restore the row. */
+  SNAPSHOT_VALUE_MISSING: 'E2110',
+  /** A lost column and a new column came together: a rename, or a removal and an addition. */
+  SNAPSHOT_COLUMN_AMBIGUOUS: 'E2111',
 } as const

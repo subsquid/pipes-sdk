@@ -4,6 +4,7 @@ import { Reference } from 'drizzle-orm/pg-core/foreign-keys'
 import { POSTGRES_ERROR_CODES, PostgresTargetError } from './errors.js'
 
 const DRIZZLE_TABLE_NAME = Symbol.for('drizzle:BaseName')
+const DRIZZLE_TABLE_SCHEMA = Symbol.for('drizzle:Schema')
 const IS_DRIZZLE_TABLE = Symbol.for('drizzle:IsDrizzleTable')
 const DRIZZLE_TABLE_COLS = Symbol.for('drizzle:Columns')
 const DRIZZLE_TABLE_EXTRA_BUILDER = Symbol.for('drizzle:ExtraConfigBuilder')
@@ -20,6 +21,11 @@ export function isDrizzleTable(table: unknown) {
 
 export function getDrizzleTableName(table: Table): string {
   return ((table as any)[DRIZZLE_TABLE_NAME] as string) || 'unknown'
+}
+
+/** The schema of a `pgSchema` table. A `pgTable` has none: Postgres resolves it through `search_path`. */
+export function getDrizzleTableSchema(table: Table): string | undefined {
+  return (table as any)[DRIZZLE_TABLE_SCHEMA] as string | undefined
 }
 
 export function getDrizzleTableColumns(table: Table) {
