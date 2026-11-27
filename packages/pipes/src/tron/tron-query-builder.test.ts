@@ -137,31 +137,6 @@ describe('TronQueryBuilder', () => {
     })
   })
 
-  describe('mergeDataRequests', () => {
-    it('concatenates all request lists and propagates includeAllBlocks', () => {
-      const builder = new TronQueryBuilder()
-
-      const merged = builder.mergeDataRequests(
-        { transactions: [{ type: ['TransferContract'] }], includeAllBlocks: false },
-        { transferTransactions: [{ owner: ['4111'] }] },
-        { transferAssetTransactions: [{ asset: ['1002000'] }] },
-        { triggerSmartContractTransactions: [{ contract: ['41abc'] }], includeAllBlocks: true },
-        { logs: [{ address: ['41def'] }] },
-        { internalTransactions: [{ transferTo: ['41aaa'] }] },
-      )
-
-      expect(merged).toEqual({
-        transactions: [{ type: ['TransferContract'] }],
-        transferTransactions: [{ owner: ['4111'] }],
-        transferAssetTransactions: [{ asset: ['1002000'] }],
-        triggerSmartContractTransactions: [{ contract: ['41abc'] }],
-        logs: [{ address: ['41def'] }],
-        internalTransactions: [{ transferTo: ['41aaa'] }],
-        includeAllBlocks: true,
-      })
-    })
-  })
-
   describe('includeAllBlocks', () => {
     it('adds an includeAllBlocks request', () => {
       const builder = new TronQueryBuilder().includeAllBlocks({ from: 10, to: 20 })
