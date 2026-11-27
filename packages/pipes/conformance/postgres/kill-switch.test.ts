@@ -28,6 +28,10 @@ describe('labelOf', () => {
     ['DELETE FROM "ct_1"."sync" WHERE "id" = $1', 'delete sync'],
     ['update sync SET id = $1', 'update sync'],
     ['SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS got_lock;', 'lock'],
+    [
+      "\n  WITH batch AS (\n SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS got_lock, set_config('sqd.snapshot_enabled', 'true', true)",
+      'lock',
+    ],
     ["SELECT pg_advisory_xact_lock(hashtext('sqd_drizzle_triggers')::bigint);", 'lock'],
     ['\n-- ===== SNAPSHOT SETUP =====\nCREATE TABLE IF NOT EXISTS "t__snapshots" ()', 'create'],
     ['\n   SET LOCAL sqd.snapshot_enabled = false;', 'set'],

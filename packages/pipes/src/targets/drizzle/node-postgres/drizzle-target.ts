@@ -125,23 +125,12 @@ export function drizzleTarget<T>({
           await doWithRetry(
             () =>
               db.transaction(async (tx) => {
-                await state.acquireLock(tx)
                 // `!= null`: a finalized head of 0 would otherwise skip the undo log entirely.
                 const finalizedHead = ctx.stream.head.finalized?.number
-                const snapshotEnabled =
-                  finalizedHead != null && ctx.stream.state.current.number >= finalizedHead ? 'true' : 'false'
+                const snapshotEnabled = finalizedHead != null && ctx.stream.state.current.number >= finalizedHead
 
-                /*
-                 * Enable snapshotting for this transaction
-                 *
-                 * We set the block number to the current batch's block number
-                 * so that any changes made during this transaction can be
-                 * rolled back to this point if needed.
-                 */
-                await tx.execute(`
-                  SET LOCAL sqd.snapshot_enabled = ${snapshotEnabled};
-                  SET LOCAL sqd.snapshot_block_number = ${ctx.stream.state.current.number};
-                `)
+                // Tags this transaction's snapshots with the batch's block, for a later rollback to it.
+                await state.beginBatch(tx, ctx, { snapshotEnabled }, target)
 
                 await target.measure('data handler', async (profiler) => {
                   await onData({
@@ -154,7 +143,7 @@ export function drizzleTarget<T>({
                   })
                 })
 
-                const { safeBlockNumber } = await state.saveCursor(tx, ctx, target)
+                const { safeBlockNumber } = await state.cleanupCursors(tx, ctx, target)
                 if (safeBlockNumber > 0) {
                   logger.debug(`Safe block number updated to ${safeBlockNumber}`)
 
